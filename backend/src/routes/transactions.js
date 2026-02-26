@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
+
 const validate = require('../middleware/validate');
 const { protect } = require('../middleware/auth');
 
@@ -10,38 +11,50 @@ const {
   verifyDeposit,
   withdraw,
   getTransactions,
-  getTransaction
+  getTransaction,
 } = require('../controllers/transactionController');
 
-// Public
+// PUBLIC
 router.get('/razorpay-key', getRazorpayKey);
 
-// Protected
+// PROTECTED
 router.use(protect);
 
-// Deposits
-router.post('/deposit/create', [
-  body('accountId').notEmpty().withMessage('Account ID required'),
-  body('amount').isFloat({ min: 100, max: 1000000 }).withMessage('Amount must be ₹100 - ₹10,00,000')
-], validate, createDeposit);
+router.post(
+  '/deposit/create',
+  [
+    body('accountId').notEmpty().withMessage('accountId is required'),
+    body('amount').isFloat({ min: 100, max: 1000000 }).withMessage('amount must be ₹100 - ₹10,00,000'),
+  ],
+  validate,
+  createDeposit
+);
 
-router.post('/deposit/verify', [
-  body('orderId').notEmpty(),
-  body('paymentId').notEmpty(),
-  body('signature').notEmpty()
-], validate, verifyDeposit);
+router.post(
+  '/deposit/verify',
+  [
+    body('orderId').notEmpty(),
+    body('paymentId').notEmpty(),
+    body('signature').notEmpty(),
+  ],
+  validate,
+  verifyDeposit
+);
 
-// Withdrawals
-router.post('/withdraw', [
-  body('accountId').notEmpty(),
-  body('amount').isFloat({ min: 100 }),
-  body('bankName').notEmpty().withMessage('Bank name required'),
-  body('accountNumber').notEmpty().withMessage('Account number required'),
-  body('ifscCode').matches(/^[A-Z]{4}0[A-Z0-9]{6}$/).withMessage('Invalid IFSC code'),
-  body('accountHolderName').notEmpty().withMessage('Account holder name required')
-], validate, withdraw);
+router.post(
+  '/withdraw',
+  [
+    body('accountId').notEmpty(),
+    body('amount').isFloat({ min: 100 }).withMessage('Minimum withdrawal is ₹100'),
+    body('bankName').notEmpty(),
+    body('accountNumber').notEmpty(),
+    body('ifscCode').matches(/^[A-Z]{4}0[A-Z0-9]{6}$/).withMessage('Invalid IFSC'),
+    body('accountHolderName').notEmpty(),
+  ],
+  validate,
+  withdraw
+);
 
-// History
 router.get('/', getTransactions);
 router.get('/:id', getTransaction);
 

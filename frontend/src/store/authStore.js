@@ -24,20 +24,20 @@ const useAuthStore = create((set) => ({
     }
   },
 
-  register: async (userData) => {
-    try {
-      const response = await api.post('/auth/register', userData);
-      const { user, accounts, token } = response.data.data;
+  // register: async (userData) => {
+  //   try {
+  //     const response = await api.post('/auth/register', userData);
+  //     const { user, accounts, token } = response.data.data;
       
-      localStorage.setItem('token', token);
-      socketService.connect(token);
+  //     localStorage.setItem('token', token);
+  //     socketService.connect(token);
       
-      set({ user, accounts, token, isAuthenticated: true, isLoading: false });
-      return { success: true };
-    } catch (error) {
-      return { success: false, message: error.response?.data?.message || 'Registration failed' };
-    }
-  },
+  //     set({ user, accounts, token, isAuthenticated: true, isLoading: false });
+  //     return { success: true };
+  //   } catch (error) {
+  //     return { success: false, message: error.response?.data?.message || 'Registration failed' };
+  //   }
+  // },
 
   logout: () => {
     localStorage.removeItem('token');

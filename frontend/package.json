@@ -12,11 +12,13 @@
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "axios": "^1.13.5",
+    "clsx": "^2.1.1",
     "lightweight-charts": "^4.1.0",
     "lucide-react": "^0.575.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-hot-toast": "^2.6.0",
+    "react-resizable-panels": "^4.6.5",
     "react-router-dom": "^7.13.1",
     "socket.io-client": "^4.8.3",
     "zustand": "^5.0.11"

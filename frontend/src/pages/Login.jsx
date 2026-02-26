@@ -75,8 +75,7 @@ const Login = () => {
         </form>
 
         <p className="mt-4 text-center text-sm" style={{ color: '#787b86' }}>
-          Don't have an account?{' '}
-          <Link to="/register" style={{ color: '#2962ff' }}>Register</Link>
+          New accounts are created by Admin.
         </p>
       </div>
     </div>

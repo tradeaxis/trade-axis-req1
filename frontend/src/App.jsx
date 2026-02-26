@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import useAuthStore from './store/authStore';
 import Login from './pages/Login';
-import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 
 const ProtectedRoute = ({ children }) => {
@@ -11,14 +10,16 @@ const ProtectedRoute = ({ children }) => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-dark-500 flex items-center justify-center">
-        <div className="text-2xl text-green-500 font-bold">Loading Trade Axis...</div>
+      <div className="min-h-screen flex items-center justify-center" style={{ background: '#131722' }}>
+        <div className="text-lg font-semibold" style={{ color: '#2962ff' }}>
+          Loading Trade Axis...
+        </div>
       </div>
     );
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" />;
+    return <Navigate to="/login" replace />;
   }
 
   return children;
@@ -50,10 +51,15 @@ function App() {
           },
         }}
       />
-      
+
       <Routes>
+        {/* Public */}
         <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
+
+        {/* ✅ No public registration route */}
+        <Route path="/register" element={<Navigate to="/login" replace />} />
+
+        {/* Protected */}
         <Route
           path="/dashboard"
           element={
@@ -62,7 +68,12 @@ function App() {
             </ProtectedRoute>
           }
         />
-        <Route path="/" element={<Navigate to="/dashboard" />} />
+
+        {/* Default */}
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </BrowserRouter>
   );

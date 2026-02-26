@@ -1,48 +1,49 @@
+// backend/src/routes/trading.js
 const express = require('express');
 const router = express.Router();
-const { body } = require('express-validator');
-const validate = require('../middleware/validate');
+const tradingController = require('../controllers/tradingController');
 const { protect } = require('../middleware/auth');
 
-const {
-  placeOrder,
-  closeTrade,
-  closeAllTrades,
-  modifyTrade,
-  getOpenTrades,
-  getTradeHistory,
-  getTrade
-} = require('../controllers/tradingController');
-
-// All routes protected
+// All routes require authentication
 router.use(protect);
 
-// @route   POST /api/trading/order
-router.post('/order', [
-  body('accountId').notEmpty().withMessage('Account ID required'),
-  body('symbol').notEmpty().withMessage('Symbol required'),
-  body('type').isIn(['buy', 'sell']).withMessage('Type must be buy or sell'),
-  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1')
-], validate, placeOrder);
+// ============ POSITIONS ============
+// Get open positions
+router.get('/positions/:accountId', tradingController.getPositions);
 
-// @route   POST /api/trading/close/:id
-router.post('/close/:id', closeTrade);
+// Place order (market or pending)
+router.post('/order', tradingController.placeOrder);
 
-// @route   POST /api/trading/close-all
-router.post('/close-all', [
-  body('accountId').notEmpty().withMessage('Account ID required')
-], validate, closeAllTrades);
+// Close all positions (must be before /close/:tradeId)
+router.post('/close-all', tradingController.closeAllPositions);
 
-// @route   PUT /api/trading/modify/:id
-router.put('/modify/:id', modifyTrade);
+// Close position
+router.post('/close/:tradeId', tradingController.closePosition);
 
-// @route   GET /api/trading/open
-router.get('/open', getOpenTrades);
+// Partial close position
+router.post('/partial-close/:tradeId', tradingController.partialClose);
 
-// @route   GET /api/trading/history
-router.get('/history', getTradeHistory);
+// Modify position (SL/TP)
+router.put('/modify/:tradeId', tradingController.modifyPosition);
 
-// @route   GET /api/trading/:id
-router.get('/:id', getTrade);
+// ============ PENDING ORDERS ============
+// Cancel all pending orders (must be before /:orderId routes)
+router.delete('/pending-orders/all', tradingController.cancelAllPendingOrders);
+
+// Get pending orders
+router.get('/pending-orders/:accountId', tradingController.getPendingOrders);
+
+// Modify pending order
+router.put('/pending-order/:orderId', tradingController.modifyPendingOrder);
+
+// Cancel pending order
+router.delete('/pending-order/:orderId', tradingController.cancelPendingOrder);
+
+// ============ HISTORY ============
+// Get trade history
+router.get('/history', tradingController.getTradeHistory);
+
+// Get trade statistics
+router.get('/stats', tradingController.getTradeStats);
 
 module.exports = router;
