@@ -128,13 +128,21 @@ const useTradingStore = create((set, get) => ({
       const response = await api.post('/trading/order', payload);
 
       if (response.data.success) {
-        if (orderType === 'market') {
-          await get().fetchOpenTrades(accountId);
-        } else {
+        if (response.data.pending) {
+          // Pending order (buy_limit, sell_limit, buy_stop, sell_stop)
           await get().fetchPendingOrders(accountId);
+        } else {
+          // Market order or merged position
+          await get().fetchOpenTrades(accountId);
         }
         set({ loading: false });
-        return { success: true, data: response.data.data, message: response.data.message || 'Order placed successfully' };
+        return {
+          success: true,
+          data: response.data.data,
+          merged: response.data.merged || false,
+          pending: response.data.pending || false,
+          message: response.data.message || 'Order placed successfully',
+        };
       } else {
         set({ error: response.data.message, loading: false });
         return { success: false, message: response.data.message || 'Order failed' };

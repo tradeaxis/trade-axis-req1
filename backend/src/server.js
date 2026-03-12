@@ -169,6 +169,17 @@ const startServer = async () => {
 
     console.log(`⏰ Weekly settlement scheduled: "${cronExpr}" (${tz})`);
 
+    // ✅ Self-ping to prevent Render free tier from sleeping
+    const selfUrl = process.env.RENDER_EXTERNAL_URL;
+    if (selfUrl) {
+      setInterval(() => {
+        fetch(`${selfUrl}/health`)
+          .then(() => console.log('🏓 Self-ping OK'))
+          .catch(() => {});
+      }, 14 * 60 * 1000); // Every 14 minutes
+      console.log('🏓 Self-ping enabled for Render keep-alive');
+    }
+
     // ✅ Kite auto-start (if token exists in DB)
     if (String(process.env.KITE_AUTO_START || 'true') === 'true') {
       try {

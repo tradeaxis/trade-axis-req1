@@ -2,15 +2,16 @@
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../config/supabase');
 const marketDataService = require('../services/marketDataService');
-const kiteStreamService = require('../services/kiteStreamService'); // ✅ NEW
+const kiteStreamService = require('../services/kiteStreamService');
+const tradingService = require('../services/tradingService');
 
 class SocketHandler {
   constructor(io) {
     this.io = io;
     this.connectedUsers = new Map();
     this.userSubscriptions = new Map();
-    this.priceUpdateInterval = null;
     this.pnlUpdateInterval = null;
+    this.pnlDbCounter = 0;
 
     this.initialize();
   }
@@ -18,7 +19,8 @@ class SocketHandler {
   initialize() {
     this.io.use(async (socket, next) => {
       try {
-        const token = socket.handshake.auth.token || socket.handshake.query.token;
+        const token =
+          socket.handshake.auth.token || socket.handshake.query.token;
         if (!token) return next(new Error('Authentication required'));
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -34,19 +36,20 @@ class SocketHandler {
         socket.userId = user.id;
         socket.user = user;
         next();
-      } catch (error) {
+      } catch {
         next(new Error('Invalid token'));
       }
     });
 
     this.io.on('connection', (socket) => this.handleConnection(socket));
 
-    this.startPriceUpdates();
+    // ✅ Only P&L loop — NO simulation at all
     this.startPnLUpdates();
+    console.log('📈 Simulation REMOVED — prices come only from Kite stream');
   }
 
   handleConnection(socket) {
-    console.log(`✅ WebSocket connected: ${socket.user.email}`);
+    console.log(`✅ WS: ${socket.user.email}`);
 
     this.connectedUsers.set(socket.userId, socket);
     socket.join(`user:${socket.userId}`);
@@ -54,280 +57,342 @@ class SocketHandler {
     socket.emit('connected', {
       message: 'Connected to Trade Axis',
       user: socket.user,
+      kiteStream: kiteStreamService.isRunning(),
       timestamp: new Date().toISOString(),
     });
 
-    socket.on('subscribe:symbols', (symbols) => this.handleSubscribeSymbols(socket, symbols));
-    socket.on('unsubscribe:symbols', (symbols) => this.handleUnsubscribeSymbols(socket, symbols));
-    socket.on('subscribe:account', (accountId) => this.handleSubscribeAccount(socket, accountId));
-    socket.on('get:quote', (symbol) => this.handleGetQuote(socket, symbol));
+    socket.on('subscribe:symbols', (s) => this.handleSubscribe(socket, s));
+    socket.on('unsubscribe:symbols', (s) => this.handleUnsubscribe(socket, s));
+    socket.on('subscribe:account', (id) => {
+      socket.join(`account:${id}`);
+      socket.emit('account:subscribed', { accountId: id });
+    });
+    socket.on('get:quote', (sym) => this.handleGetQuote(socket, sym));
     socket.on('ping', () => socket.emit('pong', { timestamp: Date.now() }));
-
     socket.on('disconnect', () => this.handleDisconnect(socket));
+
     this.sendInitialData(socket);
   }
 
   async sendInitialData(socket) {
     try {
-      const { data: accounts } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', socket.userId)
-        .eq('is_active', true);
+      const [{ data: accounts }, { data: trades }] = await Promise.all([
+        supabase
+          .from('accounts')
+          .select('*')
+          .eq('user_id', socket.userId)
+          .eq('is_active', true),
+        supabase
+          .from('trades')
+          .select('*')
+          .eq('user_id', socket.userId)
+          .eq('status', 'open'),
+      ]);
 
-      socket.emit('accounts:update', accounts);
-
-      const { data: trades } = await supabase
-        .from('trades')
-        .select('*')
-        .eq('user_id', socket.userId)
-        .eq('status', 'open');
-
+      socket.emit('accounts:update', accounts || []);
       socket.emit('trades:update', trades || []);
-    } catch (error) {
-      console.error('Error sending initial data:', error);
+    } catch (err) {
+      console.error('Initial data error:', err.message);
     }
   }
 
-  handleSubscribeSymbols(socket, symbols) {
+  handleSubscribe(socket, symbols) {
     if (!Array.isArray(symbols)) symbols = [symbols];
 
-    const userSubs = this.userSubscriptions.get(socket.userId) || new Set();
+    const subs = this.userSubscriptions.get(socket.userId) || new Set();
+    const snapshot = [];
 
-    symbols.forEach((symbol) => {
-      userSubs.add(String(symbol).toUpperCase());
-      socket.join(`symbol:${String(symbol).toUpperCase()}`);
+    symbols.forEach((sym) => {
+      const s = String(sym).toUpperCase();
+      subs.add(s);
+      socket.join(`symbol:${s}`);
+
+      // ✅ Send cached price immediately on subscribe
+      const cached = kiteStreamService.getPrice(s);
+      if (cached) {
+        snapshot.push({
+          symbol: s,
+          bid: cached.bid,
+          ask: cached.ask,
+          last: cached.last,
+          open: cached.open,
+          high: cached.high,
+          low: cached.low,
+          change: cached.change,
+          changePercent: cached.changePct,
+          volume: cached.volume,
+          timestamp: cached.timestamp,
+          source: 'kite',
+        });
+      }
     });
 
-    this.userSubscriptions.set(socket.userId, userSubs);
+    this.userSubscriptions.set(socket.userId, subs);
+
+    if (snapshot.length > 0) {
+      socket.emit('prices:snapshot', snapshot);
+    }
 
     socket.emit('subscribed', {
-      symbols: Array.from(userSubs),
+      symbols: Array.from(subs),
       message: `Subscribed to ${symbols.length} symbols`,
     });
   }
 
-  handleUnsubscribeSymbols(socket, symbols) {
+  handleUnsubscribe(socket, symbols) {
     if (!Array.isArray(symbols)) symbols = [symbols];
-
-    const userSubs = this.userSubscriptions.get(socket.userId);
-
-    if (userSubs) {
-      symbols.forEach((symbol) => {
-        userSubs.delete(String(symbol).toUpperCase());
-        socket.leave(`symbol:${String(symbol).toUpperCase()}`);
+    const subs = this.userSubscriptions.get(socket.userId);
+    if (subs) {
+      symbols.forEach((sym) => {
+        const s = String(sym).toUpperCase();
+        subs.delete(s);
+        socket.leave(`symbol:${s}`);
       });
     }
-
     socket.emit('unsubscribed', { symbols });
-  }
-
-  handleSubscribeAccount(socket, accountId) {
-    socket.join(`account:${accountId}`);
-    socket.emit('account:subscribed', { accountId });
   }
 
   async handleGetQuote(socket, symbol) {
     try {
       const quote = await marketDataService.getQuote(symbol);
       socket.emit('quote', quote);
-    } catch (error) {
-      socket.emit('error', { message: error.message });
+    } catch (err) {
+      socket.emit('error', { message: err.message });
     }
   }
 
   handleDisconnect(socket) {
-    console.log(`❌ WebSocket disconnected: ${socket.user.email}`);
+    console.log(`❌ WS: ${socket.user.email} disconnected`);
     this.connectedUsers.delete(socket.userId);
     this.userSubscriptions.delete(socket.userId);
   }
 
-  // ✅ Price updates (simulation) ONLY if Kite stream is NOT running
-  startPriceUpdates() {
-    this.priceUpdateInterval = setInterval(async () => {
-      try {
-        if (kiteStreamService.isRunning()) return; // ✅ IMPORTANT
-
-        const { data: symbols } = await supabase
-          .from('symbols')
-          .select('*')
-          .eq('is_active', true);
-
-        if (!symbols) return;
-
-        for (const symbol of symbols) {
-          const quote = marketDataService.simulatePriceMovement(symbol);
-
-          await supabase
-            .from('symbols')
-            .update({
-              last_price: quote.lastPrice,
-              bid: quote.bid,
-              ask: quote.ask,
-              change_value: quote.change,
-              change_percent: quote.changePercent,
-              last_update: new Date().toISOString(),
-            })
-            .eq('id', symbol.id);
-
-          this.io.to(`symbol:${symbol.symbol}`).emit('price:update', {
-            symbol: symbol.symbol,
-            bid: quote.bid,
-            ask: quote.ask,
-            last: quote.lastPrice,
-            change: quote.change,
-            changePercent: quote.changePercent,
-            timestamp: Date.now(),
-            source: 'simulated',
-          });
-        }
-      } catch (error) {
-        console.error('Price update error:', error.message);
-      }
-    }, 1000);
-
-    console.log('📈 Price updates started (1s interval) [simulation fallback]');
-  }
-
-  // P&L updates remain as-is (they’ll use real prices from symbols table when Kite runs)
+  /**
+   * ✅ Optimized P&L loop
+   *  - 1 DB read for all open trades
+   *  - Prices from in-memory cache (0 DB)
+   *  - Fallback: 1 batch DB read for missing symbols
+   *  - DB writes every 10s, not every cycle
+   *  - SL/TP checked in same loop
+   */
   startPnLUpdates() {
     this.pnlUpdateInterval = setInterval(async () => {
       try {
-        const { data: openTrades, error: tradesError } = await supabase
+        // 1. Single query for all open trades
+        const { data: openTrades, error } = await supabase
           .from('trades')
           .select('*, accounts!inner(user_id, balance, margin)')
           .eq('status', 'open');
 
-        if (tradesError || !openTrades || openTrades.length === 0) return;
+        if (error || !openTrades || openTrades.length === 0) return;
 
-        const tradesByUser = {};
-        openTrades.forEach((trade) => {
-          const userId = trade.accounts.user_id;
-          if (!tradesByUser[userId]) tradesByUser[userId] = [];
-          tradesByUser[userId].push(trade);
-        });
+        // 2. Unique symbols needed
+        const uniqueSymbols = [...new Set(openTrades.map((t) => t.symbol))];
 
-        for (const [userId, trades] of Object.entries(tradesByUser)) {
-          const tradeUpdates = [];
-
-          for (const trade of trades) {
-            const { data: symbolData } = await supabase
-              .from('symbols')
-              .select('bid, ask, lot_size')
-              .eq('symbol', trade.symbol)
-              .single();
-
-            if (!symbolData) continue;
-
-            const currentPrice =
-              trade.trade_type === 'buy'
-                ? parseFloat(symbolData.bid || symbolData.ask)
-                : parseFloat(symbolData.ask || symbolData.bid);
-
-            const direction = trade.trade_type === 'buy' ? 1 : -1;
-            const openPrice = parseFloat(trade.open_price || 0);
-            const quantity = parseFloat(trade.quantity || 0);
-            const lotSize = parseFloat(symbolData.lot_size || 1);
-            const brokerage = parseFloat(trade.brokerage || 0);
-
-            const priceDiff = (currentPrice - openPrice) * direction;
-            const grossPnL = priceDiff * quantity * lotSize;
-            const netPnL = grossPnL - brokerage;
-
-            await supabase
-              .from('trades')
-              .update({ current_price: currentPrice, profit: netPnL })
-              .eq('id', trade.id);
-
-            tradeUpdates.push({
-              tradeId: trade.id,
-              symbol: trade.symbol,
-              tradeType: trade.trade_type,
-              openPrice,
-              currentPrice,
-              quantity,
-              profit: netPnL,
-              timestamp: Date.now(),
-            });
+        // 3. Get prices from memory (instant)
+        const prices = {};
+        const missing = [];
+        for (const sym of uniqueSymbols) {
+          const c = kiteStreamService.getPrice(sym);
+          if (c) {
+            prices[sym] = { bid: c.bid, ask: c.ask, last: c.last };
+          } else {
+            missing.push(sym);
           }
+        }
 
-          if (tradeUpdates.length > 0) {
-            this.io.to(`user:${userId}`).emit('trades:pnl:batch', {
-              trades: tradeUpdates,
-              timestamp: Date.now(),
-            });
+        // 4. Fallback: one batch query for uncached symbols
+        if (missing.length > 0) {
+          const { data: rows } = await supabase
+            .from('symbols')
+            .select('symbol, bid, ask, last_price')
+            .in('symbol', missing);
 
-            tradeUpdates.forEach((u) => {
-              this.io.to(`user:${userId}`).emit('trade:pnl', {
-                tradeId: u.tradeId,
-                symbol: u.symbol,
-                currentPrice: u.currentPrice,
-                profit: u.profit.toFixed(2),
-                timestamp: Date.now(),
-              });
-            });
+          for (const r of rows || []) {
+            prices[r.symbol] = {
+              bid: Number(r.bid || r.last_price || 0),
+              ask: Number(r.ask || r.last_price || 0),
+              last: Number(r.last_price || 0),
+            };
           }
+        }
 
-          const accountIds = [...new Set(trades.map((t) => t.account_id))];
+        // 5. Calculate everything in memory
+        const tradeUpdates = [];
+        const accountPnL = {};
+        const slTpTriggers = [];
 
-          for (const accountId of accountIds) {
-            const { data: account } = await supabase
-              .from('accounts')
-              .select('*')
-              .eq('id', accountId)
-              .single();
+        for (const trade of openTrades) {
+          const p = prices[trade.symbol];
+          if (!p) continue;
 
-            if (!account) continue;
+          const currentPrice =
+            trade.trade_type === 'buy'
+              ? p.bid || p.last
+              : p.ask || p.last;
 
-            const accountTrades = trades.filter((t) => t.account_id === accountId);
-            let totalPnL = 0;
+          if (!currentPrice || currentPrice <= 0) continue;
 
-            for (const t of accountTrades) {
-              const update = tradeUpdates.find((u) => u.tradeId === t.id);
-              if (update) totalPnL += update.profit;
+          const direction = trade.trade_type === 'buy' ? 1 : -1;
+          const openPrice = parseFloat(trade.open_price || 0);
+          const quantity = parseFloat(trade.quantity || 0);
+          const brokerage = parseFloat(trade.brokerage || 0);
+          const priceDiff = (currentPrice - openPrice) * direction;
+          const netPnL = priceDiff * quantity - brokerage;
+
+          tradeUpdates.push({
+            id: trade.id,
+            currentPrice,
+            profit: netPnL,
+            userId: trade.accounts.user_id,
+            accountId: trade.account_id,
+            symbol: trade.symbol,
+            tradeType: trade.trade_type,
+            openPrice,
+            quantity,
+          });
+
+          // Account totals
+          if (!accountPnL[trade.account_id]) {
+            accountPnL[trade.account_id] = {
+              userId: trade.accounts.user_id,
+              balance: parseFloat(trade.accounts.balance || 0),
+              margin: parseFloat(trade.accounts.margin || 0),
+              totalPnL: 0,
+            };
+          }
+          accountPnL[trade.account_id].totalPnL += netPnL;
+
+          // ✅ SL / TP check
+          const sl = parseFloat(trade.stop_loss || 0);
+          const tp = parseFloat(trade.take_profit || 0);
+
+          if (sl > 0) {
+            if (
+              (trade.trade_type === 'buy' && currentPrice <= sl) ||
+              (trade.trade_type === 'sell' && currentPrice >= sl)
+            ) {
+              slTpTriggers.push({ trade, reason: 'Stop Loss' });
+              continue; // Skip further checks for this trade
             }
+          }
+          if (tp > 0) {
+            if (
+              (trade.trade_type === 'buy' && currentPrice >= tp) ||
+              (trade.trade_type === 'sell' && currentPrice <= tp)
+            ) {
+              slTpTriggers.push({ trade, reason: 'Take Profit' });
+            }
+          }
+        }
 
-            const balance = parseFloat(account.balance || 0);
-            const margin = parseFloat(account.margin || 0);
-            const newEquity = balance + totalPnL;
-            const newFreeMargin = newEquity - margin;
+        // 6. Emit P&L to users (instant)
+        const byUser = {};
+        for (const u of tradeUpdates) {
+          if (!byUser[u.userId]) byUser[u.userId] = [];
+          byUser[u.userId].push(u);
+        }
 
-            await supabase
-              .from('accounts')
-              .update({ profit: totalPnL, equity: newEquity, free_margin: newFreeMargin })
-              .eq('id', accountId);
-
-            this.io.to(`account:${accountId}`).emit('account:update', {
-              accountId,
-              balance,
-              equity: newEquity,
-              profit: totalPnL,
-              freeMargin: newFreeMargin,
-              margin,
+        for (const [userId, trades] of Object.entries(byUser)) {
+          this.io.to(`user:${userId}`).emit('trades:pnl:batch', {
+            trades: trades.map((t) => ({
+              tradeId: t.id,
+              symbol: t.symbol,
+              tradeType: t.tradeType,
+              openPrice: t.openPrice,
+              currentPrice: t.currentPrice,
+              quantity: t.quantity,
+              profit: t.profit,
               timestamp: Date.now(),
-            });
+            })),
+            timestamp: Date.now(),
+          });
 
-            this.io.to(`user:${userId}`).emit('account:update', {
-              accountId,
-              balance,
-              equity: newEquity,
-              profit: totalPnL,
-              freeMargin: newFreeMargin,
-              margin,
+          // Individual events for backward compat
+          for (const t of trades) {
+            this.io.to(`user:${userId}`).emit('trade:pnl', {
+              tradeId: t.id,
+              symbol: t.symbol,
+              currentPrice: t.currentPrice,
+              profit: parseFloat(t.profit.toFixed(2)),
               timestamp: Date.now(),
             });
           }
         }
-      } catch (error) {
-        console.error('P&L update error:', error.message);
+
+        // 7. Emit account updates
+        for (const [accountId, d] of Object.entries(accountPnL)) {
+          const equity = d.balance + d.totalPnL;
+          const freeMargin = equity - d.margin;
+          const payload = {
+            accountId,
+            balance: d.balance,
+            equity,
+            profit: d.totalPnL,
+            freeMargin,
+            margin: d.margin,
+            timestamp: Date.now(),
+          };
+          this.io.to(`user:${d.userId}`).emit('account:update', payload);
+          this.io.to(`account:${accountId}`).emit('account:update', payload);
+        }
+
+        // 8. DB writes every 10s (5 cycles × 2s)
+        this.pnlDbCounter++;
+        if (this.pnlDbCounter % 5 === 0) {
+          Promise.all(
+            tradeUpdates.map((t) =>
+              supabase
+                .from('trades')
+                .update({ current_price: t.currentPrice, profit: t.profit })
+                .eq('id', t.id)
+            )
+          ).catch((e) => console.error('P&L trade DB err:', e.message));
+
+          Promise.all(
+            Object.entries(accountPnL).map(([id, d]) => {
+              const eq = d.balance + d.totalPnL;
+              return supabase
+                .from('accounts')
+                .update({ profit: d.totalPnL, equity: eq, free_margin: eq - d.margin })
+                .eq('id', id);
+            })
+          ).catch((e) => console.error('P&L account DB err:', e.message));
+        }
+
+        // 9. Execute SL/TP closures
+        for (const { trade, reason } of slTpTriggers) {
+          try {
+            const result = await tradingService.closePosition(trade);
+            if (result.success) {
+              const uid = trade.accounts?.user_id || trade.user_id;
+              console.log(`✅ ${reason} → trade #${trade.id} (${trade.symbol})`);
+              this.io.to(`user:${uid}`).emit('trade:closed', {
+                tradeId: trade.id,
+                symbol: trade.symbol,
+                reason,
+                profit: result.trade?.profit,
+                timestamp: Date.now(),
+              });
+            }
+          } catch (e) {
+            console.error(`SL/TP close err #${trade.id}:`, e.message);
+          }
+        }
+
+        // 10. Check pending orders every 10s
+        if (this.pnlDbCounter % 5 === 0) {
+          tradingService.checkPendingOrders().catch(() => {});
+        }
+      } catch (err) {
+        console.error('P&L loop error:', err.message);
       }
     }, 2000);
 
-    console.log('💹 P&L updates started (2s interval)');
+    console.log('💹 P&L loop started (2s emit, 10s DB write)');
   }
 
   stop() {
-    if (this.priceUpdateInterval) clearInterval(this.priceUpdateInterval);
     if (this.pnlUpdateInterval) clearInterval(this.pnlUpdateInterval);
     console.log('WebSocket intervals stopped');
   }

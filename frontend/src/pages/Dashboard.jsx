@@ -49,6 +49,7 @@ import {
   Lock,
   FolderPlus,
   MoreVertical,
+  CalendarDays,
 } from 'lucide-react';
 
 import PriceChart from '../components/charts/PriceChart';
@@ -172,6 +173,82 @@ const getPeriodStart = (periodId) => {
 const formatINR = (amount) => {
   const num = Number(amount || 0);
   return `₹${num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+
+// ============ EXPIRY FILTER HELPER ============
+const filterByExpiry = (symbolsList) => {
+  const now = new Date();
+
+  const withExpiry = symbolsList.filter((s) => s.expiry_date);
+  const withoutExpiry = symbolsList.filter((s) => !s.expiry_date);
+
+  if (withExpiry.length === 0) return symbolsList;
+
+  // Find future expiries sorted by date
+  const futureExpiries = withExpiry
+    .filter((s) => new Date(s.expiry_date) >= now)
+    .sort((a, b) => new Date(a.expiry_date) - new Date(b.expiry_date));
+
+  if (futureExpiries.length === 0) return symbolsList;
+
+  // Nearest expiry month
+  const nearestExp = new Date(futureExpiries[0].expiry_date);
+  const nearMonth = nearestExp.getMonth();
+  const nearYear = nearestExp.getFullYear();
+
+  // All expiries in the nearest month — find the LAST one
+  const nearMonthDates = [
+    ...new Set(
+      futureExpiries
+        .filter((s) => {
+          const e = new Date(s.expiry_date);
+          return e.getMonth() === nearMonth && e.getFullYear() === nearYear;
+        })
+        .map((s) => new Date(s.expiry_date).getTime())
+    ),
+  ].sort((a, b) => a - b);
+
+  const lastNearExpiry =
+    nearMonthDates.length > 0
+      ? new Date(nearMonthDates[nearMonthDates.length - 1])
+      : null;
+
+  const daysToExpiry = lastNearExpiry
+    ? (lastNearExpiry - now) / (1000 * 60 * 60 * 24)
+    : Infinity;
+
+  // Show next month only if within 2 days of current month's last expiry
+  const showNextMonth = daysToExpiry <= 2;
+  const nextMonth = (nearMonth + 1) % 12;
+  const nextYear = nearMonth === 11 ? nearYear + 1 : nearYear;
+
+  const filtered = withExpiry.filter((s) => {
+    const exp = new Date(s.expiry_date);
+    if (exp < now) return false;
+
+    const expMonth = exp.getMonth();
+    const expYear = exp.getFullYear();
+
+    if (expMonth === nearMonth && expYear === nearYear) return true;
+    if (showNextMonth && expMonth === nextMonth && expYear === nextYear) return true;
+
+    return false;
+  });
+
+  return [...filtered, ...withoutExpiry];
+};
+
+// ============ MARKET HOURS CHECK (frontend) ============
+const isMarketOpenNow = () => {
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utcMs + 5.5 * 3600000);
+
+  const day = ist.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 };
 
 // ============ DASHBOARD COMPONENT ============
@@ -344,6 +421,22 @@ const Dashboard = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // ═══ ADD THIS BLOCK RIGHT HERE ═══
+
+  // ── Calendar & deals dropdown outside-click ──
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (historyCalendarRef.current && !historyCalendarRef.current.contains(e.target)) {
+        setShowHistoryCalendar(false);
+      }
+      if (dealsDropdownRef.current && !dealsDropdownRef.current.contains(e.target)) {
+        setShowDealsSymbolDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
   // ── Account init ──
   useEffect(() => {
     if (accounts?.length) {
@@ -500,11 +593,34 @@ const Dashboard = () => {
       }
     };
 
+    // ✅ Handle batch price snapshot (sent on subscribe)
+    const onPricesSnapshot = (prices) => {
+      if (Array.isArray(prices)) {
+        updatePrice(prices);
+      }
+    };
+
+    // ✅ Handle SL/TP auto-close notifications
+    const onTradeClosed = (payload) => {
+      if (payload?.tradeId) {
+        toast.success(
+          `${payload.reason || 'Auto-closed'}: ${payload.symbol} | P&L: ₹${Number(payload.profit || 0).toFixed(2)}`,
+          { duration: 5000, icon: '🎯' }
+        );
+        if (selectedAccount?.id) {
+          fetchOpenTrades(selectedAccount.id);
+          fetchTradeHistory(selectedAccount.id);
+        }
+      }
+    };
+
     socketService.subscribe('price:update', onPrice);
+    socketService.subscribe('prices:snapshot', onPricesSnapshot);
     socketService.subscribe('connected', onConnected);
     socketService.subscribe('trade:pnl', onTradePnl);
     socketService.subscribe('trades:pnl:batch', onTradesPnlBatch);
     socketService.subscribe('account:update', onAccountUpdate);
+    socketService.subscribe('trade:closed', onTradeClosed);
 
     const subs = Array.from(
       new Set([...(activeSymbols || []), selectedSymbol].filter(Boolean))
@@ -514,12 +630,14 @@ const Dashboard = () => {
 
     return () => {
       socketService.unsubscribe('price:update');
+      socketService.unsubscribe('prices:snapshot');
       socketService.unsubscribe('connected');
       socketService.unsubscribe('trade:pnl');
       socketService.unsubscribe('trades:pnl:batch');
       socketService.unsubscribe('account:update');
+      socketService.unsubscribe('trade:closed');
     };
-  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch]);
+  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory]);
 
   useEffect(() => {
     return () => {
@@ -588,12 +706,11 @@ const Dashboard = () => {
     return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
   }, [symbols, searchTerm, selectedCategory, activeSymbols]);
 
-  // ── Displayed symbols for Quotes tab (lifted from old QuotesTab) ──
   const quotesDisplayedSymbols = useMemo(() => {
     const sourceList =
       allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
 
-    // Apply category filter
+    // 1) Category filter
     let list = sourceList;
     if (selectedCategory !== 'all') {
       list = list.filter((s) => {
@@ -614,9 +731,7 @@ const Dashboard = () => {
             (seg === 'NFO' &&
               !cat.includes('index') &&
               !cat.includes('commodity') &&
-              !/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(
-                underlying
-              ))
+              !/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(underlying))
           );
         }
         if (selectedCategory === 'commodity_futures') {
@@ -630,53 +745,44 @@ const Dashboard = () => {
       });
     }
 
-    // If user is searching, search ALL symbols (uses debounced searchTerm)
+    // 2) Expiry filter — only current month (+ next month if within 2 days)
+    list = filterByExpiry(list);
+
+    // 3) If searching → search ALL visible symbols
     if (searchTerm.trim()) {
       const term = searchTerm.trim().toLowerCase();
       const results = list.filter((s) => {
         const symStr = String(s.symbol || '').toLowerCase();
         const name = String(s.display_name || '').toLowerCase();
         const underlying = String(s.underlying || '').toLowerCase();
-        return (
-          symStr.includes(term) ||
-          name.includes(term) ||
-          underlying.includes(term)
-        );
+        return symStr.includes(term) || name.includes(term) || underlying.includes(term);
       });
 
       results.sort((a, b) => {
-        const aUnderlying = String(a.underlying || '').toLowerCase();
-        const bUnderlying = String(b.underlying || '').toLowerCase();
-        const aExact = aUnderlying === term;
-        const bExact = bUnderlying === term;
-
+        const aU = String(a.underlying || '').toLowerCase();
+        const bU = String(b.underlying || '').toLowerCase();
+        const aExact = aU === term;
+        const bExact = bU === term;
         if (aExact && !bExact) return -1;
         if (!aExact && bExact) return 1;
-        if (aUnderlying !== bUnderlying)
-          return aUnderlying.localeCompare(bUnderlying);
-
-        const aSeries = a.series || '';
-        const bSeries = b.series || '';
-        if (aSeries && !bSeries) return -1;
-        if (!aSeries && bSeries) return 1;
-
-        const aExpiry = a.expiry_date || '9999';
-        const bExpiry = b.expiry_date || '9999';
-        return aExpiry.localeCompare(bExpiry);
+        if (aU !== bU) return aU.localeCompare(bU);
+        const aS = a.series || '';
+        const bS = b.series || '';
+        if (aS && !bS) return -1;
+        if (!aS && bS) return 1;
+        const aE = a.expiry_date || '9999';
+        const bE = b.expiry_date || '9999';
+        return aE.localeCompare(bE);
       });
 
       return results.slice(0, 200);
     }
 
-    // If NOT searching, show watchlist symbols only
-    const wl = new Set(
-      (activeSymbols || []).map((x) => String(x).toUpperCase())
-    );
-
+    // 4) Not searching → show watchlist symbols only
+    const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
     if (wl.size === 0) {
       return list.filter((s) => s.series === 'I').slice(0, 20);
     }
-
     return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
   }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols]);
 
@@ -784,25 +890,67 @@ const Dashboard = () => {
     if (res?.success === false) toast.error(res.message || 'Failed');
   };
 
-  const placeOrderWithQty = async (type, qty) => {
+  const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
     if (!selectedAccount?.id || !selectedSymbol) return;
+
+    // Frontend market-hours check (backend also validates)
+    if (!isMarketOpenNow()) {
+      toast.error('Market is closed. Orders cannot be placed outside trading hours (9:15 AM – 3:30 PM IST, Mon–Fri).');
+      return;
+    }
+
+    // Determine effective order type
+    let effectiveOrderType = 'market';
+    let effectivePrice = 0;
+
+    if (execType === 'buy_limit' || execType === 'sell_limit' || execType === 'buy_stop' || execType === 'sell_stop') {
+      effectiveOrderType = execType;
+      effectivePrice = Number(execPrice);
+
+      if (!effectivePrice || effectivePrice <= 0) {
+        toast.error('Please enter a valid price for this order type.');
+        return;
+      }
+
+      const cmp = type === 'buy' ? ask : bid;
+
+      // Validate Buy Limit: must be ≤ 0.5% below CMP
+      if (execType === 'buy_limit' && effectivePrice > cmp * 0.995) {
+        toast.error(`Buy Limit price must be at least 0.5% below current price (≤ ${(cmp * 0.995).toFixed(2)})`);
+        return;
+      }
+      // Validate Sell Limit: must be ≥ 0.5% above CMP
+      if (execType === 'sell_limit' && effectivePrice < cmp * 1.005) {
+        toast.error(`Sell Limit price must be at least 0.5% above current price (≥ ${(cmp * 1.005).toFixed(2)})`);
+        return;
+      }
+    }
+
+    // Immediate feedback
+    const loadingId = toast.loading(`Placing ${type.toUpperCase()} order…`);
 
     const result = await placeOrder({
       accountId: selectedAccount.id,
       symbol: selectedSymbol,
       type,
-      orderType: 'market',
+      orderType: effectiveOrderType,
       quantity: Number(qty || 1),
       stopLoss: stopLoss ? Number(stopLoss) : 0,
       takeProfit: takeProfit ? Number(takeProfit) : 0,
-      price: entryPrice ? Number(entryPrice) : 0,
+      price: effectivePrice || (entryPrice ? Number(entryPrice) : 0),
     });
 
+    toast.dismiss(loadingId);
+
     if (result.success) {
-      toast.success(`${type.toUpperCase()} ${qty} ${selectedSymbol}`);
+      const priceStr = result.data?.open_price ? ` @ ₹${Number(result.data.open_price).toFixed(2)}` : '';
+      const mergedStr = result.merged ? ' (merged into existing position)' : '';
+      toast.success(`${type.toUpperCase()} ${qty} ${selectedSymbol}${priceStr}${mergedStr}`, { duration: 3000 });
       fetchOpenTrades(selectedAccount.id);
       fetchPendingOrders?.(selectedAccount.id);
       setShowOrderModal(false);
+      setLimitPrice('');
+      setOrderExecType('instant');
     } else {
       toast.error(result.message || 'Order failed');
     }
@@ -1222,8 +1370,13 @@ const Dashboard = () => {
 
     return (
       <div
-        className="fixed bottom-0 left-0 right-0 h-16 flex items-center justify-around border-t z-50 lg:hidden"
-        style={{ background: '#1e222d', borderColor: '#363a45' }}
+        className="fixed bottom-0 left-0 right-0 flex items-center justify-around border-t z-50 lg:hidden"
+        style={{
+          background: theme === 'light' ? '#ffffff' : '#1e222d',
+          borderColor: theme === 'light' ? '#e2e8f0' : '#363a45',
+          height: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        }}
       >
         {tabs.map((tab) => (
           <button
@@ -1235,7 +1388,7 @@ const Dashboard = () => {
             }}
           >
             <tab.icon size={22} />
-            <span className="text-[11px] mt-1 font-medium">{tab.label}</span>
+            <span className="text-xs mt-1 font-medium">{tab.label}</span>
             {tab.badge > 0 && (
               <span className="absolute top-2 right-1/4 w-5 h-5 bg-red-500 text-white text-[10px] rounded-full flex items-center justify-center font-bold">
                 {tab.badge > 9 ? '9+' : tab.badge}
@@ -1251,331 +1404,133 @@ const Dashboard = () => {
   const renderSymbolActionMenu = () => {
     if (!showSymbolActionMenu || !selectedSymbolForAction) return null;
     const sym = selectedSymbolForAction;
-    const inWL = (activeSymbols || []).includes(
-      String(sym.symbol).toUpperCase()
-    );
+    const inWL = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
     const quote = quotes?.[sym.symbol] || sym;
     const symBid = Number(quote.bid || quote.last_price || 0);
     const symAsk = Number(quote.ask || quote.last_price || 0);
-    const change = Number(
-      quote.change_percent || sym.change_percent || 0
-    );
+    const change = Number(quote.change_percent || sym.change_percent || 0);
+    const spread = Math.abs(symAsk - symBid);
+
     const expiry = sym.expiry_date
       ? new Date(sym.expiry_date).toLocaleDateString('en-IN', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
+          day: 'numeric', month: 'short', year: 'numeric',
         })
       : '';
 
     return (
       <div
-        className="fixed inset-0 z-50 bg-black/60 flex items-end justify-center"
-        onClick={() => {
-          setShowSymbolActionMenu(false);
-          setSelectedSymbolForAction(null);
-        }}
+        className="fixed inset-0 z-[60] bg-black/60 flex items-end justify-center"
+        onClick={() => { setShowSymbolActionMenu(false); setSelectedSymbolForAction(null); }}
       >
         <div
-          className="w-full max-w-lg rounded-t-xl max-h-[85vh] overflow-y-auto"
+          className="w-full max-w-lg rounded-t-xl overflow-hidden"
           style={{
             background: '#1e222d',
             border: '1px solid #363a45',
+            marginBottom: '4rem',
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Symbol Info Header */}
-          <div
-            className="p-4 border-b"
-            style={{ borderColor: '#363a45' }}
-          >
-            <div className="flex items-center justify-between mb-2">
+          {/* ── Symbol Header ── */}
+          <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+            <div className="flex items-center justify-between">
               <div>
-                <div
-                  className="font-bold text-lg"
-                  style={{ color: '#d1d4dc' }}
-                >
+                <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
                   {sym.symbol}
                 </div>
                 <div className="text-sm" style={{ color: '#787b86' }}>
                   {sym.display_name}
                 </div>
                 {expiry && (
-                  <div
-                    className="text-xs mt-1"
-                    style={{ color: '#787b86' }}
-                  >
-                    Expiry: {expiry} • {sym.exchange} • Lot:{' '}
-                    {sym.lot_size || 1}
+                  <div className="text-xs mt-0.5" style={{ color: '#787b86' }}>
+                    {sym.exchange} • Expiry: {expiry} • Lot: {sym.lot_size || 1}
                   </div>
                 )}
               </div>
               <div className="text-right">
-                <div
-                  className="font-bold text-lg"
-                  style={{ color: '#d1d4dc' }}
-                >
+                <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
                   {(symBid || symAsk).toFixed(2)}
                 </div>
                 <div
                   className="text-sm font-medium"
-                  style={{
-                    color: change >= 0 ? '#26a69a' : '#ef5350',
-                  }}
+                  style={{ color: change >= 0 ? '#26a69a' : '#ef5350' }}
                 >
-                  {change >= 0 ? '+' : ''}
-                  {change.toFixed(2)}%
+                  {change >= 0 ? '+' : ''}{change.toFixed(2)}%
                 </div>
-              </div>
-            </div>
-
-            {/* Bid/Ask */}
-            <div className="flex gap-4 mt-2">
-              <div
-                className="flex-1 p-2 rounded text-center"
-                style={{ background: '#ef535015' }}
-              >
                 <div className="text-xs" style={{ color: '#787b86' }}>
-                  Bid
-                </div>
-                <div
-                  className="font-bold"
-                  style={{ color: '#ef5350' }}
-                >
-                  {symBid.toFixed(2)}
-                </div>
-              </div>
-              <div
-                className="flex-1 p-2 rounded text-center"
-                style={{ background: '#26a69a15' }}
-              >
-                <div className="text-xs" style={{ color: '#787b86' }}>
-                  Ask
-                </div>
-                <div
-                  className="font-bold"
-                  style={{ color: '#26a69a' }}
-                >
-                  {symAsk.toFixed(2)}
-                </div>
-              </div>
-              <div
-                className="flex-1 p-2 rounded text-center"
-                style={{ background: '#2a2e39' }}
-              >
-                <div className="text-xs" style={{ color: '#787b86' }}>
-                  Spread
-                </div>
-                <div
-                  className="font-bold"
-                  style={{ color: '#d1d4dc' }}
-                >
-                  {Math.abs(symAsk - symBid).toFixed(2)}
+                  Spread: {spread.toFixed(2)}
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Quick Trade Section */}
-          <div
-            className="p-4 border-b"
-            style={{ borderColor: '#363a45' }}
-          >
-            <div
-              className="text-xs font-medium mb-3"
-              style={{ color: '#787b86' }}
+          {/* ── Menu Options (MT5 style) ── */}
+          <div className="py-1">
+            {/* New Order */}
+            <button
+              onClick={() => {
+                setSelectedSymbol(sym.symbol);
+                setShowSymbolActionMenu(false);
+                setSelectedSymbolForAction(null);
+                // Reset order modal state
+                setOrderExecType('instant');
+                setLimitPrice('');
+                setQuantity(1);
+                setStopLoss('');
+                setTakeProfit('');
+                setShowOrderModal(true);
+              }}
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-white/5 active:bg-white/10"
             >
-              QUICK TRADE
-            </div>
+              <TrendingUp size={20} color="#2962ff" />
+              <span className="text-base font-medium" style={{ color: '#d1d4dc' }}>New Order</span>
+            </button>
 
-            {/* Quantity */}
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm" style={{ color: '#787b86' }}>
-                Quantity
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() =>
-                    setQuantity(Math.max(1, quantity - 1))
-                  }
-                  className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold"
-                  style={{ background: '#2a2e39', color: '#d1d4dc' }}
-                >
-                  −
-                </button>
-                <input
-                  type="number"
-                  value={quantity}
-                  onChange={(e) =>
-                    setQuantity(
-                      Math.max(1, Number(e.target.value || 1))
-                    )
-                  }
-                  className="w-20 px-2 py-1.5 rounded text-center text-base font-bold"
-                  style={{
-                    background: '#2a2e39',
-                    border: '1px solid #363a45',
-                    color: '#d1d4dc',
-                  }}
-                  min="1"
-                />
-                <button
-                  onClick={() => setQuantity(quantity + 1)}
-                  className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold"
-                  style={{ background: '#2a2e39', color: '#d1d4dc' }}
-                >
-                  +
-                </button>
-              </div>
-            </div>
+            {/* Divider */}
+            <div className="h-px mx-4" style={{ background: '#363a45' }} />
 
-            {/* Quick qty buttons */}
-            <div className="flex gap-1.5 mb-4">
-              {[1, 5, 10, 25, 50, 100].map((q) => (
-                <button
-                  key={q}
-                  onClick={() => setQuantity(q)}
-                  className="flex-1 py-1.5 rounded text-xs font-medium"
-                  style={{
-                    background:
-                      quantity === q ? '#2962ff' : '#2a2e39',
-                    color: quantity === q ? '#fff' : '#787b86',
-                  }}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-
-            {/* Buy/Sell buttons */}
-            {closingMode ? (
-              <div
-                className="p-3 rounded-lg flex items-center gap-2"
-                style={{ background: '#ff980020' }}
-              >
-                <Lock size={16} color="#ff9800" />
-                <span
-                  className="text-sm"
-                  style={{ color: '#ff9800' }}
-                >
-                  Closing mode active — new orders disabled
-                </span>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={async () => {
-                    setSelectedSymbol(sym.symbol);
-                    setTimeout(async () => {
-                      await placeOrderWithQty('sell', quantity);
-                      setShowSymbolActionMenu(false);
-                    }, 100);
-                  }}
-                  className="py-3.5 rounded-lg font-bold text-white text-lg"
-                  style={{ background: '#ef5350' }}
-                >
-                  SELL {symBid.toFixed(2)}
-                </button>
-                <button
-                  onClick={async () => {
-                    setSelectedSymbol(sym.symbol);
-                    setTimeout(async () => {
-                      await placeOrderWithQty('buy', quantity);
-                      setShowSymbolActionMenu(false);
-                    }, 100);
-                  }}
-                  className="py-3.5 rounded-lg font-bold text-white text-lg"
-                  style={{ background: '#26a69a' }}
-                >
-                  BUY {symAsk.toFixed(2)}
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* More Actions */}
-          <div className="p-2">
+            {/* Chart */}
             <button
               onClick={() => {
                 setSelectedSymbol(sym.symbol);
                 setActiveTab('chart');
                 setShowSymbolActionMenu(false);
+                setSelectedSymbolForAction(null);
               }}
-              className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-white/5 active:bg-white/10"
             >
-              <BarChart2 size={20} color="#2962ff" />
-              <div>
-                <div style={{ color: '#d1d4dc' }}>View Chart</div>
-                <div
-                  className="text-xs"
-                  style={{ color: '#787b86' }}
-                >
-                  Open full chart view
-                </div>
-              </div>
+              <BarChart2 size={20} color="#787b86" />
+              <span className="text-base font-medium" style={{ color: '#d1d4dc' }}>Chart</span>
             </button>
 
-            <button
-              onClick={() => {
-                setSelectedSymbol(sym.symbol);
-                setShowOrderModal(true);
-                setShowSymbolActionMenu(false);
-              }}
-              className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
-            >
-              <Edit3 size={20} color="#f5c542" />
-              <div>
-                <div style={{ color: '#d1d4dc' }}>Advanced Order</div>
-                <div
-                  className="text-xs"
-                  style={{ color: '#787b86' }}
-                >
-                  Set Stop Loss & Take Profit
-                </div>
-              </div>
-            </button>
+            {/* Divider */}
+            <div className="h-px mx-4" style={{ background: '#363a45' }} />
 
+            {/* Add/Remove Watchlist */}
             <button
               onClick={() => {
                 toggleSymbolInWatchlist(sym.symbol);
                 setShowSymbolActionMenu(false);
+                setSelectedSymbolForAction(null);
               }}
-              className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-white/5 active:bg-white/10"
             >
               <Star
                 size={20}
                 color={inWL ? '#f5c542' : '#787b86'}
                 fill={inWL ? '#f5c542' : 'none'}
               />
-              <div>
-                <div style={{ color: '#d1d4dc' }}>
-                  {inWL
-                    ? 'Remove from Watchlist'
-                    : 'Add to Watchlist'}
-                </div>
-                <div
-                  className="text-xs"
-                  style={{ color: '#787b86' }}
-                >
-                  {inWL
-                    ? 'Remove from current watchlist'
-                    : 'Add to current watchlist'}
-                </div>
-              </div>
+              <span className="text-base font-medium" style={{ color: '#d1d4dc' }}>
+                {inWL ? 'Remove from Watchlist' : 'Add to Watchlist'}
+              </span>
             </button>
           </div>
 
-          {/* Cancel */}
-          <div
-            className="p-3 border-t"
-            style={{ borderColor: '#363a45' }}
-          >
+          {/* ── Cancel ── */}
+          <div className="p-3 border-t" style={{ borderColor: '#363a45' }}>
             <button
-              onClick={() => {
-                setShowSymbolActionMenu(false);
-                setSelectedSymbolForAction(null);
-              }}
-              className="w-full py-3 rounded-lg font-medium"
+              onClick={() => { setShowSymbolActionMenu(false); setSelectedSymbolForAction(null); }}
+              className="w-full py-3 rounded-lg font-medium text-center"
               style={{ background: '#2a2e39', color: '#787b86' }}
             >
               Cancel
@@ -1689,29 +1644,18 @@ const Dashboard = () => {
   // ============ QUOTES TAB (render function — NO hooks) ============
   const renderQuotesTab = () => {
     return (
-      <div
-        className="flex flex-col h-full"
-        style={{ background: '#1e222d' }}
-      >
-        <div
-          className="p-3 border-b"
-          style={{ borderColor: '#363a45' }}
-        >
+      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+        {/* ── Fixed Header ── */}
+        <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45' }}>
           {/* Watchlist Selector */}
           <div className="flex items-center justify-between mb-3">
             <button
               onClick={() => setShowWatchlistMenu(true)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg"
-              style={{
-                background: '#2a2e39',
-                border: '1px solid #363a45',
-              }}
+              style={{ background: '#2a2e39', border: '1px solid #363a45' }}
             >
               <Star size={16} color="#f5c542" />
-              <span
-                className="font-medium"
-                style={{ color: '#d1d4dc' }}
-              >
+              <span className="font-medium" style={{ color: '#d1d4dc' }}>
                 {currentWatchlist?.name || 'Select Watchlist'}
               </span>
               <ChevronDown size={16} color="#787b86" />
@@ -1726,11 +1670,7 @@ const Dashboard = () => {
                 style={{ background: '#2a2e39' }}
                 title="Refresh Symbols"
               >
-                <RefreshCw
-                  size={18}
-                  color="#787b86"
-                  className={loadingAllSymbols ? 'animate-spin' : ''}
-                />
+                <RefreshCw size={18} color="#787b86" className={loadingAllSymbols ? 'animate-spin' : ''} />
               </button>
               <button
                 onClick={(e) => handleCreateWatchlist(e)}
@@ -1750,12 +1690,8 @@ const Dashboard = () => {
                 onClick={() => setSelectedCategory(cat.id)}
                 className="px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
                 style={{
-                  background:
-                    selectedCategory === cat.id
-                      ? '#2962ff'
-                      : '#2a2e39',
-                  color:
-                    selectedCategory === cat.id ? '#fff' : '#787b86',
+                  background: selectedCategory === cat.id ? '#2962ff' : '#2a2e39',
+                  color: selectedCategory === cat.id ? '#fff' : '#787b86',
                 }}
               >
                 {cat.label}
@@ -1765,11 +1701,7 @@ const Dashboard = () => {
 
           {/* Search */}
           <div className="relative mt-2">
-            <Search
-              size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2"
-              style={{ color: '#787b86' }}
-            />
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: '#787b86' }} />
             <input
               ref={quotesSearchInputRef}
               type="text"
@@ -1777,11 +1709,7 @@ const Dashboard = () => {
               onChange={(e) => setQuotesLocalSearch(e.target.value)}
               placeholder="Search all futures (RELIANCE, NIFTY, GOLD...)"
               className="w-full pl-10 pr-10 py-2.5 rounded border text-base"
-              style={{
-                background: '#2a2e39',
-                borderColor: '#363a45',
-                color: '#d1d4dc',
-              }}
+              style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
@@ -1789,10 +1717,7 @@ const Dashboard = () => {
             />
             {quotesLocalSearch && (
               <button
-                onClick={() => {
-                  setQuotesLocalSearch('');
-                  quotesSearchInputRef.current?.focus();
-                }}
+                onClick={() => { setQuotesLocalSearch(''); quotesSearchInputRef.current?.focus(); }}
                 className="absolute right-3 top-1/2 -translate-y-1/2"
               >
                 <X size={16} color="#787b86" />
@@ -1800,28 +1725,21 @@ const Dashboard = () => {
             )}
           </div>
 
-          {/* Search result info */}
           {searchTerm && (
             <div className="flex items-center justify-between mt-2">
               <span className="text-xs" style={{ color: '#787b86' }}>
-                {quotesDisplayedSymbols.length} results for "
-                {searchTerm}"
+                {quotesDisplayedSymbols.length} results for "{searchTerm}"
               </span>
-              <span className="text-xs" style={{ color: '#2962ff' }}>
-                Tap to trade
-              </span>
+              <span className="text-xs" style={{ color: '#2962ff' }}>Tap to trade</span>
             </div>
           )}
         </div>
 
-        {/* Column Headers */}
+        {/* ── Column Headers ── */}
         <div
-          className={`grid px-3 py-2.5 text-xs font-semibold border-b ${
-            quotesViewMode === 'advanced'
-              ? 'grid-cols-5'
-              : 'grid-cols-3'
-          }`}
+          className="grid px-3 py-2 text-xs font-semibold border-b shrink-0"
           style={{
+            gridTemplateColumns: '2.2fr 1fr 1fr',
             background: '#252832',
             borderColor: '#363a45',
             color: '#787b86',
@@ -1830,169 +1748,112 @@ const Dashboard = () => {
           <div>Symbol</div>
           <div className="text-right">Bid</div>
           <div className="text-right">Ask</div>
-          {quotesViewMode === 'advanced' && (
-            <>
-              <div className="text-right">Expiry</div>
-              <div className="text-right">Chg%</div>
-            </>
-          )}
         </div>
 
-        {/* Symbol List */}
+        {/* ── Symbol List ── */}
         <div className="flex-1 overflow-y-auto">
           {loadingAllSymbols && allFuturesSymbols.length === 0 ? (
-            <div
-              className="p-8 text-center"
-              style={{ color: '#787b86' }}
-            >
-              <RefreshCw
-                size={32}
-                className="animate-spin mx-auto mb-3"
-              />
+            <div className="p-8 text-center" style={{ color: '#787b86' }}>
+              <RefreshCw size={32} className="animate-spin mx-auto mb-3" />
               <div>Loading symbols...</div>
             </div>
           ) : quotesDisplayedSymbols.length === 0 ? (
-            <div
-              className="p-8 text-center"
-              style={{ color: '#787b86' }}
-            >
+            <div className="p-8 text-center" style={{ color: '#787b86' }}>
               {searchTerm ? (
                 <>
-                  <Search
-                    size={48}
-                    className="mx-auto mb-3 opacity-30"
-                  />
-                  <div className="text-base mb-1">
-                    No symbols found for "{searchTerm}"
-                  </div>
-                  <div className="text-sm">
-                    Try searching by underlying name (e.g., RELIANCE,
-                    TCS, GOLD)
-                  </div>
+                  <Search size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base mb-1">No symbols found for "{searchTerm}"</div>
+                  <div className="text-sm">Try searching by underlying name (e.g., RELIANCE, TCS, GOLD)</div>
                 </>
               ) : (
                 <>
-                  <Star
-                    size={48}
-                    className="mx-auto mb-3 opacity-30"
-                  />
-                  <div className="text-base mb-1">
-                    Watchlist is empty
-                  </div>
-                  <div className="text-sm">
-                    Use the search bar above to find and add symbols
-                  </div>
+                  <Star size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base mb-1">Watchlist is empty</div>
+                  <div className="text-sm">Use the search bar above to find and add symbols</div>
                 </>
               )}
             </div>
           ) : (
             quotesDisplayedSymbols.map((sym) => {
               const isSelected = selectedSymbol === sym.symbol;
-              const inWL = (activeSymbols || []).includes(
-                String(sym.symbol).toUpperCase()
-              );
+              const inWL = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
               const quote = quotes?.[sym.symbol] || sym;
-              const change = Number(
-                quote.change_percent || sym.change_percent || 0
+              const symBid = Number(quote.bid || sym.bid || sym.last_price || 0);
+              const symAsk = Number(quote.ask || sym.ask || sym.last_price || 0);
+              const symLow = Number(
+                quote?.low || quote?.day_low || quote?.ohlc_low ||
+                sym.low || sym.day_low || sym.low_price || sym.ohlc_low ||
+                (sym.ohlc && sym.ohlc.low) ||
+                0
               );
-              const symBid = Number(
-                quote.bid || sym.bid || sym.last_price || 0
-              );
-              const symAsk = Number(
-                quote.ask || sym.ask || sym.last_price || 0
+              const symHigh = Number(
+                quote?.high || quote?.day_high || quote?.ohlc_high ||
+                sym.high || sym.day_high || sym.high_price || sym.ohlc_high ||
+                (sym.ohlc && sym.ohlc.high) ||
+                0
               );
 
+              // Build display name: underlying-series or full symbol
+              const displaySymbol = sym.series
+                ? `${sym.underlying || sym.symbol}-${sym.series}`
+                : sym.symbol;
+
               const expiry = sym.expiry_date
-                ? new Date(sym.expiry_date).toLocaleDateString(
-                    'en-IN',
-                    { day: '2-digit', month: 'short' }
-                  )
+                ? new Date(sym.expiry_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
                 : '';
 
               return (
                 <div
                   key={sym.symbol}
                   onClick={(e) => handleSymbolTap(sym, e)}
-                  className={`grid items-center px-3 py-3 border-b cursor-pointer hover:bg-white/5 ${
-                    quotesViewMode === 'advanced'
-                      ? 'grid-cols-5'
-                      : 'grid-cols-3'
-                  }`}
+                  className="grid items-center px-3 py-2.5 border-b cursor-pointer hover:bg-white/5"
                   style={{
-                    background: isSelected
-                      ? '#2a2e39'
-                      : 'transparent',
+                    gridTemplateColumns: '2.2fr 1fr 1fr',
+                    background: isSelected ? '#2a2e39' : 'transparent',
                     borderColor: '#363a45',
-                    borderLeft: isSelected
-                      ? '3px solid #2962ff'
-                      : '3px solid transparent',
+                    borderLeft: isSelected ? '3px solid #2962ff' : '3px solid transparent',
                   }}
                 >
+                  {/* Symbol Column — full name visible */}
                   <div className="flex items-center gap-2 min-w-0">
                     <Star
                       size={14}
                       color={inWL ? '#f5c542' : '#787b86'}
                       fill={inWL ? '#f5c542' : 'none'}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSymbolInWatchlist(sym.symbol);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); toggleSymbolInWatchlist(sym.symbol); }}
                       className="shrink-0 cursor-pointer"
                     />
                     <div className="min-w-0">
-                      <div
-                        className="font-semibold text-sm truncate"
-                        style={{ color: '#d1d4dc' }}
-                      >
-                        {sym.series
-                          ? `${sym.underlying}-${sym.series}`
-                          : sym.symbol}
+                      <div className="font-semibold text-sm leading-tight" style={{ color: '#d1d4dc', wordBreak: 'break-word' }}>
+                        {displaySymbol}
                       </div>
-                      <div
-                        className="text-xs truncate"
-                        style={{ color: '#787b86' }}
-                      >
-                        {sym.display_name || sym.symbol}
-                      </div>
+                      {expiry && (
+                        <div className="text-[10px] leading-tight" style={{ color: '#787b86' }}>
+                          {expiry}
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div
-                    className="text-right text-sm font-mono"
-                    style={{ color: '#ef5350' }}
-                  >
-                    {symBid > 0 ? symBid.toFixed(2) : '—'}
-                  </div>
-                  <div
-                    className="text-right text-sm font-mono"
-                    style={{ color: '#26a69a' }}
-                  >
-                    {symAsk > 0 ? symAsk.toFixed(2) : '—'}
+                  {/* Bid Column + L: underneath */}
+                  <div className="text-right">
+                    <div className="text-sm font-mono font-semibold" style={{ color: '#ef5350' }}>
+                      {symBid > 0 ? symBid.toFixed(2) : '—'}
+                    </div>
+                    <div className="text-[10px] font-mono" style={{ color: '#787b86' }}>
+                      L: {symLow > 0 ? symLow.toFixed(2) : '—'}
+                    </div>
                   </div>
 
-                  {quotesViewMode === 'advanced' && (
-                    <>
-                      <div
-                        className="text-right text-xs"
-                        style={{ color: '#787b86' }}
-                      >
-                        {expiry || '—'}
-                      </div>
-                      <div className="text-right">
-                        <span
-                          className="text-xs font-semibold"
-                          style={{
-                            color:
-                              change >= 0 ? '#26a69a' : '#ef5350',
-                          }}
-                        >
-                          {change !== 0
-                            ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`
-                            : '—'}
-                        </span>
-                      </div>
-                    </>
-                  )}
+                  {/* Ask Column + H: underneath */}
+                  <div className="text-right">
+                    <div className="text-sm font-mono font-semibold" style={{ color: '#26a69a' }}>
+                      {symAsk > 0 ? symAsk.toFixed(2) : '—'}
+                    </div>
+                    <div className="text-[10px] font-mono" style={{ color: '#787b86' }}>
+                      H: {symHigh > 0 ? symHigh.toFixed(2) : '—'}
+                    </div>
+                  </div>
                 </div>
               );
             })
@@ -2013,6 +1874,21 @@ const Dashboard = () => {
   const [modifySL, setModifySL] = useState('');
   const [modifyTP, setModifyTP] = useState('');
   const [showBalance, setShowBalance] = useState(true);
+
+  // ── Order execution types (for new order modal) ──
+  const [orderExecType, setOrderExecType] = useState('instant');
+  // instant | buy_limit | sell_limit | buy_stop | sell_stop
+  const [limitPrice, setLimitPrice] = useState('');
+  const [deviation, setDeviation] = useState(10);
+
+  // ── History tab: calendar dropdown + orders sub-tab ──
+  const [showHistoryCalendar, setShowHistoryCalendar] = useState(false);
+  const historyCalendarRef = useRef(null);
+
+  // ── Deals symbol filter ──
+  const [dealsSymbolFilter, setDealsSymbolFilter] = useState('');
+  const [showDealsSymbolDropdown, setShowDealsSymbolDropdown] = useState(false);
+  const dealsDropdownRef = useRef(null);
 
   // Reset modify values when modal opens/changes
   useEffect(() => {
@@ -2054,6 +1930,32 @@ const Dashboard = () => {
       (t) => t.symbol === historyLocalSymbolFilter
     );
   }, [filteredHistoryTrades, historyLocalSymbolFilter]);
+
+  // ═══ ADD THESE 3 BLOCKS RIGHT HERE ═══
+
+  // ── Deals unique symbols for filter ──
+  const dealsUniqueSymbols = useMemo(() => {
+    const syms = new Set((deals || []).map((d) => d.symbol).filter(Boolean));
+    return Array.from(syms).sort();
+  }, [deals]);
+
+  // ── Filtered deals ──
+  const filteredDeals = useMemo(() => {
+    if (!dealsSymbolFilter) return deals || [];
+    return (deals || []).filter((d) => d.symbol === dealsSymbolFilter);
+  }, [deals, dealsSymbolFilter]);
+
+  // ── Position aggregates for history ──
+  const positionAggregates = useMemo(() => {
+    let totalBuyQty = 0;
+    let totalSellQty = 0;
+    (historyDisplayTrades || []).forEach((t) => {
+      const q = Number(t.quantity || 0);
+      if (t.trade_type === 'buy') totalBuyQty += q;
+      else totalSellQty += q;
+    });
+    return { totalBuyQty, totalSellQty };
+  }, [historyDisplayTrades]);
 
   // ══════════════════════════════════════════════════════════════
   //  RENDER FUNCTIONS (continued from Part 1)
@@ -2214,6 +2116,41 @@ const Dashboard = () => {
   const renderOrderModal = () => {
     if (!showOrderModal) return null;
 
+    const ORDER_EXEC_TYPES = [
+      { id: 'instant', label: 'Instant Execution' },
+      { id: 'buy_limit', label: 'Buy Limit' },
+      { id: 'sell_limit', label: 'Sell Limit' },
+      { id: 'buy_stop', label: 'Buy Stop' },
+      { id: 'sell_stop', label: 'Sell Stop' },
+    ];
+
+    const isInstant = orderExecType === 'instant';
+    const needsPrice = !isInstant;
+
+    // For limit/stop orders, infer direction
+    const inferredType =
+      orderExecType === 'buy_limit' || orderExecType === 'buy_stop' ? 'buy' :
+      orderExecType === 'sell_limit' || orderExecType === 'sell_stop' ? 'sell' :
+      null;
+
+    // Tick size for +/- buttons
+    const currentSymbolData = (symbols || []).find((s) => s.symbol === selectedSymbol);
+    const tickSize = Number(currentSymbolData?.tick_size || 0.05);
+
+    // SL/TP step helpers
+    const stepSL = (dir) => {
+      const current = Number(stopLoss) || bid || 0;
+      setStopLoss((current + dir * tickSize).toFixed(2));
+    };
+    const stepTP = (dir) => {
+      const current = Number(takeProfit) || ask || 0;
+      setTakeProfit((current + dir * tickSize).toFixed(2));
+    };
+    const stepPrice = (dir) => {
+      const current = Number(limitPrice) || (inferredType === 'buy' ? ask : bid) || 0;
+      setLimitPrice((current + dir * tickSize).toFixed(2));
+    };
+
     return (
       <div
         className="fixed inset-0 z-[9999] bg-black/60 flex items-end lg:items-center justify-center"
@@ -2224,232 +2161,382 @@ const Dashboard = () => {
           style={{ background: '#1e222d', border: '1px solid #363a45' }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* ── Header ── */}
           <div
             className="flex items-center justify-between p-4 border-b shrink-0"
             style={{ borderColor: '#363a45' }}
           >
-            <h3 className="font-bold text-xl" style={{ color: '#d1d4dc' }}>
-              New Order
+            <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+              Order
             </h3>
             <button onClick={() => setShowOrderModal(false)}>
-              <X size={24} color="#787b86" />
+              <X size={22} color="#787b86" />
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 pb-28">
-            <div className="mb-4">
-              <label
-                className="block text-sm mb-2"
-                style={{ color: '#787b86' }}
-              >
-                Symbol (Search &amp; Select)
-              </label>
+          {/* ── Scrollable Body ── */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
 
-              <input
-                value={orderSymbolSearch}
-                onChange={(e) => setOrderSymbolSearch(e.target.value)}
-                placeholder="Search e.g. NIFTY, RELIANCE, GOLD..."
-                className="w-full px-4 py-3 rounded-lg text-base"
-                style={{
-                  background: '#2a2e39',
-                  border: '1px solid #363a45',
-                  color: '#d1d4dc',
-                }}
-                autoComplete="off"
-              />
-
-              <div
-                className="mt-2 max-h-52 overflow-y-auto rounded-lg"
-                style={{
-                  border: '1px solid #363a45',
-                  background: '#252832',
-                }}
-              >
-                {(symbols || [])
-                  .filter((s) => {
-                    const q = orderSymbolSearch.trim().toLowerCase();
-                    if (!q) return true;
-                    return (
-                      String(s.symbol).toLowerCase().includes(q) ||
-                      String(s.display_name || '')
-                        .toLowerCase()
-                        .includes(q)
-                    );
-                  })
-                  .slice(0, 50)
-                  .map((s) => (
-                    <button
-                      key={s.symbol}
-                      onClick={() => {
-                        setSelectedSymbol(s.symbol);
-                        setOrderSymbolSearch('');
-                      }}
-                      className="w-full text-left px-4 py-2 hover:bg-white/5"
-                      style={{
-                        color:
-                          s.symbol === selectedSymbol
-                            ? '#2962ff'
-                            : '#d1d4dc',
-                      }}
-                    >
-                      <div className="font-semibold">{s.symbol}</div>
-                      <div
-                        className="text-xs"
-                        style={{ color: '#787b86' }}
-                      >
-                        {s.display_name}
-                      </div>
-                    </button>
-                  ))}
-              </div>
-
-              <div
-                className="mt-2 text-xs"
-                style={{ color: '#787b86' }}
-              >
-                Selected:{' '}
-                <span style={{ color: '#d1d4dc', fontWeight: 700 }}>
-                  {selectedSymbol}
-                </span>
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <div
-                className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: '#2a2e39' }}
-              >
-                <span
-                  className="font-bold text-lg"
-                  style={{ color: '#d1d4dc' }}
-                >
-                  {selectedSymbol}
-                </span>
-                <div className="text-right">
-                  <div
-                    className="text-base font-medium"
-                    style={{ color: '#ef5350' }}
-                  >
-                    Bid: {bid.toFixed(2)}
+            {/* ── Symbol Display ── */}
+            <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>
+                    {selectedSymbol}
                   </div>
-                  <div
-                    className="text-base font-medium"
-                    style={{ color: '#26a69a' }}
-                  >
-                    Ask: {ask.toFixed(2)}
+                  <div className="text-xs" style={{ color: '#787b86' }}>
+                    {currentSymbolData?.display_name || ''}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="flex items-center gap-3">
+                    <div>
+                      <div className="text-[10px]" style={{ color: '#787b86' }}>Bid</div>
+                      <div className="font-bold text-sm" style={{ color: '#ef5350' }}>
+                        {bid.toFixed(2)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px]" style={{ color: '#787b86' }}>Ask</div>
+                      <div className="font-bold text-sm" style={{ color: '#26a69a' }}>
+                        {ask.toFixed(2)}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div className="mb-4">
-              <label
-                className="block text-sm mb-2"
-                style={{ color: '#787b86' }}
-              >
-                Order Type
+            {/* ── Execution Type Dropdown ── */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                Type
               </label>
               <select
-                value={orderType}
-                onChange={(e) => setOrderType(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg text-base"
+                value={orderExecType}
+                onChange={(e) => {
+                  setOrderExecType(e.target.value);
+                  setLimitPrice('');
+                }}
+                className="w-full px-3 py-2.5 rounded-lg text-sm appearance-none cursor-pointer"
                 style={{
                   background: '#2a2e39',
                   border: '1px solid #363a45',
                   color: '#d1d4dc',
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23787b86' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'right 12px center',
                 }}
               >
-                <option value="market">Market</option>
+                {ORDER_EXEC_TYPES.map((ot) => (
+                  <option key={ot.id} value={ot.id}>{ot.label}</option>
+                ))}
               </select>
             </div>
 
-            <div className="mb-4">
-              <label
-                className="block text-sm mb-2"
-                style={{ color: '#787b86' }}
-              >
-                Quantity
+            {/* ── Volume (Quantity) ── */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                Volume
               </label>
-              <input
-                type="number"
-                value={quantity}
-                onChange={(e) =>
-                  setQuantity(Math.max(1, Number(e.target.value || 1)))
-                }
-                className="w-full px-4 py-3 rounded-lg text-xl font-bold text-center"
-                style={{
-                  background: '#2a2e39',
-                  border: '1px solid #363a45',
-                  color: '#d1d4dc',
-                }}
-                min="1"
-              />
+              <div className="flex items-center gap-0">
+                <button
+                  onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                  className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  value={quantity}
+                  onChange={(e) => setQuantity(Math.max(1, Number(e.target.value || 1)))}
+                  className="flex-1 h-10 px-2 text-center text-base font-bold"
+                  style={{
+                    background: '#2a2e39',
+                    border: '1px solid #363a45',
+                    borderLeft: 'none',
+                    borderRight: 'none',
+                    color: '#d1d4dc',
+                  }}
+                  min="1"
+                />
+                <button
+                  onClick={() => setQuantity(quantity + 1)}
+                  className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  +
+                </button>
+              </div>
+              <div className="flex gap-1 mt-1.5">
+                {[1, 5, 10, 25, 50, 100].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => setQuantity(q)}
+                    className="flex-1 py-1 rounded text-[11px] font-medium"
+                    style={{
+                      background: quantity === q ? '#2962ff' : '#2a2e39',
+                      color: quantity === q ? '#fff' : '#787b86',
+                      border: `1px solid ${quantity === q ? '#2962ff' : '#363a45'}`,
+                    }}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            {/* ── Price (only for Limit/Stop orders) ── */}
+            {needsPrice && (
               <div>
-                <label
-                  className="block text-sm mb-2"
-                  style={{ color: '#787b86' }}
-                >
-                  Stop Loss
+                <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                  Price
+                  {orderExecType === 'buy_limit' && (
+                    <span className="ml-1" style={{ color: '#f5c542' }}>
+                      (≤ {(ask * 0.995).toFixed(2)})
+                    </span>
+                  )}
+                  {orderExecType === 'sell_limit' && (
+                    <span className="ml-1" style={{ color: '#f5c542' }}>
+                      (≥ {(bid * 1.005).toFixed(2)})
+                    </span>
+                  )}
                 </label>
+                <div className="flex items-center gap-0">
+                  <button
+                    onClick={() => stepPrice(-1)}
+                    className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
+                    style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    value={limitPrice}
+                    onChange={(e) => setLimitPrice(e.target.value)}
+                    placeholder={
+                      orderExecType === 'buy_limit' ? (ask * 0.995).toFixed(2) :
+                      orderExecType === 'sell_limit' ? (bid * 1.005).toFixed(2) :
+                      orderExecType === 'buy_stop' ? (ask * 1.005).toFixed(2) :
+                      (bid * 0.995).toFixed(2)
+                    }
+                    className="flex-1 h-10 px-2 text-center text-base font-bold"
+                    style={{
+                      background: '#2a2e39',
+                      border: '1px solid #363a45',
+                      borderLeft: 'none',
+                      borderRight: 'none',
+                      color: '#d1d4dc',
+                    }}
+                  />
+                  <button
+                    onClick={() => stepPrice(1)}
+                    className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
+                    style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Stop Loss ── */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                Stop Loss
+              </label>
+              <div className="flex items-center gap-0">
+                <button
+                  onClick={() => stepSL(-1)}
+                  className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  −
+                </button>
                 <input
                   type="number"
                   value={stopLoss}
                   onChange={(e) => setStopLoss(e.target.value)}
-                  className="w-full px-4 py-3 rounded-lg text-base"
+                  placeholder="0.00"
+                  className="flex-1 h-10 px-2 text-center text-base font-bold"
                   style={{
                     background: '#2a2e39',
                     border: '1px solid #363a45',
+                    borderLeft: 'none',
+                    borderRight: 'none',
                     color: '#d1d4dc',
                   }}
-                  placeholder="0.00"
                 />
-              </div>
-              <div>
-                <label
-                  className="block text-sm mb-2"
-                  style={{ color: '#787b86' }}
+                <button
+                  onClick={() => stepSL(1)}
+                  className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
                 >
-                  Take Profit
-                </label>
+                  +
+                </button>
+              </div>
+            </div>
+
+            {/* ── Take Profit ── */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                Take Profit
+              </label>
+              <div className="flex items-center gap-0">
+                <button
+                  onClick={() => stepTP(-1)}
+                  className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  −
+                </button>
                 <input
                   type="number"
                   value={takeProfit}
                   onChange={(e) => setTakeProfit(e.target.value)}
-                  className="w-full px-4 py-3 rounded-lg text-base"
+                  placeholder="0.00"
+                  className="flex-1 h-10 px-2 text-center text-base font-bold"
                   style={{
                     background: '#2a2e39',
                     border: '1px solid #363a45',
+                    borderLeft: 'none',
+                    borderRight: 'none',
                     color: '#d1d4dc',
                   }}
-                  placeholder="0.00"
                 />
+                <button
+                  onClick={() => stepTP(1)}
+                  className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
+                  style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  +
+                </button>
               </div>
             </div>
+
+            {/* ── Deviation (only for Instant Execution) ── */}
+            {isInstant && (
+              <div>
+                <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                  Deviation (points)
+                </label>
+                <div className="flex items-center gap-0">
+                  <button
+                    onClick={() => setDeviation(Math.max(0, deviation - 1))}
+                    className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
+                    style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    value={deviation}
+                    onChange={(e) => setDeviation(Math.max(0, Number(e.target.value || 0)))}
+                    className="flex-1 h-10 px-2 text-center text-base font-bold"
+                    style={{
+                      background: '#2a2e39',
+                      border: '1px solid #363a45',
+                      borderLeft: 'none',
+                      borderRight: 'none',
+                      color: '#d1d4dc',
+                    }}
+                    min="0"
+                  />
+                  <button
+                    onClick={() => setDeviation(deviation + 1)}
+                    className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
+                    style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Comment (optional, like MT5) ── */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>
+                Comment
+              </label>
+              <input
+                type="text"
+                placeholder=""
+                className="w-full px-3 py-2.5 rounded-lg text-sm"
+                style={{
+                  background: '#2a2e39',
+                  border: '1px solid #363a45',
+                  color: '#d1d4dc',
+                }}
+              />
+            </div>
+
           </div>
 
+          {/* ── Sticky Footer — Buy/Sell Buttons ── */}
           <div
-            className="sticky bottom-0 p-4 border-t shrink-0"
+            className="p-4 border-t shrink-0"
             style={{ borderColor: '#363a45', background: '#1e222d' }}
           >
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={() => placeOrderWithQty('sell', quantity)}
-                className="py-4 rounded-lg font-bold text-white text-xl"
-                style={{ background: '#ef5350' }}
-              >
-                SELL
-              </button>
-              <button
-                onClick={() => placeOrderWithQty('buy', quantity)}
-                className="py-4 rounded-lg font-bold text-white text-xl"
-                style={{ background: '#26a69a' }}
-              >
-                BUY
-              </button>
-            </div>
+            {closingMode ? (
+              <div className="p-3 rounded-lg flex items-center gap-2" style={{ background: '#ff980020' }}>
+                <Lock size={16} color="#ff9800" />
+                <span className="text-sm" style={{ color: '#ff9800' }}>
+                  Closing mode — new orders disabled
+                </span>
+              </div>
+            ) : isInstant ? (
+              <>
+                {/* Instant Execution — Two buttons side by side like MT5 */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => placeOrderWithQty('sell', quantity)}
+                    className="py-3.5 rounded-lg font-bold text-white flex flex-col items-center"
+                    style={{ background: '#ef5350' }}
+                  >
+                    <span className="text-xs font-normal opacity-80">Sell by Market</span>
+                    <span className="text-lg">{bid.toFixed(2)}</span>
+                  </button>
+                  <button
+                    onClick={() => placeOrderWithQty('buy', quantity)}
+                    className="py-3.5 rounded-lg font-bold text-white flex flex-col items-center"
+                    style={{ background: '#26a69a' }}
+                  >
+                    <span className="text-xs font-normal opacity-80">Buy by Market</span>
+                    <span className="text-lg">{ask.toFixed(2)}</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Limit/Stop — Single place button */}
+                <button
+                  onClick={() => {
+                    const dir = inferredType;
+                    if (!dir) return toast.error('Select an order type');
+                    placeOrderWithQty(dir, quantity, orderExecType, limitPrice);
+                  }}
+                  className="w-full py-3.5 rounded-lg font-bold text-white text-base"
+                  style={{
+                    background: inferredType === 'buy' ? '#26a69a' : '#ef5350',
+                  }}
+                >
+                  Place {ORDER_EXEC_TYPES.find((o) => o.id === orderExecType)?.label || ''}
+                </button>
+
+                {/* Validation hint */}
+                {orderExecType === 'buy_limit' && (
+                  <div className="text-xs mt-2 text-center" style={{ color: '#787b86' }}>
+                    Price must be below {(ask * 0.995).toFixed(2)} (0.5% below Ask)
+                  </div>
+                )}
+                {orderExecType === 'sell_limit' && (
+                  <div className="text-xs mt-2 text-center" style={{ color: '#787b86' }}>
+                    Price must be above {(bid * 1.005).toFixed(2)} (0.5% above Bid)
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2920,7 +3007,7 @@ const Dashboard = () => {
             style={{ background: '#252832' }}
           >
             <div
-              className="text-[10px] font-medium"
+              className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
               Margin
@@ -2937,7 +3024,7 @@ const Dashboard = () => {
             style={{ background: '#252832' }}
           >
             <div
-              className="text-[10px] font-medium"
+              className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
               Free Margin
@@ -2954,7 +3041,7 @@ const Dashboard = () => {
             style={{ background: '#252832' }}
           >
             <div
-              className="text-[10px] font-medium"
+              className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
               Margin Lvl
@@ -2978,7 +3065,7 @@ const Dashboard = () => {
             style={{ background: '#252832' }}
           >
             <div
-              className="text-[10px] font-medium"
+              className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
               Leverage
@@ -2997,7 +3084,7 @@ const Dashboard = () => {
         className="flex border-b"
         style={{ borderColor: '#363a45' }}
       >
-        {[
+      {[
           {
             id: 'positions',
             label: `Positions (${openTrades.length})`,
@@ -3006,7 +3093,6 @@ const Dashboard = () => {
             id: 'pending',
             label: `Pending (${pendingOrders?.length || 0})`,
           },
-          { id: 'summary', label: 'Summary' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -3119,20 +3205,28 @@ const Dashboard = () => {
                             )}
                           </div>
                           <div>
-                            <div
-                              className="font-bold text-base"
-                              style={{ color: '#d1d4dc' }}
-                            >
-                              {trade.symbol}
+                            <div className="flex items-center gap-2">
+                              <span
+                                className="font-bold text-base"
+                                style={{ color: '#d1d4dc' }}
+                              >
+                                {trade.symbol}
+                              </span>
+                              <span
+                                className="font-bold text-base px-1.5 py-0.5 rounded"
+                                style={{
+                                  color: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350',
+                                  background: trade.trade_type === 'buy' ? '#26a69a15' : '#ef535015',
+                                }}
+                              >
+                                {trade.quantity}
+                              </span>
                             </div>
                             <div
                               className="text-xs"
                               style={{ color: '#787b86' }}
                             >
-                              {String(
-                                trade.trade_type || ''
-                              ).toUpperCase()}{' '}
-                              • Qty {trade.quantity}
+                              {String(trade.trade_type || '').toUpperCase()}
                             </div>
                           </div>
                         </div>
@@ -3169,7 +3263,7 @@ const Dashboard = () => {
                       </div>
 
                       <div
-                        className="flex justify-between text-xs mt-2"
+                        className="flex justify-between text-sm mt-2"
                         style={{ color: '#787b86' }}
                       >
                         <span>
@@ -3310,7 +3404,7 @@ const Dashboard = () => {
           </div>
         )}
 
-        {tradeTabSection === 'summary' && (
+        {/* {tradeTabSection === 'summary' && (
           <div className="p-4 space-y-3">
             <div
               className="p-4 rounded-lg"
@@ -3416,10 +3510,9 @@ const Dashboard = () => {
                 </div>
               )}
           </div>
-        )}
+        )} */}
       </div>
 
-      {renderOrderModal()}
       {renderModifyPositionModal()}
       {renderCloseConfirmModal()}
     </div>
@@ -3427,122 +3520,97 @@ const Dashboard = () => {
 
   // ============ HISTORY TAB ============
   const renderHistoryTab = () => {
+    const periodLabel = HISTORY_PERIODS.find((p) => p.id === historyPeriod)?.label || 'Last Month';
+
     return (
-      <div
-        className="flex flex-col h-full"
-        style={{ background: '#1e222d' }}
-      >
-        <div
-          className="p-3 border-b"
-          style={{ borderColor: '#363a45' }}
-        >
-          <div className="flex gap-1 overflow-x-auto pb-2">
-            {HISTORY_PERIODS.map((p) => (
+      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+        {/* ── Header ── */}
+        <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45' }}>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex gap-2">
+              {[
+                { id: 'positions', label: 'Positions' },
+                { id: 'orders', label: 'Orders' },
+                { id: 'deals', label: 'Deals' },
+              ].map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setHistoryViewMode(m.id)}
+                  className="px-3 py-2 rounded-lg text-sm font-medium"
+                  style={{
+                    background: historyViewMode === m.id ? '#2a2e39' : 'transparent',
+                    color: historyViewMode === m.id ? '#d1d4dc' : '#787b86',
+                    border: `1px solid ${historyViewMode === m.id ? '#363a45' : 'transparent'}`,
+                  }}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="relative" ref={historyCalendarRef}>
               <button
-                key={p.id}
-                onClick={() => setHistoryPeriod(p.id)}
-                className="px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
-                style={{
-                  background:
-                    historyPeriod === p.id ? '#2962ff' : '#2a2e39',
-                  color:
-                    historyPeriod === p.id ? '#fff' : '#787b86',
-                }}
+                onClick={() => setShowHistoryCalendar(!showHistoryCalendar)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg"
+                style={{ background: '#2a2e39', border: '1px solid #363a45' }}
               >
-                {p.label}
+                <CalendarDays size={16} color="#787b86" />
+                <span className="text-xs font-medium" style={{ color: '#d1d4dc' }}>{periodLabel}</span>
+                <ChevronDown size={14} color="#787b86" />
               </button>
-            ))}
+
+              {showHistoryCalendar && (
+                <div
+                  className="absolute top-full right-0 mt-1 rounded-lg overflow-hidden z-30 w-44"
+                  style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+                >
+                  {HISTORY_PERIODS.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => { setHistoryPeriod(p.id); setShowHistoryCalendar(false); }}
+                      className="w-full px-3 py-2.5 text-left text-sm hover:bg-white/5"
+                      style={{ color: historyPeriod === p.id ? '#2962ff' : '#d1d4dc' }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="flex gap-2 mt-2">
-            {[
-              { id: 'positions', label: 'Positions' },
-              { id: 'deals', label: 'Deals' },
-            ].map((m) => (
+          {(historyViewMode === 'positions' || historyViewMode === 'deals') && (
+            <div className="relative" ref={historyViewMode === 'deals' ? dealsDropdownRef : historyDropdownRef}>
               <button
-                key={m.id}
-                onClick={() => setHistoryViewMode(m.id)}
-                className="flex-1 py-2.5 rounded-lg text-sm font-medium"
-                style={{
-                  background:
-                    historyViewMode === m.id
-                      ? '#2a2e39'
-                      : 'transparent',
-                  color:
-                    historyViewMode === m.id
-                      ? '#d1d4dc'
-                      : '#787b86',
-                  border: `1px solid ${historyViewMode === m.id ? '#363a45' : 'transparent'}`,
+                onClick={() => {
+                  if (historyViewMode === 'deals') setShowDealsSymbolDropdown(!showDealsSymbolDropdown);
+                  else setShowHistorySymbolDropdown(!showHistorySymbolDropdown);
                 }}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-
-          {historyViewMode === 'positions' && (
-            <div
-              className="mt-2 relative"
-              ref={historyDropdownRef}
-            >
-              <button
-                onClick={() =>
-                  setShowHistorySymbolDropdown(
-                    !showHistorySymbolDropdown
-                  )
-                }
                 className="w-full px-3 py-2 rounded-lg text-sm text-left flex items-center justify-between"
-                style={{
-                  background: '#2a2e39',
-                  border: '1px solid #363a45',
-                  color: '#d1d4dc',
-                }}
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
               >
                 <span>
-                  {historyLocalSymbolFilter || 'All Symbols'}
+                  {historyViewMode === 'deals'
+                    ? dealsSymbolFilter || 'All Symbols'
+                    : historyLocalSymbolFilter || 'All Symbols'}
                 </span>
                 <ChevronDown size={16} color="#787b86" />
               </button>
 
-              {showHistorySymbolDropdown && (
-                <div
-                  className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto"
-                  style={{
-                    background: '#2a2e39',
-                    border: '1px solid #363a45',
-                  }}
-                >
-                  <button
-                    onClick={() => {
-                      setHistoryLocalSymbolFilter('');
-                      setShowHistorySymbolDropdown(false);
-                    }}
-                    className="w-full px-3 py-2 text-left text-sm hover:bg-white/5"
-                    style={{
-                      color: !historyLocalSymbolFilter
-                        ? '#2962ff'
-                        : '#d1d4dc',
-                    }}
-                  >
-                    All Symbols
-                  </button>
+              {historyViewMode === 'positions' && showHistorySymbolDropdown && (
+                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
+                  <button onClick={() => { setHistoryLocalSymbolFilter(''); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !historyLocalSymbolFilter ? '#2962ff' : '#d1d4dc' }}>All Symbols</button>
                   {historyUniqueSymbols.map((sym) => (
-                    <button
-                      key={sym}
-                      onClick={() => {
-                        setHistoryLocalSymbolFilter(sym);
-                        setShowHistorySymbolDropdown(false);
-                      }}
-                      className="w-full px-3 py-2 text-left text-sm hover:bg-white/5"
-                      style={{
-                        color:
-                          historyLocalSymbolFilter === sym
-                            ? '#2962ff'
-                            : '#d1d4dc',
-                      }}
-                    >
-                      {sym}
-                    </button>
+                    <button key={sym} onClick={() => { setHistoryLocalSymbolFilter(sym); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : '#d1d4dc' }}>{sym}</button>
+                  ))}
+                </div>
+              )}
+
+              {historyViewMode === 'deals' && showDealsSymbolDropdown && (
+                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
+                  <button onClick={() => { setDealsSymbolFilter(''); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !dealsSymbolFilter ? '#2962ff' : '#d1d4dc' }}>All Symbols</button>
+                  {dealsUniqueSymbols.map((sym) => (
+                    <button key={sym} onClick={() => { setDealsSymbolFilter(sym); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: dealsSymbolFilter === sym ? '#2962ff' : '#d1d4dc' }}>{sym}</button>
                   ))}
                 </div>
               )}
@@ -3550,130 +3618,65 @@ const Dashboard = () => {
           )}
         </div>
 
+        {/* ── Positions Stats ── */}
         {historyViewMode === 'positions' && (
-          <div
-            className="p-3 border-b grid grid-cols-3 gap-2 text-center"
-            style={{
-              borderColor: '#363a45',
-              background: '#252832',
-            }}
-          >
-            <div>
-              <div className="text-xs" style={{ color: '#787b86' }}>
-                Trades
+          <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45', background: '#252832' }}>
+            <div className="grid grid-cols-4 gap-2 text-center">
+              <div>
+                <div className="text-xs" style={{ color: '#787b86' }}>Trades</div>
+                <div className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{historyOverallStats.count}</div>
               </div>
-              <div
-                className="font-bold"
-                style={{ color: '#d1d4dc' }}
-              >
-                {historyOverallStats.count}
+              <div>
+                <div className="text-xs" style={{ color: '#787b86' }}>Total Buy</div>
+                <div className="font-bold text-sm" style={{ color: '#26a69a' }}>{positionAggregates.totalBuyQty}</div>
               </div>
-            </div>
-            <div>
-              <div className="text-xs" style={{ color: '#787b86' }}>
-                Profit
+              <div>
+                <div className="text-xs" style={{ color: '#787b86' }}>Total Sell</div>
+                <div className="font-bold text-sm" style={{ color: '#ef5350' }}>{positionAggregates.totalSellQty}</div>
               </div>
-              <div
-                className="font-bold"
-                style={{ color: '#26a69a' }}
-              >
-                +{formatINR(historyOverallStats.totalProfit)}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs" style={{ color: '#787b86' }}>
-                Loss
-              </div>
-              <div
-                className="font-bold"
-                style={{ color: '#ef5350' }}
-              >
-                -{formatINR(historyOverallStats.totalLoss)}
+              <div>
+                <div className="text-xs" style={{ color: '#787b86' }}>Net P&L</div>
+                <div className="font-bold text-sm" style={{ color: historyOverallStats.netPnL >= 0 ? '#26a69a' : '#ef5350' }}>
+                  {historyOverallStats.netPnL >= 0 ? '+' : ''}{formatINR(historyOverallStats.netPnL)}
+                </div>
               </div>
             </div>
           </div>
         )}
 
+        {/* ── Scrollable Content ── */}
         <div className="flex-1 overflow-y-auto">
           {historyViewMode === 'positions' && (
             <>
               {historyDisplayTrades.length === 0 ? (
-                <div
-                  className="p-8 text-center"
-                  style={{ color: '#787b86' }}
-                >
-                  <Clock
-                    size={48}
-                    className="mx-auto mb-3 opacity-30"
-                  />
-                  <div className="text-base">
-                    No closed positions
-                  </div>
+                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base">No closed positions</div>
                 </div>
               ) : (
                 historyDisplayTrades.map((t) => {
                   const pnl = Number(t.profit || 0);
                   return (
-                    <div
-                      key={t.id}
-                      className="p-3 border-b"
-                      style={{ borderColor: '#363a45' }}
-                    >
+                    <div key={t.id} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
                       <div className="flex items-start justify-between">
                         <div>
-                          <div
-                            className="font-bold text-base"
-                            style={{ color: '#d1d4dc' }}
-                          >
-                            {t.symbol}
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-base" style={{ color: '#d1d4dc' }}>{t.symbol}</span>
+                            <span className="font-bold text-sm px-1.5 py-0.5 rounded" style={{ color: t.trade_type === 'buy' ? '#26a69a' : '#ef5350', background: t.trade_type === 'buy' ? '#26a69a15' : '#ef535015' }}>
+                              {t.quantity}
+                            </span>
                           </div>
-                          <div
-                            className="text-sm"
-                            style={{ color: '#787b86' }}
-                          >
-                            {String(
-                              t.trade_type || ''
-                            ).toUpperCase()}{' '}
-                            • Qty {t.quantity}
-                          </div>
-                          <div
-                            className="text-xs mt-1"
-                            style={{ color: '#787b86' }}
-                          >
-                            {t.close_time
-                              ? new Date(
-                                  t.close_time
-                                ).toLocaleString()
-                              : ''}
+                          <div className="text-xs mt-0.5" style={{ color: '#787b86' }}>
+                            {String(t.trade_type || '').toUpperCase()} • {t.close_time ? new Date(t.close_time).toLocaleString() : ''}
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div
-                            className="font-bold text-lg"
-                            style={{
-                              color:
-                                pnl >= 0
-                                  ? '#26a69a'
-                                  : '#ef5350',
-                            }}
-                          >
-                            {pnl >= 0 ? '+' : ''}
-                            {formatINR(pnl)}
-                          </div>
+                        <div className="font-bold text-lg" style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}>
+                          {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
                         </div>
                       </div>
-                      <div
-                        className="flex gap-4 mt-2 text-xs"
-                        style={{ color: '#787b86' }}
-                      >
-                        <span>
-                          Open:{' '}
-                          {Number(t.open_price || 0).toFixed(2)}
-                        </span>
-                        <span>
-                          Close:{' '}
-                          {Number(t.close_price || 0).toFixed(2)}
-                        </span>
+                      <div className="flex gap-4 mt-2 text-xs" style={{ color: '#787b86' }}>
+                        <span>Open: {Number(t.open_price || 0).toFixed(2)}</span>
+                        <span>Close: {Number(t.close_price || 0).toFixed(2)}</span>
                       </div>
                     </div>
                   );
@@ -3682,77 +3685,104 @@ const Dashboard = () => {
             </>
           )}
 
+          {historyViewMode === 'orders' && (
+            <>
+              {(historyDisplayTrades || []).length === 0 ? (
+                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base">No orders found</div>
+                </div>
+              ) : (
+                (historyDisplayTrades || []).map((o) => (
+                  <div key={o.id} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{o.symbol}</span>
+                        <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ background: o.trade_type === 'buy' ? '#26a69a20' : '#ef535020', color: o.trade_type === 'buy' ? '#26a69a' : '#ef5350' }}>
+                          {String(o.trade_type || '').toUpperCase()} {o.quantity}
+                        </span>
+                      </div>
+                      <span className="text-xs px-2 py-0.5 rounded" style={{ background: '#26a69a20', color: '#26a69a' }}>
+                        executed
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between mt-1">
+                      <div className="text-xs" style={{ color: '#787b86' }}>@ {Number(o.open_price || 0).toFixed(2)}</div>
+                      <div className="text-xs" style={{ color: '#787b86' }}>{o.open_time ? new Date(o.open_time).toLocaleString() : ''}</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </>
+          )}
+
           {historyViewMode === 'deals' && (
             <>
               {dealsSummary && (
-                <div
-                  className="p-3 border-b"
-                  style={{
-                    borderColor: '#363a45',
-                    background: '#252832',
-                  }}
-                >
+                <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45', background: '#252832' }}>
                   <div className="grid grid-cols-2 gap-2 text-sm">
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>
-                        Profit:
-                      </span>
-                      <span style={{ color: '#26a69a' }}>
-                        +{formatINR(dealsSummary.totalProfit)}
-                      </span>
+                      <span style={{ color: '#787b86' }}>Profit:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalProfit)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>
-                        Loss:
-                      </span>
-                      <span style={{ color: '#ef5350' }}>
-                        -{formatINR(dealsSummary.totalLoss)}
-                      </span>
+                      <span style={{ color: '#787b86' }}>Loss:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalLoss)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>
-                        Deposits:
-                      </span>
-                      <span style={{ color: '#26a69a' }}>
-                        +{formatINR(dealsSummary.totalDeposits)}
-                      </span>
+                      <span style={{ color: '#787b86' }}>Deposits:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalDeposits)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>
-                        Withdrawals:
-                      </span>
-                      <span style={{ color: '#ef5350' }}>
-                        -{formatINR(dealsSummary.totalWithdrawals)}
-                      </span>
+                      <span style={{ color: '#787b86' }}>Withdrawals:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalWithdrawals)}</span>
                     </div>
-                    <div
-                      className="flex justify-between col-span-2 pt-2 border-t"
-                      style={{ borderColor: '#363a45' }}
-                    >
-                      <span style={{ color: '#787b86' }}>
-                        Total Commission:
-                      </span>
-                      <span
-                        className="font-bold"
-                        style={{ color: '#f5c542' }}
-                      >
-                        {formatINR(dealsSummary.totalCommission)}
-                      </span>
+                    <div className="flex justify-between col-span-2 pt-2 border-t" style={{ borderColor: '#363a45' }}>
+                      <span style={{ color: '#787b86' }}>Commission:</span>
+                      <span className="font-bold" style={{ color: '#f5c542' }}>{formatINR(dealsSummary.totalCommission)}</span>
                     </div>
                   </div>
                 </div>
               )}
-              {(!deals || deals.length === 0) && (
-                <div
-                  className="p-8 text-center"
-                  style={{ color: '#787b86' }}
-                >
-                  <Clock
-                    size={48}
-                    className="mx-auto mb-3 opacity-30"
-                  />
+
+              {filteredDeals.length === 0 ? (
+                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
                   <div className="text-base">No deals found</div>
                 </div>
+              ) : (
+                filteredDeals.map((d, idx) => {
+                  const dp = Number(d.profit || 0);
+                  const dt = d.time || d.close_time || d.open_time || d.created_at;
+                  return (
+                    <div key={d.id || idx} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{d.symbol || '—'}</span>
+                          {d.type && (
+                            <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ background: d.type === 'buy' ? '#26a69a20' : d.type === 'sell' ? '#ef535020' : '#2962ff20', color: d.type === 'buy' ? '#26a69a' : d.type === 'sell' ? '#ef5350' : '#2962ff' }}>
+                              {String(d.type).toUpperCase()}
+                            </span>
+                          )}
+                        </div>
+                        {dp !== 0 && (
+                          <span className="font-bold text-sm" style={{ color: dp >= 0 ? '#26a69a' : '#ef5350' }}>
+                            {dp >= 0 ? '+' : ''}{formatINR(dp)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between mt-1">
+                        <div className="text-xs" style={{ color: '#787b86' }}>
+                          {d.quantity ? `Qty: ${d.quantity}` : ''}{d.price ? ` @ ${Number(d.price).toFixed(2)}` : ''}
+                          {d.commission ? ` | Comm: ${formatINR(d.commission)}` : ''}
+                        </div>
+                        <div className="text-xs" style={{ color: '#787b86' }}>
+                          {dt ? new Date(dt).toLocaleString() : ''}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </>
           )}
@@ -4177,13 +4207,9 @@ const Dashboard = () => {
             </div>
             <div
               className="text-xs mt-2 p-2 rounded"
-              style={{
-                background: '#1e222d',
-                color: '#787b86',
-              }}
+              style={{ background: '#252832', color: '#787b86' }}
             >
-              Note: Theme changes are saved but full visual theme
-              support is coming soon.
+              Mode applied!.
             </div>
           </div>
 
@@ -4379,11 +4405,14 @@ const Dashboard = () => {
   return (
     <div
       className="h-screen flex flex-col"
-      style={{ background: '#131722' }}
+      style={{ background: theme === 'light' ? '#f6f7fb' : '#131722' }}
     >
       <header
         className="h-16 flex items-center justify-between px-4 border-b shrink-0"
-        style={{ background: '#1e222d', borderColor: '#363a45' }}
+        style={{ 
+          background: theme === 'light' ? '#ffffff' : '#1e222d', 
+          borderColor: theme === 'light' ? '#e2e8f0' : '#363a45' 
+        }}
       >
         <div className="flex items-center gap-3">
           <img
@@ -4431,7 +4460,7 @@ const Dashboard = () => {
         </div>
 
         <div
-          className="text-base font-bold"
+          className="text-lg font-bold lg:text-base"
           style={{
             color: totalPnL >= 0 ? '#26a69a' : '#ef5350',
           }}
@@ -4516,7 +4545,10 @@ const Dashboard = () => {
       </div>
 
       {/* Mobile — all render functions, no <Component /> */}
-      <div className="lg:hidden flex-1 overflow-hidden pb-16">
+      <div
+        className="lg:hidden flex-1 overflow-hidden"
+        style={{ paddingBottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))' }}
+      >
         {activeTab === 'quotes' && renderQuotesTab()}
         {activeTab === 'chart' && renderChartTab()}
         {activeTab === 'trade' && renderTradeTab()}
@@ -4534,6 +4566,7 @@ const Dashboard = () => {
       </div>
 
       {renderMobileNav()}
+      {renderOrderModal()}
     </div>
   );
 };

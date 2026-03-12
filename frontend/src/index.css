@@ -1,8 +1,29 @@
 /* frontend/src/index.css */
 @import "tailwindcss";
 
+/* ===== App Theme Variables ===== */
+:root {
+  --app-bg: #131722;
+  --app-panel: #1e222d;
+  --app-input: #2a2e39;
+  --app-card: #252832;
+  --app-border: #363a45;
+  --app-text: #d1d4dc;
+  --app-muted: #787b86;
+}
+
+:root[data-theme="light"] {
+  --app-bg: #f6f7fb;
+  --app-panel: #ffffff;
+  --app-input: #f1f5f9;
+  --app-card: #f8fafc;
+  --app-border: #e2e8f0;
+  --app-text: #0f172a;
+  --app-muted: #64748b;
+}
+
 /* ===== MT5-inspired Theme ===== */
-:root{
+:root {
   --mt5-bg: #1b1f2a;
   --mt5-panel: #202636;
   --mt5-panel2: #1f2433;
@@ -17,7 +38,7 @@
 }
 
 /* ✅ Light theme overrides */
-:root[data-theme="light"]{
+:root[data-theme="light"] {
   --mt5-bg: #f6f7fb;
   --mt5-panel: #ffffff;
   --mt5-panel2: #f1f5f9;
@@ -43,9 +64,9 @@ html, body, #root {
 
 body {
   font-family: Segoe UI, Tahoma, Arial, sans-serif;
-  background: var(--mt5-bg);
-  color: var(--mt5-text);
-  font-size: 14px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -60,21 +81,23 @@ h2 { font-size: 1.75rem; }
 h3 { font-size: 1.5rem; }
 h4 { font-size: 1.25rem; }
 
+/* ===== Scrollbar ===== */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--mt5-panel);
+  background: var(--app-panel);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--mt5-border);
+  background: var(--app-border);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #3a425a;
 }
 
+/* ===== Theme utility classes ===== */
 .mt5-bg { background: var(--mt5-bg); }
 .mt5-panel { background: var(--mt5-panel); }
 .mt5-panel2 { background: var(--mt5-panel2); }
@@ -91,20 +114,117 @@ h4 { font-size: 1.25rem; }
 .bg-green-500\/20 { background-color: rgba(0, 200, 83, 0.18); }
 .bg-red-500\/20 { background-color: rgba(255, 82, 82, 0.18); }
 
+/* ===== Base input/button sizing ===== */
 input, select, textarea, button {
-  font-size: 14px;
+  font-size: 15px;
 }
 
-@media (max-width: 768px) {
-  input, select, textarea {
+/* ===== MOBILE FONT SIZE OVERRIDES ===== */
+@media (max-width: 1024px) {
+  body {
+    font-size: 16px;
+  }
+
+  input, select, textarea, button {
     font-size: 16px !important;
   }
-  
-  body {
-    font-size: 14px;
+
+  /* ✅ Increase Tailwind text-xs from 12px → 13px on mobile */
+  .text-xs {
+    font-size: 13px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Increase Tailwind text-sm from 14px → 15px on mobile */
+  .text-sm {
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ text-base stays 16px (already fine) */
+  .text-base {
+    font-size: 16px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ Increase text-lg from 18px → 19px */
+  .text-lg {
+    font-size: 19px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ Increase text-xl from 20px → 22px */
+  .text-xl {
+    font-size: 22px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Make tiny labels (text-[10px], text-[11px]) readable */
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Prices in quotes/trade — bigger and bolder */
+  .font-mono {
+    font-size: 15px !important;
+    letter-spacing: 0.02em;
+  }
+
+  /* ✅ Bottom nav labels */
+  .fixed.bottom-0 span {
+    font-size: 11px !important;
+  }
+
+  /* ✅ Bigger tap targets for mobile */
+  button {
+    min-height: 36px;
+  }
+
+  /* ✅ Modal headings */
+  .font-bold.text-lg {
+    font-size: 20px !important;
+  }
+
+  /* ✅ Trade P&L numbers */
+  .font-bold {
+    font-size: inherit;
+  }
+
+  /* ✅ Grid row items need more vertical space */
+  .grid.items-center {
+    min-height: 52px;
+  }
+
+  /* ✅ Search input placeholder */
+  input::placeholder {
+    font-size: 15px;
+  }
+
+  /* ✅ Category filter pills */
+  .overflow-x-auto button {
+    min-height: 36px;
+    font-size: 14px !important;
+  }
+
+  /* ✅ Account stats bar */
+  .text-\[13px\] {
+    font-size: 14px !important;
   }
 }
 
+/* ===== Very small screens (phones < 380px) ===== */
+@media (max-width: 380px) {
+  .text-xs {
+    font-size: 12px !important;
+  }
+  .text-sm {
+    font-size: 14px !important;
+  }
+}
+
+/* ===== Safe area for notched phones ===== */
 .safe-area-bottom {
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -112,6 +232,7 @@ input, select, textarea, button {
   padding-top: env(safe-area-inset-top);
 }
 
+/* ===== Custom utility classes ===== */
 .text-lg-custom {
   font-size: 1.125rem;
   line-height: 1.6;
@@ -122,6 +243,7 @@ input, select, textarea, button {
   line-height: 1.6;
 }
 
+/* ===== Logo ===== */
 .logo-container {
   display: flex;
   align-items: center;
@@ -138,4 +260,36 @@ input, select, textarea, button {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* ===== Smooth price transitions ===== */
+@media (max-width: 1024px) {
+  .price-cell {
+    transition: color 0.15s ease;
+  }
+}
+
+/* ===== Prevent iOS zoom on input focus ===== */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* ===== Capacitor / WebView specific ===== */
+@media (display-mode: standalone),
+       (display-mode: fullscreen) {
+  body {
+    font-size: 16px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Slightly larger for standalone app */
+  .text-xs {
+    font-size: 13px !important;
+  }
+  .text-sm {
+    font-size: 15px !important;
+  }
 }

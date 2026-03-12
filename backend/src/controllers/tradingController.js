@@ -1,5 +1,21 @@
 // backend/src/controllers/tradingController.js
 const { supabase } = require('../config/supabase');
+const kiteStreamService = require('../services/kiteStreamService');
+
+// ============ MARKET HOURS CHECK ============
+const isMarketOpen = () => {
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utcMs + 5.5 * 3600000);
+
+  const day = ist.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  // Market hours: 9:15 AM to 3:30 PM IST
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+};
+
 
 // ============ GET POSITIONS ============
 exports.getPositions = async (req, res) => {
@@ -87,6 +103,16 @@ exports.placeOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Quantity must be greater than 0' });
     }
 
+    // ════════════════════════════════════════
+    //  MARKET HOURS CHECK
+    // ════════════════════════════════════════
+    if (!isMarketOpen()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Market is closed. Orders can only be placed between 9:15 AM and 3:30 PM IST, Monday to Friday.',
+      });
+    }
+
     const { data: userData, error: userError } = await supabase
       .from('users')
       .select('closing_mode, brokerage_rate')
@@ -126,13 +152,100 @@ exports.placeOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Symbol not found' });
     }
 
-    if (orderType !== 'market') {
-      return res.status(400).json({ success: false, message: 'Only market orders are currently supported' });
+    // ════════════════════════════════════════
+    //  PENDING ORDER TYPES (Buy Limit, Sell Limit, Buy Stop, Sell Stop)
+    // ════════════════════════════════════════
+    if (orderType !== 'market' && orderType !== 'instant') {
+      // Validate pending order type
+      const validPendingTypes = ['buy_limit', 'sell_limit', 'buy_stop', 'sell_stop'];
+      if (!validPendingTypes.includes(orderType)) {
+        return res.status(400).json({ success: false, message: `Invalid order type: ${orderType}` });
+      }
+
+      if (!price || price <= 0) {
+        return res.status(400).json({ success: false, message: 'Price is required for limit/stop orders' });
+      }
+
+      // Get current market price for validation
+      const kiteStreamService = require('../services/kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
+      const currentBid = livePrice?.bid || parseFloat(symbolData.bid || symbolData.last_price || 0);
+      const currentAsk = livePrice?.ask || parseFloat(symbolData.ask || symbolData.last_price || 0);
+      const cmp = type === 'buy' ? currentAsk : currentBid;
+
+      // Buy Limit: price must be ≤ 0.5% below CMP
+      if (orderType === 'buy_limit' && price > cmp * 0.995) {
+        return res.status(400).json({
+          success: false,
+          message: `Buy Limit price must be at least 0.5% below current price. Max: ₹${(cmp * 0.995).toFixed(2)}`,
+        });
+      }
+
+      // Sell Limit: price must be ≥ 0.5% above CMP
+      if (orderType === 'sell_limit' && price < cmp * 1.005) {
+        return res.status(400).json({
+          success: false,
+          message: `Sell Limit price must be at least 0.5% above current price. Min: ₹${(cmp * 1.005).toFixed(2)}`,
+        });
+      }
+
+      // Create pending order
+      try {
+        const pendingOrderData = {
+          user_id: userId,
+          account_id: accountId,
+          symbol: symbolData.symbol,
+          exchange: symbolData.exchange || 'NSE',
+          order_type: orderType,
+          trade_type: type,
+          quantity: parseFloat(quantity),
+          price: parseFloat(price),
+          stop_loss: parseFloat(stopLoss) || 0,
+          take_profit: parseFloat(takeProfit) || 0,
+          status: 'pending',
+          comment,
+          created_at: new Date().toISOString(),
+        };
+
+        const { data: pendingOrder, error: poError } = await supabase
+          .from('pending_orders')
+          .insert(pendingOrderData)
+          .select()
+          .single();
+
+        if (poError) {
+          console.error('Pending order insert error:', poError);
+          return res.status(400).json({ success: false, message: 'Failed to create pending order. Table may not exist.' });
+        }
+
+        return res.json({
+          success: true,
+          data: pendingOrder,
+          pending: true,
+          message: `${orderType.replace('_', ' ').toUpperCase()} order placed at ₹${parseFloat(price).toFixed(2)}`,
+        });
+      } catch (pendErr) {
+        console.error('Pending order error:', pendErr);
+        return res.status(400).json({ success: false, message: 'Pending orders not supported yet. Use market orders.' });
+      }
     }
 
-    const openPrice = type === 'buy' 
-      ? parseFloat(symbolData.ask || symbolData.last_price) 
-      : parseFloat(symbolData.bid || symbolData.last_price);
+    // ════════════════════════════════════════
+    //  MARKET ORDER EXECUTION
+    // ════════════════════════════════════════
+
+    // Use live price from memory cache
+    const kiteStreamService = require('../services/kiteStreamService');
+    const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
+
+    let openPrice;
+    if (livePrice) {
+      openPrice = type === 'buy' ? livePrice.ask : livePrice.bid;
+    } else {
+      openPrice = type === 'buy'
+        ? parseFloat(symbolData.ask || symbolData.last_price)
+        : parseFloat(symbolData.bid || symbolData.last_price);
+    }
 
     if (!openPrice || openPrice <= 0) {
       return res.status(400).json({ success: false, message: 'Invalid price. Market may be closed.' });
@@ -153,6 +266,83 @@ exports.placeOrder = async (req, res) => {
     const brokerageRate = userBrokerageRate;
     const buyBrokerage = type === 'buy' ? openPrice * parseFloat(quantity) * lotSize * brokerageRate : 0;
 
+    // ════════════════════════════════════════
+    //  POSITION MERGING — Same symbol + same direction → merge
+    // ════════════════════════════════════════
+    const { data: existingTrades } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('account_id', accountId)
+      .eq('symbol', symbolData.symbol)
+      .eq('trade_type', type)
+      .eq('status', 'open');
+
+    if (existingTrades && existingTrades.length > 0) {
+      // Merge into existing position
+      const existing = existingTrades[0];
+      const oldQty = parseFloat(existing.quantity);
+      const oldPrice = parseFloat(existing.open_price);
+      const addQty = parseFloat(quantity);
+      const newQty = oldQty + addQty;
+      const newAvgPrice = ((oldPrice * oldQty) + (openPrice * addQty)) / newQty;
+
+      const additionalMargin = marginRequired;
+      const additionalBrokerage = buyBrokerage;
+      const newTotalMargin = parseFloat(existing.margin || 0) + additionalMargin;
+      const newBuyBrokerage = parseFloat(existing.buy_brokerage || existing.brokerage || 0) + additionalBrokerage;
+
+      // Recalculate P&L with new average
+      const currentPrice = parseFloat(existing.current_price || openPrice);
+      const direction = type === 'buy' ? 1 : -1;
+      const newProfit = ((currentPrice - newAvgPrice) * direction * newQty * lotSize) - newBuyBrokerage;
+
+      const now = new Date().toISOString();
+
+      const { data: updatedTrade, error: updateError } = await supabase
+        .from('trades')
+        .update({
+          quantity: newQty,
+          open_price: newAvgPrice,
+          margin: newTotalMargin,
+          brokerage: newBuyBrokerage,
+          buy_brokerage: newBuyBrokerage,
+          profit: newProfit,
+          current_price: currentPrice,
+          stop_loss: parseFloat(stopLoss) || parseFloat(existing.stop_loss) || 0,
+          take_profit: parseFloat(takeProfit) || parseFloat(existing.take_profit) || 0,
+          comment: `${existing.comment || ''} [+${addQty}@${openPrice.toFixed(2)}]`.trim(),
+          updated_at: now,
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+
+      // Update account margins
+      const newAccountMargin = parseFloat(account.margin || 0) + additionalMargin;
+      const newFreeMargin = parseFloat(account.balance) - newAccountMargin;
+
+      await supabase
+        .from('accounts')
+        .update({
+          margin: newAccountMargin,
+          free_margin: Math.max(0, newFreeMargin),
+          updated_at: now,
+        })
+        .eq('id', accountId);
+
+      return res.json({
+        success: true,
+        data: updatedTrade,
+        merged: true,
+        message: `Merged into existing position. New qty: ${newQty}, Avg price: ₹${newAvgPrice.toFixed(2)}`,
+      });
+    }
+
+    // ════════════════════════════════════════
+    //  NO EXISTING POSITION — Create new trade
+    // ════════════════════════════════════════
     const tradeData = {
       user_id: userId,
       account_id: accountId,
@@ -251,16 +441,21 @@ exports.closePosition = async (req, res) => {
     const symbolData = symbolRows?.[0] || null;
 
     // ✅ FIXED: Fallback to trade's current/open price if symbol not found
+    // ✅ Use live price from memory cache first
+    const kiteStreamService = require('../services/kiteStreamService');
+    const livePrice = kiteStreamService.getPrice(trade.symbol);
+
     let closePrice;
-    if (symbolError || !symbolData) {
-      console.warn(`Symbol "${trade.symbol}" not found in symbols table, using trade's current_price as fallback`);
+    if (livePrice) {
+      closePrice = trade.trade_type === 'buy' ? livePrice.bid : livePrice.ask;
+    } else if (symbolError || !symbolData) {
+      console.warn(`Symbol "${trade.symbol}" not found, using trade current_price`);
       closePrice = parseFloat(trade.current_price || trade.open_price);
     } else {
       closePrice = trade.trade_type === 'buy' 
         ? parseFloat(symbolData.bid || symbolData.ask || trade.current_price || trade.open_price) 
         : parseFloat(symbolData.ask || symbolData.bid || trade.current_price || trade.open_price);
     }
-
     // ✅ Validate close price
     if (!closePrice || isNaN(closePrice) || closePrice <= 0) {
       return res.status(400).json({
@@ -492,8 +687,14 @@ exports.closeAllPositions = async (req, res) => {
 
       const symbolData = symbolRows?.[0];
 
+      // ✅ Use live price from memory cache
+      const kiteStreamService = require('../services/kiteStreamService');
+      const liveP = kiteStreamService.getPrice(trade.symbol);
+
       let closePrice;
-      if (!symbolData) {
+      if (liveP) {
+        closePrice = trade.trade_type === 'buy' ? liveP.bid : liveP.ask;
+      } else if (!symbolData) {
         closePrice = parseFloat(trade.current_price || trade.open_price);
       } else {
         closePrice = trade.trade_type === 'buy' 

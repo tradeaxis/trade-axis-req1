@@ -7,10 +7,9 @@ const useMarketStore = create((set, get) => ({
   quotes: {},
   loading: false,
   error: null,
-  initialized: false, // ✅ Prevents multiple fetches
+  initialized: false,
 
   fetchSymbols: async () => {
-    // ✅ Prevent duplicate fetches
     const state = get();
     if (state.loading || state.initialized) return state.symbols;
 
@@ -21,7 +20,6 @@ const useMarketStore = create((set, get) => ({
       if (res.data.success) {
         const symbols = res.data.symbols || [];
 
-        // Build initial quotes from symbol data
         const quotes = {};
         symbols.forEach((s) => {
           quotes[s.symbol] = {
@@ -59,40 +57,61 @@ const useMarketStore = create((set, get) => ({
     }
   },
 
-  // ✅ Force refresh (only called manually)
   refreshSymbols: async () => {
     set({ initialized: false, loading: false });
     const store = get();
     return store.fetchSymbols();
   },
 
-  // ✅ Handle all possible data formats safely
+  // ✅ Optimized — skips state update when price hasn't changed (reduces re-renders)
   updatePrice: (data) => {
     if (!data) return;
 
-    // Handle array of updates
+    // Handle array of updates (batch — single state update)
     if (Array.isArray(data)) {
+      if (data.length === 0) return;
+
       set((state) => {
         const newQuotes = { ...state.quotes };
+        let changed = false;
 
-        data.forEach((item) => {
-          if (!item || !item.symbol) return;
+        for (const item of data) {
+          if (!item || !item.symbol) continue;
           const sym = String(item.symbol).toUpperCase();
+          const existing = newQuotes[sym] || {};
 
+          const newLast = Number(item.last ?? item.last_price ?? existing.last ?? 0);
+          const newBid = Number(item.bid ?? existing.bid ?? 0);
+          const newAsk = Number(item.ask ?? existing.ask ?? 0);
+
+          // Skip if nothing changed (reduces re-renders)
+          if (
+            existing.last === newLast &&
+            existing.bid === newBid &&
+            existing.ask === newAsk
+          ) {
+            continue;
+          }
+
+          changed = true;
           newQuotes[sym] = {
-            ...(newQuotes[sym] || {}),
+            ...existing,
             symbol: sym,
-            bid: Number(item.bid ?? newQuotes[sym]?.bid ?? 0),
-            ask: Number(item.ask ?? newQuotes[sym]?.ask ?? 0),
-            last: Number(item.last ?? item.last_price ?? newQuotes[sym]?.last ?? 0),
-            change: Number(item.change ?? item.change_value ?? newQuotes[sym]?.change ?? 0),
-            change_percent: Number(item.changePercent ?? item.change_percent ?? newQuotes[sym]?.change_percent ?? 0),
+            bid: newBid,
+            ask: newAsk,
+            last: newLast,
+            open: Number(item.open ?? existing.open ?? 0),
+            high: Number(item.high ?? existing.high ?? 0),
+            low: Number(item.low ?? existing.low ?? 0),
+            change: Number(item.change ?? item.change_value ?? existing.change ?? 0),
+            change_percent: Number(item.changePercent ?? item.change_percent ?? existing.change_percent ?? 0),
+            volume: Number(item.volume ?? existing.volume ?? 0),
             timestamp: item.timestamp || Date.now(),
             source: item.source || 'socket',
           };
-        });
+        }
 
-        return { quotes: newQuotes };
+        return changed ? { quotes: newQuotes } : {};
       });
       return;
     }
@@ -104,12 +123,25 @@ const useMarketStore = create((set, get) => ({
       set((state) => {
         const existing = state.quotes[sym] || {};
 
+        const newLast = Number(data.last ?? data.last_price ?? existing.last ?? 0);
+        const newBid = Number(data.bid ?? existing.bid ?? 0);
+        const newAsk = Number(data.ask ?? existing.ask ?? 0);
+
+        // Skip if nothing changed
+        if (
+          existing.last === newLast &&
+          existing.bid === newBid &&
+          existing.ask === newAsk
+        ) {
+          return {};
+        }
+
         const newQuote = {
           ...existing,
           symbol: sym,
-          bid: Number(data.bid ?? existing.bid ?? 0),
-          ask: Number(data.ask ?? existing.ask ?? 0),
-          last: Number(data.last ?? data.last_price ?? existing.last ?? 0),
+          bid: newBid,
+          ask: newAsk,
+          last: newLast,
           open: Number(data.open ?? existing.open ?? 0),
           high: Number(data.high ?? existing.high ?? 0),
           low: Number(data.low ?? existing.low ?? 0),
@@ -124,7 +156,6 @@ const useMarketStore = create((set, get) => ({
           quotes: { ...state.quotes, [sym]: newQuote },
         };
       });
-      return;
     }
   },
 
@@ -145,16 +176,16 @@ const useMarketStore = create((set, get) => ({
         const q = res.data.quote;
         const quote = {
           symbol: sym,
-          bid: Number(q.bid || q.lastPrice || 0),
-          ask: Number(q.ask || q.lastPrice || 0),
-          last: Number(q.lastPrice || q.last || 0),
-          open: Number(q.open || 0),
-          high: Number(q.high || 0),
-          low: Number(q.low || 0),
-          change: Number(q.change || 0),
+          bid: Number(q.bid || q.lastPrice || q.last_price || 0),
+          ask: Number(q.ask || q.lastPrice || q.last_price || 0),
+          last: Number(q.lastPrice || q.last_price || q.last || 0),
+          open: Number(q.open || q.open_price || 0),
+          high: Number(q.high || q.high_price || 0),
+          low: Number(q.low || q.low_price || 0),
+          change: Number(q.change || q.change_value || 0),
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume: Number(q.volume || 0),
-          display_name: q.displayName,
+          display_name: q.displayName || q.display_name,
           timestamp: Date.now(),
           source: q.source || 'api',
         };

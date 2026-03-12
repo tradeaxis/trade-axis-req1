@@ -5,31 +5,9 @@ const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
 
-// ============ HELPER: Generate Login ID ============
-const generateLoginId = async () => {
-  // Get the highest existing login_id number
-  const { data: lastUser } = await supabase
-    .from('users')
-    .select('login_id')
-    .like('login_id', 'TA%')
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-  let nextNumber = 1000;
-  
-  if (lastUser && lastUser.length > 0 && lastUser[0].login_id) {
-    const match = lastUser[0].login_id.match(/TA(\d+)/);
-    if (match) {
-      nextNumber = parseInt(match[1], 10) + 1;
-    }
-  }
-
-  return `TA${nextNumber}`;
-};
-
 // ============ HELPER: Generate Random Password ============
 const generateTempPassword = () => {
-  return crypto.randomBytes(4).toString('hex').toUpperCase(); // 8 char hex
+  return crypto.randomBytes(4).toString('hex').toUpperCase();
 };
 
 // ============ USER FUNCTIONS ============
@@ -44,7 +22,6 @@ exports.listUsers = async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(parseInt(limit));
 
-    // Add search if provided
     if (q && q.trim()) {
       const searchTerm = q.trim().toLowerCase();
       query = query.or(`email.ilike.%${searchTerm}%,first_name.ilike.%${searchTerm}%,last_name.ilike.%${searchTerm}%,login_id.ilike.%${searchTerm}%`);
@@ -57,7 +34,6 @@ exports.listUsers = async (req, res) => {
       throw error;
     }
 
-    // Get accounts for each user
     const usersWithAccounts = await Promise.all(
       (users || []).map(async (user) => {
         const { data: accounts } = await supabase
@@ -84,7 +60,6 @@ exports.listUsers = async (req, res) => {
       })
     );
 
-    // ✅ Return as 'data' to match frontend expectation
     res.json({ success: true, data: usersWithAccounts });
   } catch (error) {
     console.error('listUsers error:', error);
@@ -112,111 +87,143 @@ exports.createUser = async (req, res) => {
     if (!email) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
-
     if (!firstName || !lastName) {
       return res.status(400).json({ success: false, message: 'First name and last name are required' });
     }
-
-    // Check if at least one account type is selected
     if (!createDemo && !createLive) {
       return res.status(400).json({ success: false, message: 'Select at least one account type' });
     }
 
-    // Check if email already exists
     const { data: existingUser } = await supabase
       .from('users')
       .select('id')
       .eq('email', email.toLowerCase().trim())
-      .single();
+      .maybeSingle();
 
     if (existingUser) {
       return res.status(400).json({ success: false, message: 'Email already registered' });
     }
 
-    // Generate login_id and password
-    const loginId = await generateLoginId();
-    const tempPassword = password || generateTempPassword();
-    const hashedPassword = await bcrypt.hash(tempPassword, 12);
-
-    // Create user
-    const { data: user, error } = await supabase
+    // Find max TA number from BOTH user_id and login_id columns
+    const { data: allUsers } = await supabase
       .from('users')
-      .insert({
-        login_id: loginId,
-        email: email.toLowerCase().trim(),
-        password: hashedPassword,
-        first_name: firstName || '',
-        last_name: lastName || '',
-        phone: phone || '',
-        role,
-        is_active: true,
-        leverage: Number(leverage) || 5,
-        brokerage_rate: Number(brokerageRate) || 0.0003,
-        max_saved_accounts: Number(maxSavedAccounts) || 3,
-        closing_mode: false,
-      })
-      .select()
-      .single();
+      .select('user_id, login_id')
+      .order('created_at', { ascending: false })
+      .limit(20);
 
-    if (error) {
-      console.error('Create user DB error:', error);
-      throw error;
-    }
-
-    // Create accounts based on selection
-    const accountsToCreate = [];
-    const accountNumber = `TA${Date.now().toString().slice(-8)}`;
-
-    if (createDemo) {
-      accountsToCreate.push({
-        user_id: user.id,
-        account_number: `${accountNumber}D`,
-        is_demo: true,
-        balance: Number(demoBalance) || 100000,
-        equity: Number(demoBalance) || 100000,
-        margin: 0,
-        free_margin: Number(demoBalance) || 100000,
-        leverage: Number(leverage) || 5,
-      });
-    }
-
-    if (createLive) {
-      accountsToCreate.push({
-        user_id: user.id,
-        account_number: `${accountNumber}L`,
-        is_demo: false,
-        balance: 0,
-        equity: 0,
-        margin: 0,
-        free_margin: 0,
-        leverage: Number(leverage) || 5,
-      });
-    }
-
-    if (accountsToCreate.length > 0) {
-      const { error: accountError } = await supabase
-        .from('accounts')
-        .insert(accountsToCreate);
-
-      if (accountError) {
-        console.error('Create accounts error:', accountError);
-        // Don't fail the whole operation, user is created
+    let maxNum = 999;
+    if (allUsers) {
+      for (const u of allUsers) {
+        const m1 = (u.user_id || '').match(/TA(\d+)/);
+        const m2 = (u.login_id || '').match(/TA(\d+)/);
+        if (m1) maxNum = Math.max(maxNum, parseInt(m1[1], 10));
+        if (m2) maxNum = Math.max(maxNum, parseInt(m2[1], 10));
       }
     }
 
-    // ✅ Return data in format frontend expects
+    const newUserId = `TA${maxNum + 1}`;
+    const newLoginId = `TA${maxNum + 1}`;
+
+    // Hash password
+    const tempPassword = password || generateTempPassword();
+    const hashedPassword = await bcrypt.hash(tempPassword, 12);
+
+    // Insert with BOTH user_id and login_id explicitly set
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .insert([{
+        user_id: newUserId,
+        login_id: newLoginId,
+        email: email.toLowerCase().trim(),
+        password_hash: hashedPassword,
+        first_name: firstName.substring(0, 50),
+        last_name: lastName.substring(0, 50),
+        phone: (phone || '0000000000').substring(0, 15),
+        role: (role || 'user').substring(0, 20),
+        is_verified: false,
+        is_active: true,
+        max_saved_accounts: Number(maxSavedAccounts) || -1,
+        closing_mode: false,
+      }])
+      .select()
+      .single();
+
+    if (userError) {
+      console.error('Create user error:', JSON.stringify(userError));
+      return res.status(500).json({ 
+        success: false, 
+        message: `Database error: ${userError.message}` 
+      });
+    }
+
+    // Update optional fields separately
+    try {
+      await supabase
+        .from('users')
+        .update({
+          leverage: Number(leverage) || 5,
+          brokerage_rate: Number(brokerageRate) || 0.0003,
+        })
+        .eq('id', user.id);
+    } catch (e) {
+      // silent
+    }
+
+    // Create accounts
+    const { generateAccountNumber } = require('../utils/auth');
+
+    if (createDemo) {
+      const accNum = generateAccountNumber(true);
+      const { error: demoErr } = await supabase
+        .from('accounts')
+        .insert([{
+          user_id: user.id,
+          account_number: accNum.substring(0, 20),
+          account_type: 'demo',
+          is_demo: true,
+          balance: Number(demoBalance) || 100000,
+          equity: Number(demoBalance) || 100000,
+          margin: 0,
+          free_margin: Number(demoBalance) || 100000,
+          leverage: Number(leverage) || 5,
+          currency: 'INR',
+          is_active: true,
+        }]);
+      if (demoErr) console.error('Demo account error:', demoErr);
+    }
+
+    if (createLive) {
+      const accNum = generateAccountNumber(false);
+      const { error: liveErr } = await supabase
+        .from('accounts')
+        .insert([{
+          user_id: user.id,
+          account_number: accNum.substring(0, 20),
+          account_type: 'standard',
+          is_demo: false,
+          balance: 0,
+          equity: 0,
+          margin: 0,
+          free_margin: 0,
+          leverage: Number(leverage) || 5,
+          currency: 'INR',
+          is_active: true,
+        }]);
+      if (liveErr) console.error('Live account error:', liveErr);
+    }
+
     res.json({ 
       success: true, 
       data: {
         user,
-        loginId,
-        tempPassword: password ? null : tempPassword, // Only return if auto-generated
+        loginId: newLoginId,
+        tempPassword: password ? null : tempPassword,
       },
       message: 'User created successfully' 
     });
   } catch (error) {
-    console.error('createUser error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('createUser full error:', error);
+    res.status(500).json({ success: false, message: `Server error: ${error.message}` });
   }
 };
 
@@ -230,10 +237,14 @@ exports.setUserActive = async (req, res) => {
       .update({ is_active: isActive })
       .eq('id', id);
 
-    if (error) throw error;
+    if (error) {
+      console.error('setUserActive error:', error);
+      return res.status(500).json({ success: false, message: error.message });
+    }
 
     res.json({ success: true, message: `User ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
+    console.error('setUserActive error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -243,7 +254,6 @@ exports.resetPassword = async (req, res) => {
     const { id } = req.params;
     const { newPassword } = req.body;
 
-    // Generate new password if not provided
     const tempPassword = newPassword || generateTempPassword();
 
     if (tempPassword.length < 4) {
@@ -254,18 +264,18 @@ exports.resetPassword = async (req, res) => {
 
     const { error } = await supabase
       .from('users')
-      .update({ password: hashedPassword })
+      .update({ password_hash: hashedPassword })
       .eq('id', id);
 
     if (error) throw error;
 
-    // ✅ Return tempPassword so admin can share it
     res.json({ 
       success: true, 
       data: { tempPassword },
       message: 'Password reset successfully' 
     });
   } catch (error) {
+    console.error('resetPassword error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -282,35 +292,53 @@ exports.updateUserLeverage = async (req, res) => {
     const { id } = req.params;
     const { leverage, accountId } = req.body;
 
-    // If specific accountId provided, only update that account
+    if (!leverage || isNaN(Number(leverage))) {
+      return res.status(400).json({ success: false, message: 'Valid leverage value is required' });
+    }
+
+    const leverageNum = Number(leverage);
+
     if (accountId) {
       const { error: accountError } = await supabase
         .from('accounts')
-        .update({ leverage: Number(leverage) })
+        .update({ leverage: leverageNum })
         .eq('id', accountId);
 
-      if (accountError) throw accountError;
+      if (accountError) {
+        console.error('Update account leverage error:', accountError);
+        return res.status(500).json({ 
+          success: false, 
+          message: `Failed to update account leverage: ${accountError.message}` 
+        });
+      }
     } else {
-      // Update user default leverage
-      const { error: userError } = await supabase
-        .from('users')
-        .update({ leverage: Number(leverage) })
-        .eq('id', id);
-
-      if (userError) throw userError;
-
-      // Update all user's accounts
       const { error: accountError } = await supabase
         .from('accounts')
-        .update({ leverage: Number(leverage) })
+        .update({ leverage: leverageNum })
         .eq('user_id', id);
 
-      if (accountError) throw accountError;
+      if (accountError) {
+        console.error('Update accounts leverage error:', accountError);
+        return res.status(500).json({ 
+          success: false, 
+          message: `Failed to update accounts leverage: ${accountError.message}` 
+        });
+      }
+
+      try {
+        await supabase
+          .from('users')
+          .update({ leverage: leverageNum })
+          .eq('id', id);
+      } catch (userErr) {
+        console.warn('User leverage column may not exist:', userErr.message);
+      }
     }
 
-    res.json({ success: true, message: 'Leverage updated' });
+    res.json({ success: true, message: `Leverage updated to 1:${leverageNum}` });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('updateUserLeverage error:', error);
+    res.status(500).json({ success: false, message: `Server error: ${error.message}` });
   }
 };
 
@@ -370,7 +398,7 @@ exports.toggleClosingMode = async (req, res) => {
 
 exports.addBalanceToAccount = async (req, res) => {
   try {
-    const { id } = req.params; // user id
+    const { id } = req.params;
     const { accountId, amount, accountType = 'live', note = 'Admin deposit' } = req.body;
 
     if (!amount || amount <= 0) {
@@ -379,7 +407,6 @@ exports.addBalanceToAccount = async (req, res) => {
 
     let account;
 
-    // Find account by accountId if provided, otherwise by user_id and type
     if (accountId) {
       const { data, error } = await supabase
         .from('accounts')
@@ -420,7 +447,6 @@ exports.addBalanceToAccount = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // Create transaction record
     await supabase.from('transactions').insert({
       user_id: id,
       account_id: account.id,
@@ -441,6 +467,80 @@ exports.addBalanceToAccount = async (req, res) => {
   }
 };
 
+// ============ DELETE USER ============
+exports.deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if user exists
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id, email, login_id')
+      .eq('id', id)
+      .single();
+
+    if (findError || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Close all open trades first
+    try {
+      await supabase
+        .from('trades')
+        .update({ status: 'closed', close_time: new Date().toISOString() })
+        .eq('user_id', id)
+        .eq('status', 'open');
+    } catch (e) {
+      console.warn('Close trades error:', e.message);
+    }
+
+    // Delete pending orders
+    try {
+      await supabase.from('pending_orders').delete().eq('user_id', id);
+    } catch (e) { /* table may not exist */ }
+
+    // Delete transactions
+    try {
+      await supabase.from('transactions').delete().eq('user_id', id);
+    } catch (e) {
+      console.warn('Delete transactions error:', e.message);
+    }
+
+    // Delete trades
+    try {
+      await supabase.from('trades').delete().eq('user_id', id);
+    } catch (e) {
+      console.warn('Delete trades error:', e.message);
+    }
+
+    // Delete accounts
+    try {
+      await supabase.from('accounts').delete().eq('user_id', id);
+    } catch (e) {
+      console.warn('Delete accounts error:', e.message);
+    }
+
+    // Delete user
+    const { error: deleteError } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      console.error('Delete user error:', deleteError);
+      return res.status(500).json({ success: false, message: `Failed to delete user: ${deleteError.message}` });
+    }
+
+    res.json({ 
+      success: true, 
+      message: `User ${user.login_id || user.email} deleted successfully` 
+    });
+  } catch (error) {
+    console.error('deleteUser error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ============ WITHDRAWAL FUNCTIONS ============
 
 exports.listWithdrawals = async (req, res) => {
@@ -457,7 +557,6 @@ exports.listWithdrawals = async (req, res) => {
       .eq('type', 'withdrawal')
       .order('created_at', { ascending: false });
 
-    // Only filter by status if it's a specific status (not 'all' or empty)
     if (status && status !== 'all') {
       query = query.eq('status', status);
     }
@@ -469,7 +568,6 @@ exports.listWithdrawals = async (req, res) => {
       throw error;
     }
 
-    // Flatten the joined data for frontend
     const withdrawals = (data || []).map(w => ({
       ...w,
       user_email: w.users?.email || '',
@@ -541,7 +639,6 @@ exports.rejectWithdrawal = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Transaction is not pending' });
     }
 
-    // Refund the amount back to account
     const { data: account } = await supabase
       .from('accounts')
       .select('*')
@@ -577,6 +674,19 @@ exports.rejectWithdrawal = async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
+};
+
+// ============ PENDING ORDER STUBS ============
+exports.modifyPendingOrder = async (req, res) => {
+  res.json({ success: true, message: 'Not implemented' });
+};
+
+exports.cancelPendingOrder = async (req, res) => {
+  res.json({ success: true, message: 'Not implemented' });
+};
+
+exports.cancelAllPendingOrders = async (req, res) => {
+  res.json({ success: true, message: 'Not implemented' });
 };
 
 // ============ KITE CONNECT FUNCTIONS ============
@@ -711,7 +821,6 @@ exports.kiteStatus = async (req, res) => {
     const sessionReady = kiteService.isSessionReady();
     const configured = kiteService.isConfigured();
 
-    // Try to validate session by getting profile
     let profileValid = false;
     let profile = null;
 

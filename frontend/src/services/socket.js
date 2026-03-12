@@ -8,6 +8,7 @@ class SocketService {
   isConnecting = false;
   connectionAttempt = 0;
   reconnectTimer = null;
+  _pingInterval = null; // ✅ Keep-alive ping
 
   connect(token) {
     // If already connected, return existing socket
@@ -34,15 +35,14 @@ class SocketService {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10, // ✅ Increased from 5
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      timeout: 10000,
+      timeout: 15000, // ✅ Increased from 10000
       forceNew: false,
     });
 
     this.socket.on('connect', () => {
-      // Only log if this is still the current attempt
       if (currentAttempt === this.connectionAttempt) {
         console.log('✅ WebSocket connected:', this.socket.id);
         this.isConnecting = false;
@@ -67,6 +67,14 @@ class SocketService {
       console.warn('⚠️ WebSocket reconnection error:', error.message);
     });
 
+    // ✅ Keep-alive ping every 20s (prevents mobile OS from killing socket)
+    if (this._pingInterval) clearInterval(this._pingInterval);
+    this._pingInterval = setInterval(() => {
+      if (this.socket?.connected) {
+        this.socket.emit('ping');
+      }
+    }, 20000);
+
     return this.socket;
   }
 
@@ -75,6 +83,12 @@ class SocketService {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+
+    // ✅ Clear ping interval
+    if (this._pingInterval) {
+      clearInterval(this._pingInterval);
+      this._pingInterval = null;
     }
 
     // Don't disconnect if socket doesn't exist

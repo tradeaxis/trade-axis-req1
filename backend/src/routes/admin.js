@@ -13,6 +13,7 @@ router.use(adminOnly);
 router.get('/users', adminController.listUsers);
 router.post('/users', adminController.createUser);
 router.patch('/users/:id/active', adminController.setUserActive);
+router.delete('/users/:id', adminController.deleteUser);
 router.post('/users/:id/reset-password', adminController.resetPassword);
 
 // Trading settings
