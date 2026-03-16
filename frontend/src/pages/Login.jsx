@@ -2,17 +2,27 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
+import { Eye, EyeOff } from 'lucide-react';
 import useAuthStore from '../store/authStore';
 
 const Login = () => {
   const navigate = useNavigate();
   const login = useAuthStore((state) => state.login);
   const [isLoading, setIsLoading] = useState(false);
-  const [formData, setFormData] = useState({ loginId: '', password: '' }); // ✅ Changed from email
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(
+    localStorage.getItem('trade_axis_remember') === 'true'
+  );
+  const [formData, setFormData] = useState({
+    loginId: localStorage.getItem('trade_axis_saved_login_id') || '',
+    password: localStorage.getItem('trade_axis_remember') === 'true'
+      ? localStorage.getItem('trade_axis_saved_pass') || ''
+      : '',
+  });
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     if (!formData.loginId.trim()) {
       return toast.error('Please enter your Login ID');
     }
@@ -22,6 +32,17 @@ const Login = () => {
 
     setIsLoading(true);
     const result = await login(formData.loginId.trim(), formData.password);
+
+    if (rememberMe) {
+      localStorage.setItem('trade_axis_remember', 'true');
+      localStorage.setItem('trade_axis_saved_login_id', formData.loginId.trim());
+      localStorage.setItem('trade_axis_saved_pass', formData.password);
+    } else {
+      localStorage.removeItem('trade_axis_remember');
+      localStorage.removeItem('trade_axis_saved_login_id');
+      localStorage.removeItem('trade_axis_saved_pass');
+    }
+
     if (result.success) {
       toast.success('Login successful!');
       navigate('/dashboard');
@@ -36,9 +57,9 @@ const Login = () => {
       <div className="w-full max-w-sm p-6 rounded-xl border" style={{ background: '#1e222d', borderColor: '#363a45' }}>
         {/* Logo */}
         <div className="text-center mb-6">
-          <img 
-            src="/logo.png" 
-            alt="Trade Axis" 
+          <img
+            src="/logo.png"
+            alt="Trade Axis"
             className="h-16 w-16 mx-auto mb-3 object-contain"
             onError={(e) => { e.target.style.display = 'none'; }}
           />
@@ -47,7 +68,7 @@ const Login = () => {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* ✅ Login ID field instead of Email */}
+          {/* Login ID */}
           <div>
             <label className="block text-xs mb-1.5" style={{ color: '#787b86' }}>Login ID</label>
             <input
@@ -67,18 +88,45 @@ const Login = () => {
             </p>
           </div>
 
+          {/* Password with show/hide */}
           <div>
             <label className="block text-xs mb-1.5" style={{ color: '#787b86' }}>Password</label>
-            <input
-              type="password"
-              value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              className="w-full px-4 py-3 rounded-lg border text-sm"
-              style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
-              placeholder="Enter password"
-              required
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={formData.password}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                className="w-full px-4 py-3 pr-12 rounded-lg border text-sm"
+                style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
+                placeholder="Enter password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1"
+                tabIndex={-1}
+              >
+                {showPassword ? (
+                  <EyeOff size={18} color="#787b86" />
+                ) : (
+                  <Eye size={18} color="#787b86" />
+                )}
+              </button>
+            </div>
           </div>
+
+          {/* Remember Me */}
+          <label className="flex items-center gap-2 cursor-pointer py-1">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="w-4 h-4 rounded"
+              style={{ accentColor: '#2962ff' }}
+            />
+            <span className="text-sm" style={{ color: '#787b86' }}>Remember me</span>
+          </label>
 
           <button
             type="submit"

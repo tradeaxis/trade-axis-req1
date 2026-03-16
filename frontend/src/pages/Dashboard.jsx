@@ -172,7 +172,7 @@ const getPeriodStart = (periodId) => {
 
 const formatINR = (amount) => {
   const num = Number(amount || 0);
-  return `₹${num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
 // ============ EXPIRY FILTER HELPER ============
@@ -356,6 +356,9 @@ const Dashboard = () => {
   // Order symbol search
   const [orderSymbolSearch, setOrderSymbolSearch] = useState('');
 
+  // Full-screen order confirmation overlay
+  const [orderConfirmation, setOrderConfirmation] = useState(null);
+
   // History
   const [historyPeriod, setHistoryPeriod] = useState('month');
   const [historyViewMode, setHistoryViewMode] = useState('positions');
@@ -370,6 +373,12 @@ const Dashboard = () => {
 
   // Add Account Modal
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [changePassCurrent, setChangePassCurrent] = useState('');
+  const [changePassNew, setChangePassNew] = useState('');
+  const [changePassConfirm, setChangePassConfirm] = useState('');
+  const [changePassLoading, setChangePassLoading] = useState(false);
+  const [showFirstLoginPrompt, setShowFirstLoginPrompt] = useState(false);
   const [addAccountEmail, setAddAccountEmail] = useState('');
   const [addAccountPassword, setAddAccountPassword] = useState('');
   const [addAccountLoading, setAddAccountLoading] = useState(false);
@@ -444,6 +453,14 @@ const Dashboard = () => {
       setSelectedAccount(demo || accounts[0]);
     }
   }, [accounts]);
+
+  // ── First login password change prompt ──
+  useEffect(() => {
+    if (user?.mustChangePassword) {
+      setShowFirstLoginPrompt(true);
+      setShowChangePasswordModal(true);
+    }
+  }, [user?.mustChangePassword]);
 
   // ── Fetch ALL symbols once on mount (lifted from QuotesTab) ──
   const fetchAllFuturesSymbols = useCallback(async () => {
@@ -694,24 +711,66 @@ const Dashboard = () => {
     list = list.filter((s) => matchesSelectedCategory(s, selectedCategory));
 
     if (searchTerm.trim()) {
-      const term = searchTerm.trim().toLowerCase();
-      return list.filter((s) => {
-        const sym = String(s.symbol || '').toLowerCase();
-        const dn = String(s.display_name || '').toLowerCase();
-        return sym.includes(term) || dn.includes(term);
+      const rawTerm = searchTerm.trim().toLowerCase();
+      const term = rawTerm.replace(/[\s_-]/g, '');
+
+      const results = list.filter((s) => {
+        const symStr = String(s.symbol || '').toLowerCase().replace(/[\s_-]/g, '');
+        const name = String(s.display_name || '').toLowerCase().replace(/[\s_-]/g, '');
+        const underlying = String(s.underlying || '').toLowerCase().replace(/[\s_-]/g, '');
+
+        return (
+          symStr.includes(term) ||
+          name.includes(term) ||
+          underlying.includes(term)
+        );
       });
     }
 
     const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
-    return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+    const wlF = list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+    const seenW = new Set();
+    return wlF.filter((s) => {
+      const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i,'').replace(/FUT$/i,'').replace(/-I+$/,'').toUpperCase();
+      const m = s.expiry_date ? new Date(s.expiry_date).getMonth()+'-'+new Date(s.expiry_date).getFullYear() : 'x';
+      const k = u+'|'+m;
+      if (seenW.has(k)) return false;
+      seenW.add(k);
+      return true;
+    });
   }, [symbols, searchTerm, selectedCategory, activeSymbols]);
 
   const quotesDisplayedSymbols = useMemo(() => {
     const sourceList =
       allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
 
+    // 0) STRICT FUTURES ONLY — exclude equity/cash, include Gift Nifty
+    let list = sourceList.filter((s) => {
+      const cat = String(s.category || '').toLowerCase();
+      const sym = String(s.symbol || '').toUpperCase();
+      const seg = String(s.segment || '').toUpperCase();
+      const inst = String(s.instrument_type || '').toUpperCase();
+      const exch = String(s.exchange || '').toUpperCase();
+
+      // Always include Gift Nifty
+      if (sym.includes('GIFTNIFTY') || sym.includes('GIFT_NIFTY')) return true;
+
+      // Include futures only
+      if (cat.includes('future')) return true;
+      if (cat.includes('commodity')) return true;
+      if (inst.includes('FUT')) return true;
+      if (/FUT$/.test(sym)) return true;
+      if (s.series === 'I' || s.series === 'II' || s.series === 'III') return true;
+      if (seg === 'NFO' || seg === 'MCX' || seg === 'CDS' || seg === 'BFO') return true;
+      if (exch === 'MCX' || exch === 'CDS') return true;
+      // Commodity keywords
+      if (/GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/i.test(sym)) return true;
+
+      // Exclude everything else (stocks, equity, ETF, options, etc.)
+      return false;
+    });
+
     // 1) Category filter
-    let list = sourceList;
     if (selectedCategory !== 'all') {
       list = list.filter((s) => {
         const cat = String(s.category || '').toLowerCase();
@@ -722,7 +781,8 @@ const Dashboard = () => {
         if (selectedCategory === 'index_futures') {
           return (
             cat === 'index_futures' ||
-            /NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(underlying)
+            /NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|GIFTNIFTY/i.test(underlying) ||
+            sym.includes('GIFTNIFTY')
           );
         }
         if (selectedCategory === 'stock_futures') {
@@ -731,7 +791,7 @@ const Dashboard = () => {
             (seg === 'NFO' &&
               !cat.includes('index') &&
               !cat.includes('commodity') &&
-              !/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(underlying))
+              !/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|GIFTNIFTY/i.test(underlying))
           );
         }
         if (selectedCategory === 'commodity_futures') {
@@ -750,12 +810,19 @@ const Dashboard = () => {
 
     // 3) If searching → search ALL visible symbols
     if (searchTerm.trim()) {
-      const term = searchTerm.trim().toLowerCase();
+      const rawTerm = searchTerm.trim().toLowerCase();
+      const term = rawTerm.replace(/[\s_-]/g, '');
+
       const results = list.filter((s) => {
-        const symStr = String(s.symbol || '').toLowerCase();
-        const name = String(s.display_name || '').toLowerCase();
-        const underlying = String(s.underlying || '').toLowerCase();
-        return symStr.includes(term) || name.includes(term) || underlying.includes(term);
+        const symStr = String(s.symbol || '').toLowerCase().replace(/[\s_-]/g, '');
+        const name = String(s.display_name || '').toLowerCase().replace(/[\s_-]/g, '');
+        const underlying = String(s.underlying || '').toLowerCase().replace(/[\s_-]/g, '');
+
+        return (
+          symStr.includes(term) ||
+          name.includes(term) ||
+          underlying.includes(term)
+        );
       });
 
       results.sort((a, b) => {
@@ -775,15 +842,42 @@ const Dashboard = () => {
         return aE.localeCompare(bE);
       });
 
-      return results.slice(0, 200);
+      // Deduplicate: show only 1 per underlying per expiry month
+      const seen = new Set();
+      const deduped = results.filter((s) => {
+        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT?$/i,'').toUpperCase();
+        const m = s.expiry_date ? new Date(s.expiry_date).getMonth() : 'x';
+        const key = `${u}|${m}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      return deduped.slice(0, 200);
     }
 
     // 4) Not searching → show watchlist symbols only
     const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
     if (wl.size === 0) {
-      return list.filter((s) => s.series === 'I').slice(0, 20);
+      // Show nearest-expiry one per underlying
+      const seenD = new Set();
+      return list.filter((s) => {
+        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i,'').replace(/FUT$/i,'').replace(/-I+$/,'').toUpperCase();
+        if (seenD.has(u)) return false;
+        seenD.add(u);
+        return true;
+      }).slice(0, 20);
     }
-    return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+    const wlFiltered = list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+    // Deduplicate watchlist symbols too
+    const seenWl = new Set();
+    return wlFiltered.filter((s) => {
+      const u = (s.underlying || s.symbol || '').toUpperCase();
+      const m = s.expiry_date ? new Date(s.expiry_date).getMonth() + '-' + new Date(s.expiry_date).getFullYear() : 'no-exp';
+      const key = `${u}|${m}`;
+      if (seenWl.has(key)) return false;
+      seenWl.add(key);
+      return true;
+    });
   }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols]);
 
   const filteredHistoryTrades = useMemo(() => {
@@ -943,14 +1037,30 @@ const Dashboard = () => {
     toast.dismiss(loadingId);
 
     if (result.success) {
-      const priceStr = result.data?.open_price ? ` @ ₹${Number(result.data.open_price).toFixed(2)}` : '';
+      const execPrice = result.data?.open_price ? Number(result.data.open_price).toFixed(2) : '';
       const mergedStr = result.merged ? ' (merged into existing position)' : '';
-      toast.success(`${type.toUpperCase()} ${qty} ${selectedSymbol}${priceStr}${mergedStr}`, { duration: 3000 });
+
+      // Show full-screen confirmation immediately
+      setOrderConfirmation({
+        type: type.toUpperCase(),
+        symbol: selectedSymbol,
+        quantity: qty,
+        price: execPrice,
+        merged: result.merged || false,
+        pending: result.pending || false,
+        message: result.pending
+          ? `${type.toUpperCase()} LIMIT order placed for ${selectedSymbol}`
+          : `Order Executed${mergedStr}`,
+      });
+
       fetchOpenTrades(selectedAccount.id);
       fetchPendingOrders?.(selectedAccount.id);
       setShowOrderModal(false);
       setLimitPrice('');
       setOrderExecType('instant');
+
+      // Auto-dismiss after 3 seconds
+      setTimeout(() => setOrderConfirmation(null), 3000);
     } else {
       toast.error(result.message || 'Order failed');
     }
@@ -986,6 +1096,136 @@ const Dashboard = () => {
     setUnreadCount(0);
   };
 
+    const handleChangePassword = async () => {
+    if (!changePassCurrent) return toast.error('Enter current password');
+    if (!changePassNew) return toast.error('Enter new password');
+    if (changePassNew.length < 4) return toast.error('New password must be at least 4 characters');
+    if (changePassNew !== changePassConfirm) return toast.error('Passwords do not match');
+    if (changePassCurrent === changePassNew) return toast.error('New password must be different');
+
+    setChangePassLoading(true);
+    try {
+      const res = await api.post('/auth/change-password', {
+        currentPassword: changePassCurrent,
+        newPassword: changePassNew,
+      });
+      if (res.data.success) {
+        toast.success('Password changed successfully!');
+        setShowChangePasswordModal(false);
+        setShowFirstLoginPrompt(false);
+        setChangePassCurrent('');
+        setChangePassNew('');
+        setChangePassConfirm('');
+      } else {
+        toast.error(res.data.message || 'Failed to change password');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Failed to change password');
+    } finally {
+      setChangePassLoading(false);
+    }
+  };
+
+  const renderChangePasswordModal = () => {
+    if (!showChangePasswordModal) return null;
+
+    return (
+      <div
+        className="fixed inset-0 bg-black/70 flex items-center justify-center p-4"
+        style={{ zIndex: 10001 }}
+        onClick={() => {
+          if (!showFirstLoginPrompt) {
+            setShowChangePasswordModal(false);
+          }
+        }}
+      >
+        <div
+          className="w-full max-w-sm rounded-xl"
+          style={{ background: '#1e222d', border: '1px solid #363a45' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+            <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+              {showFirstLoginPrompt ? '🔐 Change Default Password' : 'Change Password'}
+            </h3>
+            {!showFirstLoginPrompt && (
+              <button onClick={() => setShowChangePasswordModal(false)}>
+                <X size={22} color="#787b86" />
+              </button>
+            )}
+          </div>
+
+          <div className="p-4 space-y-4">
+            {showFirstLoginPrompt && (
+              <div className="p-3 rounded-lg" style={{ background: '#ff980020', border: '1px solid #ff980050' }}>
+                <div className="text-sm font-medium" style={{ color: '#ff9800' }}>
+                  This is your first login. Please change your default password for security.
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Current Password</label>
+              <input
+                type="password"
+                value={changePassCurrent}
+                onChange={(e) => setChangePassCurrent(e.target.value)}
+                placeholder="Enter current password"
+                className="w-full px-4 py-3 rounded-lg text-sm"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>New Password</label>
+              <input
+                type="password"
+                value={changePassNew}
+                onChange={(e) => setChangePassNew(e.target.value)}
+                placeholder="Enter new password (min 4 chars)"
+                className="w-full px-4 py-3 rounded-lg text-sm"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Confirm New Password</label>
+              <input
+                type="password"
+                value={changePassConfirm}
+                onChange={(e) => setChangePassConfirm(e.target.value)}
+                placeholder="Re-enter new password"
+                className="w-full px-4 py-3 rounded-lg text-sm"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              />
+            </div>
+
+            <button
+              onClick={handleChangePassword}
+              disabled={changePassLoading}
+              className="w-full py-3.5 rounded-lg font-semibold text-white disabled:opacity-50"
+              style={{ background: '#2962ff' }}
+            >
+              {changePassLoading ? 'Changing...' : 'Change Password'}
+            </button>
+
+            {showFirstLoginPrompt && (
+              <button
+                onClick={() => {
+                  setShowChangePasswordModal(false);
+                  setShowFirstLoginPrompt(false);
+                }}
+                className="w-full py-2 rounded-lg text-sm font-medium"
+                style={{ background: '#2a2e39', color: '#787b86' }}
+              >
+                Skip for now
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
   const handleAddAccount = async () => {
     if (!addAccountEmail || !addAccountPassword) {
       return toast.error('Email and password required');
@@ -1200,12 +1440,17 @@ const Dashboard = () => {
                   <input
                     type="number"
                     value={closeQty}
+                    onFocus={(e) => e.target.select()}
                     onChange={(e) => {
-                      const val = Math.max(
-                        1,
-                        Math.min(maxQty, Number(e.target.value || 1))
-                      );
-                      setCloseQty(val);
+                      const raw = e.target.value;
+                      if (raw === '') {
+                        setCloseQty('');
+                      } else {
+                        setCloseQty(Math.max(1, Math.min(maxQty, Number(raw))));
+                      }
+                    }}
+                    onBlur={() => {
+                      if (!closeQty || Number(closeQty) < 1) setCloseQty(1);
                     }}
                     className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center"
                     style={{
@@ -1427,7 +1672,7 @@ const Dashboard = () => {
           style={{
             background: '#1e222d',
             border: '1px solid #363a45',
-            marginBottom: '4rem',
+            marginBottom: 'calc(4.5rem + env(safe-area-inset-bottom, 0px))',
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1574,13 +1819,9 @@ const Dashboard = () => {
           </div>
           <div className="max-h-80 overflow-y-auto">
             {watchlists.map((wl) => (
-              <button
+              <div
                 key={wl.id}
-                onClick={async () => {
-                  setShowWatchlistMenu(false);
-                  await handleSwitchWatchlist(wl.id);
-                }}
-                className="w-full p-4 text-left flex items-center justify-between border-b"
+                className="flex items-center justify-between border-b px-4 py-3"
                 style={{
                   borderColor: '#363a45',
                   background:
@@ -1589,7 +1830,13 @@ const Dashboard = () => {
                       : 'transparent',
                 }}
               >
-                <div className="flex items-center gap-3">
+                <button
+                  onClick={async () => {
+                    setShowWatchlistMenu(false);
+                    await handleSwitchWatchlist(wl.id);
+                  }}
+                  className="flex items-center gap-3 flex-1 text-left"
+                >
                   <Star
                     size={18}
                     color={
@@ -1610,14 +1857,28 @@ const Dashboard = () => {
                       Default
                     </span>
                   )}
-                </div>
-                {wl.id === activeWatchlistId && (
-                  <div
-                    className="w-2 h-2 rounded-full"
-                    style={{ background: '#2962ff' }}
-                  />
+                  {wl.id === activeWatchlistId && (
+                    <div
+                      className="w-2 h-2 rounded-full"
+                      style={{ background: '#2962ff' }}
+                    />
+                  )}
+                </button>
+                {/* Remove button — only for non-default watchlists */}
+                {!wl.is_default && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteWatchlist(wl.id, e);
+                      setShowWatchlistMenu(false);
+                    }}
+                    className="p-2 rounded-lg hover:bg-red-500/20 ml-2 shrink-0"
+                    title="Remove watchlist"
+                  >
+                    <Trash2 size={16} color="#ef5350" />
+                  </button>
                 )}
-              </button>
+              </div>
             ))}
           </div>
           <div
@@ -1701,26 +1962,40 @@ const Dashboard = () => {
 
           {/* Search */}
           <div className="relative mt-2">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: '#787b86' }} />
+            <Search
+              size={14}
+              className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ color: '#787b86' }}
+            />
             <input
               ref={quotesSearchInputRef}
               type="text"
               value={quotesLocalSearch}
               onChange={(e) => setQuotesLocalSearch(e.target.value)}
-              placeholder="Search all futures (RELIANCE, NIFTY, GOLD...)"
-              className="w-full pl-10 pr-10 py-2.5 rounded border text-base"
-              style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
+              placeholder="Find"
+              className="w-full pl-14 pr-10 py-4 rounded-lg border text-base font-medium"
+              style={{
+                background: '#2a2e39',
+                borderColor: '#363a45',
+                color: '#d1d4dc',
+                fontSize: '16px',
+              }}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
               spellCheck="false"
             />
+              {/* autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck="false"
+            /> */}
             {quotesLocalSearch && (
               <button
                 onClick={() => { setQuotesLocalSearch(''); quotesSearchInputRef.current?.focus(); }}
-                className="absolute right-3 top-1/2 -translate-y-1/2"
+                className="absolute right-3.5 top-1/2 -translate-y-1/2"
               >
-                <X size={16} color="#787b86" />
+                <X size={18} color="#787b86" />
               </button>
             )}
           </div>
@@ -1739,7 +2014,7 @@ const Dashboard = () => {
         <div
           className="grid px-3 py-2 text-xs font-semibold border-b shrink-0"
           style={{
-            gridTemplateColumns: '2.2fr 1fr 1fr',
+            gridTemplateColumns: '2.5fr 1fr 1fr',
             background: '#252832',
             borderColor: '#363a45',
             color: '#787b86',
@@ -1792,65 +2067,107 @@ const Dashboard = () => {
                 (sym.ohlc && sym.ohlc.high) ||
                 0
               );
+              const symChange = Number(quote?.change ?? quote?.change_value ?? sym.change_value ?? 0);
+              const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
+              const marketOpen = isMarketOpenNow();
 
-              // Build display name: underlying-series or full symbol
-              const displaySymbol = sym.series
-                ? `${sym.underlying || sym.symbol}-${sym.series}`
-                : sym.symbol;
+              const getMonthAbbr = (dateStr) => {
+                if (!dateStr) return '';
+                const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+                const d = new Date(dateStr);
+                return months[d.getMonth()] || '';
+              };
+
+              let base = (sym.underlying || sym.symbol || '').toUpperCase()
+                .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+                .replace(/FUT$/i, '')
+                .replace(/-I+$/, '')
+                .replace(/-$/, '');
+
+              const displaySymbol = sym.expiry_date
+                ? `${base}-${getMonthAbbr(sym.expiry_date)}`
+                : base;
 
               const expiry = sym.expiry_date
                 ? new Date(sym.expiry_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
                 : '';
 
+              const liveTime = new Date().toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+              });
+
               return (
                 <div
                   key={sym.symbol}
                   onClick={(e) => handleSymbolTap(sym, e)}
-                  className="grid items-center px-3 py-2.5 border-b cursor-pointer hover:bg-white/5"
+                  className="grid items-center px-3 py-3 border-b cursor-pointer hover:bg-white/5"
                   style={{
-                    gridTemplateColumns: '2.2fr 1fr 1fr',
+                    gridTemplateColumns: '2.5fr 1fr 1fr',
                     background: isSelected ? '#2a2e39' : 'transparent',
                     borderColor: '#363a45',
                     borderLeft: isSelected ? '3px solid #2962ff' : '3px solid transparent',
                   }}
                 >
-                  {/* Symbol Column — full name visible */}
-                  <div className="flex items-center gap-2 min-w-0">
+                  {/* Symbol Column — name + change + time */}
+                  <div className="flex items-start gap-2 min-w-0">
                     <Star
                       size={14}
                       color={inWL ? '#f5c542' : '#787b86'}
                       fill={inWL ? '#f5c542' : 'none'}
                       onClick={(e) => { e.stopPropagation(); toggleSymbolInWatchlist(sym.symbol); }}
-                      className="shrink-0 cursor-pointer"
+                      className="shrink-0 cursor-pointer mt-1"
                     />
-                    <div className="min-w-0">
-                      <div className="font-semibold text-sm leading-tight" style={{ color: '#d1d4dc', wordBreak: 'break-word' }}>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-sm leading-tight" style={{ color: '#d1d4dc', wordBreak: 'break-word' }}>
                         {displaySymbol}
                       </div>
-                      {expiry && (
-                        <div className="text-[10px] leading-tight" style={{ color: '#787b86' }}>
-                          {expiry}
-                        </div>
-                      )}
+                      {/* Net change + % */}
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <span
+                          className="text-xs font-semibold"
+                          style={{ color: symChange >= 0 ? '#26a69a' : '#ef5350' }}
+                        >
+                          {symChange >= 0 ? '+' : ''}{symChange.toFixed(2)}
+                        </span>
+                        <span
+                          className="text-xs font-medium"
+                          style={{ color: symChangePercent >= 0 ? '#26a69a' : '#ef5350' }}
+                        >
+                          ({symChangePercent >= 0 ? '+' : ''}{symChangePercent.toFixed(2)}%)
+                        </span>
+                      </div>
+                      {/* Live time + expiry */}
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-[10px]" style={{ color: '#787b86' }}>{liveTime}</span>
+                        {expiry && (
+                          <span className="text-[10px]" style={{ color: '#787b86' }}>• {expiry}</span>
+                        )}
+                        {sym.lot_size && (
+                          <span className="text-[10px]" style={{ color: '#f5c542' }}>Lot:{sym.lot_size}</span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  {/* Bid Column + L: underneath */}
+                  {/* Bid + L below */}
                   <div className="text-right">
-                    <div className="text-sm font-mono font-semibold" style={{ color: '#ef5350' }}>
+                    <div className="text-lg font-bold font-mono leading-tight" style={{ color: marketOpen ? '#ef5350' : '#787b86' }}>
                       {symBid > 0 ? symBid.toFixed(2) : '—'}
                     </div>
-                    <div className="text-[10px] font-mono" style={{ color: '#787b86' }}>
+                    <div className="text-[10px] font-mono mt-0.5" style={{ color: '#787b86' }}>
                       L: {symLow > 0 ? symLow.toFixed(2) : '—'}
                     </div>
                   </div>
 
-                  {/* Ask Column + H: underneath */}
+                  {/* Ask + H below */}
                   <div className="text-right">
-                    <div className="text-sm font-mono font-semibold" style={{ color: '#26a69a' }}>
+                    <div className="text-lg font-bold font-mono leading-tight" style={{ color: marketOpen ? '#26a69a' : '#787b86' }}>
                       {symAsk > 0 ? symAsk.toFixed(2) : '—'}
                     </div>
-                    <div className="text-[10px] font-mono" style={{ color: '#787b86' }}>
+                    <div className="text-[10px] font-mono mt-0.5" style={{ color: '#787b86' }}>
                       H: {symHigh > 0 ? symHigh.toFixed(2) : '—'}
                     </div>
                   </div>
@@ -1963,7 +2280,7 @@ const Dashboard = () => {
 
   // ============ CHART TAB ============
   const renderChartTab = () => {
-    const chartHeight = chartFullscreen ? window.innerHeight - 140 : 420;
+    const chartHeight = chartFullscreen ? window.innerHeight - 140 : 300;
 
     return (
       <div
@@ -2060,11 +2377,12 @@ const Dashboard = () => {
           />
 
           <div
-            className="absolute left-4 right-4 rounded-lg p-4"
+            className="absolute left-4 right-4 rounded-lg p-3"
             style={{
-              bottom: chartFullscreen ? 12 : 70,
-              background: 'rgba(30, 34, 45, 0.95)',
+              bottom: chartFullscreen ? 12 : 8,
+              background: 'rgba(30, 34, 45, 0.97)',
               border: '1px solid #363a45',
+              zIndex: 10,
             }}
           >
             <div className="flex items-center justify-between mb-3">
@@ -2077,9 +2395,15 @@ const Dashboard = () => {
               <input
                 type="number"
                 value={quantity}
-                onChange={(e) =>
-                  setQuantity(Math.max(1, Number(e.target.value || 1)))
-                }
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === '') setQuantity('');
+                  else setQuantity(Math.max(1, Number(raw)));
+                }}
+                onBlur={() => {
+                  if (!quantity || Number(quantity) < 1) setQuantity(1);
+                }}
                 className="w-24 px-3 py-1.5 rounded text-base text-center font-medium"
                 style={{
                   background: '#2a2e39',
@@ -2153,11 +2477,12 @@ const Dashboard = () => {
 
     return (
       <div
-        className="fixed inset-0 z-[9999] bg-black/60 flex items-end lg:items-center justify-center"
+        className="fixed inset-0 bg-black/70 flex items-center justify-center p-4"
+        style={{ zIndex: 10000 }}
         onClick={() => setShowOrderModal(false)}
       >
         <div
-          className="w-full lg:max-w-md lg:rounded-xl rounded-t-xl max-h-[92vh] flex flex-col overflow-hidden"
+          className="w-full max-w-md rounded-xl max-h-[85vh] flex flex-col overflow-hidden"
           style={{ background: '#1e222d', border: '1px solid #363a45' }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -2241,7 +2566,7 @@ const Dashboard = () => {
               </label>
               <div className="flex items-center gap-0">
                 <button
-                  onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                  onClick={() => setQuantity(Math.max(1, (Number(quantity) || 1) - 1))}
                   className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0"
                   style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
                 >
@@ -2250,7 +2575,18 @@ const Dashboard = () => {
                 <input
                   type="number"
                   value={quantity}
-                  onChange={(e) => setQuantity(Math.max(1, Number(e.target.value || 1)))}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (raw === '') {
+                      setQuantity('');
+                    } else {
+                      setQuantity(Math.max(1, Number(raw)));
+                    }
+                  }}
+                  onBlur={() => {
+                    if (!quantity || Number(quantity) < 1) setQuantity(1);
+                  }}
                   className="flex-1 h-10 px-2 text-center text-base font-bold"
                   style={{
                     background: '#2a2e39',
@@ -2262,7 +2598,7 @@ const Dashboard = () => {
                   min="1"
                 />
                 <button
-                  onClick={() => setQuantity(quantity + 1)}
+                  onClick={() => setQuantity((Number(quantity) || 0) + 1)}
                   className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0"
                   style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}
                 >
@@ -2938,7 +3274,7 @@ const Dashboard = () => {
   const renderTradeTab = () => (
     <div
       className="flex flex-col h-full"
-      style={{ background: '#1e222d' }}
+      style={{ background: theme === 'light' ? '#ffffff' : '#1e222d' }}
     >
       <div
         className="p-3 border-b"
@@ -2947,13 +3283,13 @@ const Dashboard = () => {
         <div className="grid grid-cols-3 gap-2 text-center mb-3">
           <div
             className="p-3 rounded-lg"
-            style={{ background: '#2a2e39' }}
+            style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
           >
             <div
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Balance
+              Credit
             </div>
             <div
               className="font-bold text-base"
@@ -2964,7 +3300,7 @@ const Dashboard = () => {
           </div>
           <div
             className="p-3 rounded-lg"
-            style={{ background: '#2a2e39' }}
+            style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
           >
             <div
               className="text-xs font-medium"
@@ -2981,7 +3317,7 @@ const Dashboard = () => {
           </div>
           <div
             className="p-3 rounded-lg"
-            style={{ background: '#2a2e39' }}
+            style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
           >
             <div
               className="text-xs font-medium"
@@ -3001,10 +3337,10 @@ const Dashboard = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-2 text-center">
+        <div className="grid grid-cols-3 gap-2 text-center">
           <div
             className="p-2 rounded-lg"
-            style={{ background: '#252832' }}
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
           >
             <div
               className="text-xs font-medium"
@@ -3021,7 +3357,7 @@ const Dashboard = () => {
           </div>
           <div
             className="p-2 rounded-lg"
-            style={{ background: '#252832' }}
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
           >
             <div
               className="text-xs font-medium"
@@ -3038,7 +3374,7 @@ const Dashboard = () => {
           </div>
           <div
             className="p-2 rounded-lg"
-            style={{ background: '#252832' }}
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
           >
             <div
               className="text-xs font-medium"
@@ -3058,23 +3394,6 @@ const Dashboard = () => {
               {accountStats.margin > 0
                 ? `${accountStats.marginLevel.toFixed(0)}%`
                 : '∞'}
-            </div>
-          </div>
-          <div
-            className="p-2 rounded-lg"
-            style={{ background: '#252832' }}
-          >
-            <div
-              className="text-xs font-medium"
-              style={{ color: '#787b86' }}
-            >
-              Leverage
-            </div>
-            <div
-              className="font-semibold text-sm"
-              style={{ color: '#2962ff' }}
-            >
-              1:{accountStats.leverage}
             </div>
           </div>
         </div>
@@ -3115,35 +3434,22 @@ const Dashboard = () => {
       <div className="flex-1 overflow-y-auto">
         {tradeTabSection === 'positions' && (
           <>
-            <div
-              className="flex gap-2 p-3 border-b"
-              style={{ borderColor: '#363a45' }}
-            >
-              {closingMode && (
+            {closingMode && (
+              <div
+                className="flex gap-2 p-3 border-b"
+                style={{ borderColor: '#363a45' }}
+              >
                 <div
                   className="flex-1 p-2 rounded-lg flex items-center gap-2"
                   style={{ background: '#ff980020' }}
                 >
                   <Lock size={16} color="#ff9800" />
-                  <span
-                    className="text-xs"
-                    style={{ color: '#ff9800' }}
-                  >
-                    Closing mode active - You can only close existing
-                    positions
+                  <span className="text-xs" style={{ color: '#ff9800' }}>
+                    Closing mode active - You can only close existing positions
                   </span>
                 </div>
-              )}
-              {!closingMode && (
-                <button
-                  onClick={() => setShowOrderModal(true)}
-                  className="flex-1 py-2.5 rounded-lg text-sm font-semibold"
-                  style={{ background: '#2962ff', color: '#fff' }}
-                >
-                  + New Order
-                </button>
-              )}
-            </div>
+              </div>
+            )}
 
             {openTrades.length === 0 ? (
               <div
@@ -3167,9 +3473,9 @@ const Dashboard = () => {
                     key={trade.id}
                     className="border-b"
                     style={{
-                      borderColor: '#363a45',
+                      borderColor: theme === 'light' ? '#e2e8f0' : '#363a45',
                       background: isExpanded
-                        ? '#252832'
+                        ? (theme === 'light' ? '#f8fafc' : '#252832')
                         : 'transparent',
                     }}
                   >
@@ -3182,51 +3488,24 @@ const Dashboard = () => {
                       }
                     >
                       <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center"
-                            style={{
-                              background:
-                                trade.trade_type === 'buy'
-                                  ? '#26a69a20'
-                                  : '#ef535020',
-                            }}
-                          >
-                            {trade.trade_type === 'buy' ? (
-                              <TrendingUp
-                                size={16}
-                                color="#26a69a"
-                              />
-                            ) : (
-                              <TrendingDown
-                                size={16}
-                                color="#ef5350"
-                              />
-                            )}
-                          </div>
+                      <div className="flex items-center gap-2">
                           <div>
                             <div className="flex items-center gap-2">
                               <span
                                 className="font-bold text-base"
-                                style={{ color: '#d1d4dc' }}
+                                style={{ color: theme === 'light' ? '#1e293b' : '#d1d4dc' }}
                               >
                                 {trade.symbol}
                               </span>
                               <span
-                                className="font-bold text-base px-1.5 py-0.5 rounded"
+                                className="font-bold text-sm px-2 py-1 rounded"
                                 style={{
                                   color: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350',
-                                  background: trade.trade_type === 'buy' ? '#26a69a15' : '#ef535015',
+                                  background: trade.trade_type === 'buy' ? '#26a69a20' : '#ef535020',
                                 }}
                               >
-                                {trade.quantity}
+                                {String(trade.trade_type || '').toUpperCase()} {trade.quantity}
                               </span>
-                            </div>
-                            <div
-                              className="text-xs"
-                              style={{ color: '#787b86' }}
-                            >
-                              {String(trade.trade_type || '').toUpperCase()}
                             </div>
                           </div>
                         </div>
@@ -3264,7 +3543,7 @@ const Dashboard = () => {
 
                       <div
                         className="flex justify-between text-sm mt-2"
-                        style={{ color: '#787b86' }}
+                        style={{ color: theme === 'light' ? '#64748b' : '#787b86' }}
                       >
                         <span>
                           Open: {formatINR(trade.open_price)}
@@ -3287,17 +3566,22 @@ const Dashboard = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setModifyModal(trade);
+                              setSelectedSymbol(trade.symbol);
+                              setOrderExecType('instant');
+                              setLimitPrice('');
+                              setQuantity(1);
+                              setStopLoss('');
+                              setTakeProfit('');
+                              setShowOrderModal(true);
                             }}
                             className="flex-1 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
                             style={{
-                              background: '#2a2e39',
-                              color: '#d1d4dc',
-                              border: '1px solid #363a45',
+                              background: '#2962ff',
+                              color: '#fff',
                             }}
                           >
-                            <Edit3 size={16} />
-                            Modify
+                            <Plus size={16} />
+                            New Order
                           </button>
                           <button
                             onClick={(e) => {
@@ -3316,12 +3600,24 @@ const Dashboard = () => {
                             Close
                           </button>
                         </div>
+                        {/* Modify SL/TP link */}
+                        {/* <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setModifyModal(trade);
+                          }}
+                          className="w-full mt-2 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
+                          style={{ background: '#2a2e39', color: '#787b86', border: '1px solid #363a45' }}
+                        >
+                          <Edit3 size={14} />
+                          Modify SL/TP
+                        </button> */}
 
                         {(trade.stop_loss > 0 ||
                           trade.take_profit > 0) && (
                           <div
                             className="flex gap-4 mt-2 text-xs"
-                            style={{ color: '#787b86' }}
+                            style={{ color: theme === 'light' ? '#64748b' : '#787b86' }}
                           >
                             {trade.stop_loss > 0 && (
                               <span>
@@ -3351,27 +3647,35 @@ const Dashboard = () => {
         )}
 
         {tradeTabSection === 'pending' && (
-          <div
-            className="p-6 text-center"
-            style={{ color: '#787b86' }}
-          >
+          <div style={{ color: '#787b86' }}>
             {pendingOrders?.length ? (
-              <div>
+              <div className="p-3 space-y-2">
                 {pendingOrders.map((o) => (
                   <div
                     key={o.id}
-                    className="p-3 rounded-lg mb-2 text-left"
-                    style={{ background: '#2a2e39' }}
+                    className="p-3 rounded-lg"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45' }}
                   >
-                    <div className="flex justify-between">
-                      <span
-                        style={{
-                          color: '#d1d4dc',
-                          fontWeight: 700,
-                        }}
-                      >
-                        {o.symbol}
-                      </span>
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span
+                          style={{
+                            color: '#d1d4dc',
+                            fontWeight: 700,
+                          }}
+                        >
+                          {o.symbol}
+                        </span>
+                        <span
+                          className="text-xs px-1.5 py-0.5 rounded font-medium"
+                          style={{
+                            background: o.trade_type === 'buy' ? '#26a69a20' : '#ef535020',
+                            color: o.trade_type === 'buy' ? '#26a69a' : '#ef5350',
+                          }}
+                        >
+                          {String(o.trade_type || o.order_type || '').toUpperCase()}
+                        </span>
+                      </div>
                       <span
                         className="text-xs px-2 py-0.5 rounded"
                         style={{
@@ -3386,14 +3690,59 @@ const Dashboard = () => {
                       className="text-sm mt-1"
                       style={{ color: '#787b86' }}
                     >
-                      {o.order_type} | Qty {o.quantity} | @{' '}
-                      {Number(o.price || 0).toFixed(2)}
+                      {o.order_type} | Qty {o.quantity} | @ {Number(o.price || 0).toFixed(2)}
+                    </div>
+                    {/* Modify & Cancel buttons */}
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const newPrice = window.prompt('New price:', Number(o.price || 0).toFixed(2));
+                          if (newPrice && !isNaN(Number(newPrice))) {
+                            useTradingStore.getState().modifyPendingOrder(o.id, {
+                              price: Number(newPrice),
+                              stopLoss: o.stop_loss || 0,
+                              takeProfit: o.take_profit || 0,
+                            }).then((res) => {
+                              if (res?.success) {
+                                toast.success('Order modified');
+                                fetchPendingOrders?.(selectedAccount?.id);
+                              } else {
+                                toast.error(res?.message || 'Modify failed');
+                              }
+                            });
+                          }
+                        }}
+                        className="flex-1 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
+                        style={{ background: '#2962ff20', color: '#2962ff', border: '1px solid #2962ff50' }}
+                      >
+                        <Edit3 size={14} />
+                        Modify
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!window.confirm(`Cancel ${o.order_type} order for ${o.symbol}?`)) return;
+                          cancelOrder(o.id, selectedAccount?.id).then((res) => {
+                            if (res?.success) {
+                              toast.success('Order cancelled');
+                            } else {
+                              toast.error(res?.message || 'Cancel failed');
+                            }
+                          });
+                        }}
+                        className="flex-1 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
+                        style={{ background: '#ef535020', color: '#ef5350', border: '1px solid #ef535050' }}
+                      >
+                        <X size={14} />
+                        Cancel
+                      </button>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div>
+              <div className="p-6 text-center">
                 <Clock
                   size={48}
                   className="mx-auto mb-3 opacity-30"
@@ -3517,6 +3866,37 @@ const Dashboard = () => {
       {renderCloseConfirmModal()}
     </div>
   );
+
+  // ============ ORDER CONFIRMATION OVERLAY ============
+  const renderOrderConfirmation = () => {
+    if (!orderConfirmation) return null;
+    const oc = orderConfirmation;
+    const isBuy = oc.type === 'BUY';
+
+    return (
+      <div
+        className="fixed inset-0 z-[10001] flex items-center justify-center p-6"
+        style={{ background: isBuy ? 'rgba(38, 166, 154, 0.95)' : 'rgba(239, 83, 80, 0.95)' }}
+        onClick={() => setOrderConfirmation(null)}
+      >
+        <div className="text-center text-white" onClick={(e) => e.stopPropagation()}>
+          <div className="text-6xl mb-4">{isBuy ? '📈' : '📉'}</div>
+          <div className="text-3xl font-bold mb-2">
+            {oc.type} {oc.pending ? 'ORDER PLACED' : 'EXECUTED'}
+          </div>
+          <div className="text-xl font-semibold mb-1">{oc.symbol}</div>
+          <div className="text-lg opacity-90 mb-1">Qty: {oc.quantity}</div>
+          {oc.price && (
+            <div className="text-2xl font-bold mt-3">@ ₹{oc.price}</div>
+          )}
+          {oc.merged && (
+            <div className="text-sm mt-2 opacity-80">(Merged into existing position)</div>
+          )}
+          <div className="mt-6 text-sm opacity-70">Tap anywhere to dismiss</div>
+        </div>
+      </div>
+    );
+  };
 
   // ============ HISTORY TAB ============
   const renderHistoryTab = () => {
@@ -3646,44 +4026,71 @@ const Dashboard = () => {
 
         {/* ── Scrollable Content ── */}
         <div className="flex-1 overflow-y-auto">
-          {historyViewMode === 'positions' && (
-            <>
-              {historyDisplayTrades.length === 0 ? (
-                <div className="p-8 text-center" style={{ color: '#787b86' }}>
-                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
-                  <div className="text-base">No closed positions</div>
-                </div>
-              ) : (
-                historyDisplayTrades.map((t) => {
-                  const pnl = Number(t.profit || 0);
-                  return (
-                    <div key={t.id} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-base" style={{ color: '#d1d4dc' }}>{t.symbol}</span>
-                            <span className="font-bold text-sm px-1.5 py-0.5 rounded" style={{ color: t.trade_type === 'buy' ? '#26a69a' : '#ef5350', background: t.trade_type === 'buy' ? '#26a69a15' : '#ef535015' }}>
-                              {t.quantity}
-                            </span>
+          {historyViewMode === 'positions' && (() => {
+            // Aggregate net positions by symbol
+            const netMap = {};
+            (historyDisplayTrades || []).forEach((t) => {
+              const sym = t.symbol;
+              if (!netMap[sym]) {
+                netMap[sym] = { symbol: sym, buyQty: 0, sellQty: 0, totalPnL: 0, trades: 0, lastClose: null };
+              }
+              const q = Number(t.quantity || 0);
+              if (t.trade_type === 'buy') netMap[sym].buyQty += q;
+              else netMap[sym].sellQty += q;
+              netMap[sym].totalPnL += Number(t.profit || 0);
+              netMap[sym].trades += 1;
+              const ct = t.close_time || t.closeTime;
+              if (ct && (!netMap[sym].lastClose || new Date(ct) > new Date(netMap[sym].lastClose))) {
+                netMap[sym].lastClose = ct;
+              }
+            });
+            const netPositions = Object.values(netMap).sort((a, b) => {
+              if (!a.lastClose) return 1;
+              if (!b.lastClose) return -1;
+              return new Date(b.lastClose) - new Date(a.lastClose);
+            });
+
+            return (
+              <>
+                {netPositions.length === 0 ? (
+                  <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                    <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                    <div className="text-base">No closed positions</div>
+                  </div>
+                ) : (
+                  netPositions.map((np) => {
+                    const netQty = np.buyQty - np.sellQty;
+                    const pnl = np.totalPnL;
+                    return (
+                      <div key={np.symbol} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-base" style={{ color: '#d1d4dc' }}>{np.symbol}</span>
+                              <span className="text-xs px-2 py-0.5 rounded font-medium" style={{ background: '#2962ff20', color: '#2962ff' }}>
+                                {np.trades} trade{np.trades > 1 ? 's' : ''}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: '#787b86' }}>
+                              <span>Buy: <span style={{ color: '#26a69a' }}>{np.buyQty}</span></span>
+                              <span>Sell: <span style={{ color: '#ef5350' }}>{np.sellQty}</span></span>
+                              <span>Net: <span style={{ color: '#d1d4dc', fontWeight: 700 }}>{netQty}</span></span>
+                            </div>
+                            <div className="text-[11px] mt-0.5" style={{ color: '#787b86' }}>
+                              {np.lastClose ? new Date(np.lastClose).toLocaleString() : ''}
+                            </div>
                           </div>
-                          <div className="text-xs mt-0.5" style={{ color: '#787b86' }}>
-                            {String(t.trade_type || '').toUpperCase()} • {t.close_time ? new Date(t.close_time).toLocaleString() : ''}
+                          <div className="font-bold text-lg" style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}>
+                            {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
                           </div>
                         </div>
-                        <div className="font-bold text-lg" style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}>
-                          {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
-                        </div>
                       </div>
-                      <div className="flex gap-4 mt-2 text-xs" style={{ color: '#787b86' }}>
-                        <span>Open: {Number(t.open_price || 0).toFixed(2)}</span>
-                        <span>Close: {Number(t.close_price || 0).toFixed(2)}</span>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </>
-          )}
+                    );
+                  })
+                )}
+              </>
+            );
+          })()}
 
           {historyViewMode === 'orders' && (
             <>
@@ -3751,33 +4158,47 @@ const Dashboard = () => {
                   <div className="text-base">No deals found</div>
                 </div>
               ) : (
-                filteredDeals.map((d, idx) => {
+              filteredDeals.map((d, idx) => {
                   const dp = Number(d.profit || 0);
                   const dt = d.time || d.close_time || d.open_time || d.created_at;
+                  const dealPrice = Number(d.price || d.open_price || d.close_price || 0);
+                  const dealType = d.type || d.trade_type || '';
+                  const isBuyIn = dealType === 'buy';
+                  const dealLabel = isBuyIn ? 'Buy In' : dealType === 'sell' ? 'Sell Out' : String(dealType).toUpperCase();
                   return (
                     <div key={d.id || idx} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{d.symbol || '—'}</span>
-                          {d.type && (
-                            <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ background: d.type === 'buy' ? '#26a69a20' : d.type === 'sell' ? '#ef535020' : '#2962ff20', color: d.type === 'buy' ? '#26a69a' : d.type === 'sell' ? '#ef5350' : '#2962ff' }}>
-                              {String(d.type).toUpperCase()}
-                            </span>
+                      <div className="flex items-start justify-between">
+                        {/* Left: Symbol + type + qty @ price */}
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{d.symbol || '—'}</span>
+                            {dealType && (
+                              <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{
+                                background: isBuyIn ? '#26a69a20' : '#ef535020',
+                                color: isBuyIn ? '#26a69a' : '#ef5350',
+                              }}>
+                                {dealLabel}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                            {d.quantity ? `Qty: ${d.quantity}` : ''}
+                            {dealPrice > 0 ? ` @ ₹${dealPrice.toFixed(2)}` : ''}
+                          </div>
+                        </div>
+                        {/* Right: Date/time + P&L */}
+                        <div className="text-right shrink-0">
+                          <div className="text-xs" style={{ color: '#787b86' }}>
+                            {dt ? new Date(dt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : ''}
+                          </div>
+                          <div className="text-[10px]" style={{ color: '#787b86' }}>
+                            {dt ? new Date(dt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}
+                          </div>
+                          {dp !== 0 && (
+                            <div className="font-bold text-sm mt-0.5" style={{ color: dp >= 0 ? '#26a69a' : '#ef5350' }}>
+                              {dp >= 0 ? '+' : ''}{formatINR(dp)}
+                            </div>
                           )}
-                        </div>
-                        {dp !== 0 && (
-                          <span className="font-bold text-sm" style={{ color: dp >= 0 ? '#26a69a' : '#ef5350' }}>
-                            {dp >= 0 ? '+' : ''}{formatINR(dp)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between mt-1">
-                        <div className="text-xs" style={{ color: '#787b86' }}>
-                          {d.quantity ? `Qty: ${d.quantity}` : ''}{d.price ? ` @ ${Number(d.price).toFixed(2)}` : ''}
-                          {d.commission ? ` | Comm: ${formatINR(d.commission)}` : ''}
-                        </div>
-                        <div className="text-xs" style={{ color: '#787b86' }}>
-                          {dt ? new Date(dt).toLocaleString() : ''}
                         </div>
                       </div>
                     </div>
@@ -3959,9 +4380,7 @@ const Dashboard = () => {
                 className="text-sm"
                 style={{ color: '#2962ff' }}
               >
-                Login with another account to save it for quick
-                switching. Max {getMaxSavedAccounts()} accounts
-                allowed.
+                Login with another account to save it for quick switching.
               </div>
             </div>
 
@@ -3970,21 +4389,22 @@ const Dashboard = () => {
                 className="block text-sm mb-2"
                 style={{ color: '#787b86' }}
               >
-                Email
+                User ID
               </label>
               <input
-                type="email"
+                type="text"
                 value={addAccountEmail}
                 onChange={(e) =>
-                  setAddAccountEmail(e.target.value)
+                  setAddAccountEmail(e.target.value.toUpperCase())
                 }
-                className="w-full px-4 py-3 rounded-lg text-base"
+                className="w-full px-4 py-3 rounded-lg text-base font-mono"
                 style={{
                   background: '#2a2e39',
                   border: '1px solid #363a45',
                   color: '#d1d4dc',
                 }}
-                placeholder="user@example.com"
+                placeholder="TA1000"
+                autoCapitalize="characters"
               />
             </div>
 
@@ -4027,7 +4447,7 @@ const Dashboard = () => {
 
   // ============ SETTINGS TAB ============
   const renderSettingsTab = () => {
-    const maxAccounts = getMaxSavedAccounts();
+    const maxAccounts = 10;
 
     return (
       <div
@@ -4041,17 +4461,16 @@ const Dashboard = () => {
           <div className="flex items-center justify-between">
             <div>
               <div
-                className="font-semibold text-lg"
-                style={{ color: '#d1d4dc' }}
+                className="font-bold text-lg font-mono"
+                style={{ color: '#2962ff' }}
               >
-                {user?.firstName} {user?.lastName}
+                {user?.loginId || user?.login_id || '—'}
               </div>
-              <div
-                className="text-sm"
-                style={{ color: '#787b86' }}
-              >
-                {user?.email}
-              </div>
+              {(user?.firstName || user?.lastName) && (
+                <div className="text-sm mt-0.5" style={{ color: '#d1d4dc' }}>
+                  {user?.firstName} {user?.lastName}
+                </div>
+              )}
             </div>
 
             <button
@@ -4108,7 +4527,7 @@ const Dashboard = () => {
                 className="text-sm"
                 style={{ color: '#787b86' }}
               >
-                Balance
+                Credit
               </span>
               <button
                 onClick={() => setShowBalance((v) => !v)}
@@ -4167,6 +4586,36 @@ const Dashboard = () => {
               <RefreshCw size={20} />
               Withdraw
             </button>
+          </div>
+
+                    {/* Change Password */}
+          <div
+            className="p-4 rounded-xl"
+            style={{ background: '#2a2e39' }}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-medium" style={{ color: '#d1d4dc' }}>
+                  Password
+                </div>
+                <div className="text-xs" style={{ color: '#787b86' }}>
+                  Change your login password
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowFirstLoginPrompt(false);
+                  setChangePassCurrent('');
+                  setChangePassNew('');
+                  setChangePassConfirm('');
+                  setShowChangePasswordModal(true);
+                }}
+                className="px-4 py-2 rounded-lg font-medium text-sm"
+                style={{ background: '#2962ff20', color: '#2962ff', border: '1px solid #2962ff50' }}
+              >
+                Change Password
+              </button>
+            </div>
           </div>
 
           <div
@@ -4241,7 +4690,7 @@ const Dashboard = () => {
                     color: '#2962ff',
                   }}
                 >
-                  {savedAccounts.length}/{maxAccounts}
+                  {savedAccounts.length} saved
                 </span>
               </div>
               <div
@@ -4354,7 +4803,7 @@ const Dashboard = () => {
               )}
             </div>
 
-            {savedAccounts.length < maxAccounts && (
+            {(
               <div
                 className="p-3 border-t"
                 style={{ borderColor: '#363a45' }}
@@ -4567,6 +5016,8 @@ const Dashboard = () => {
 
       {renderMobileNav()}
       {renderOrderModal()}
+      {renderOrderConfirmation()}
+      {renderChangePasswordModal()}
     </div>
   );
 };

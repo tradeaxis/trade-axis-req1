@@ -2,10 +2,6 @@
   "appId": "com.tradeaxis.app",
   "appName": "Trade Axis",
   "webDir": "dist",
-  "server": {
-    "url": "https://tradeaxis-cf3.pages.dev",
-    "cleartext": true
-  },
   "android": {
     "allowMixedContent": true
   }

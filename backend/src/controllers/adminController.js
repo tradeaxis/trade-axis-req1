@@ -70,80 +70,89 @@ exports.listUsers = async (req, res) => {
 exports.createUser = async (req, res) => {
   try {
     const { 
-      email, 
+      loginId,
       password, 
       firstName, 
       lastName, 
       phone, 
+      email,
       role = 'user',
-      leverage = 5,
-      brokerageRate = 0.0003,
-      maxSavedAccounts = 3,
+      leverage = 300,
+      brokerageRate = 0.0006,
+      maxSavedAccounts = 10,
       demoBalance = 100000,
       createDemo = true,
       createLive = true,
     } = req.body;
 
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Email is required' });
+    if (!loginId || !loginId.trim()) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
     }
-    if (!firstName || !lastName) {
-      return res.status(400).json({ success: false, message: 'First name and last name are required' });
-    }
+
     if (!createDemo && !createLive) {
       return res.status(400).json({ success: false, message: 'Select at least one account type' });
     }
 
-    const { data: existingUser } = await supabase
+    const cleanLoginId = loginId.trim().toUpperCase();
+
+    // Check if loginId already exists
+    const { data: existingById } = await supabase
       .from('users')
       .select('id')
-      .eq('email', email.toLowerCase().trim())
+      .eq('login_id', cleanLoginId)
       .maybeSingle();
 
-    if (existingUser) {
-      return res.status(400).json({ success: false, message: 'Email already registered' });
+    if (existingById) {
+      return res.status(400).json({ success: false, message: `User ID "${cleanLoginId}" already exists. Choose a different one.` });
     }
 
-    // Find max TA number from BOTH user_id and login_id columns
-    const { data: allUsers } = await supabase
+    // Also check user_id column
+    const { data: existingByUserId } = await supabase
       .from('users')
-      .select('user_id, login_id')
-      .order('created_at', { ascending: false })
-      .limit(20);
+      .select('id')
+      .eq('user_id', cleanLoginId)
+      .maybeSingle();
 
-    let maxNum = 999;
-    if (allUsers) {
-      for (const u of allUsers) {
-        const m1 = (u.user_id || '').match(/TA(\d+)/);
-        const m2 = (u.login_id || '').match(/TA(\d+)/);
-        if (m1) maxNum = Math.max(maxNum, parseInt(m1[1], 10));
-        if (m2) maxNum = Math.max(maxNum, parseInt(m2[1], 10));
+    if (existingByUserId) {
+      return res.status(400).json({ success: false, message: `User ID "${cleanLoginId}" already exists. Choose a different one.` });
+    }
+
+    // If email provided, check uniqueness
+    const userEmail = email ? email.toLowerCase().trim() : `${cleanLoginId.toLowerCase()}@tradeaxis.local`;
+    
+    if (email) {
+      const { data: existingEmail } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', userEmail)
+        .maybeSingle();
+
+      if (existingEmail) {
+        return res.status(400).json({ success: false, message: 'Email already registered' });
       }
     }
 
-    const newUserId = `TA${maxNum + 1}`;
-    const newLoginId = `TA${maxNum + 1}`;
+    // Default password is TA2626
+    const userPassword = password || 'TA1234';
+    const hashedPassword = await bcrypt.hash(userPassword, 12);
 
-    // Hash password
-    const tempPassword = password || generateTempPassword();
-    const hashedPassword = await bcrypt.hash(tempPassword, 12);
-
-    // Insert with BOTH user_id and login_id explicitly set
+    // must_change_password = true means first login will prompt password change
     const { data: user, error: userError } = await supabase
       .from('users')
       .insert([{
-        user_id: newUserId,
-        login_id: newLoginId,
-        email: email.toLowerCase().trim(),
+        user_id: cleanLoginId,
+        login_id: cleanLoginId,
+        email: userEmail,
         password_hash: hashedPassword,
-        first_name: firstName.substring(0, 50),
-        last_name: lastName.substring(0, 50),
-        phone: (phone || '0000000000').substring(0, 15),
+        first_name: String(firstName || cleanLoginId).trim().substring(0, 50),
+        last_name: String(lastName || '').trim().substring(0, 50),
+        phone: String(phone || '').trim().substring(0, 15),
         role: (role || 'user').substring(0, 20),
         is_verified: false,
         is_active: true,
-        max_saved_accounts: Number(maxSavedAccounts) || -1,
+        max_saved_accounts: Number(maxSavedAccounts) || 10,
         closing_mode: false,
+        must_change_password: true,
       }])
       .select()
       .single();
@@ -156,17 +165,17 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    // Update optional fields separately
+    // Update optional fields separately (in case columns don't exist yet)
     try {
       await supabase
         .from('users')
         .update({
-          leverage: Number(leverage) || 5,
-          brokerage_rate: Number(brokerageRate) || 0.0003,
+          leverage: Number(leverage) || 300,
+          brokerage_rate: Number(brokerageRate) || 0.0006,
         })
         .eq('id', user.id);
     } catch (e) {
-      // silent
+      // silent — columns may not exist
     }
 
     // Create accounts
@@ -185,7 +194,7 @@ exports.createUser = async (req, res) => {
           equity: Number(demoBalance) || 100000,
           margin: 0,
           free_margin: Number(demoBalance) || 100000,
-          leverage: Number(leverage) || 5,
+          leverage: Number(leverage) || 300,
           currency: 'INR',
           is_active: true,
         }]);
@@ -205,7 +214,7 @@ exports.createUser = async (req, res) => {
           equity: 0,
           margin: 0,
           free_margin: 0,
-          leverage: Number(leverage) || 5,
+          leverage: Number(leverage) || 300,
           currency: 'INR',
           is_active: true,
         }]);
@@ -216,10 +225,10 @@ exports.createUser = async (req, res) => {
       success: true, 
       data: {
         user,
-        loginId: newLoginId,
-        tempPassword: password ? null : tempPassword,
+        loginId: cleanLoginId,
+        tempPassword: userPassword === 'TA1234' ? 'TA1234' : null,
       },
-      message: 'User created successfully' 
+      message: `User ${cleanLoginId} created successfully` 
     });
   } catch (error) {
     console.error('createUser full error:', error);
@@ -283,7 +292,7 @@ exports.resetPassword = async (req, res) => {
 exports.getLeverageOptions = async (req, res) => {
   res.json({
     success: true,
-    options: [1, 2, 3, 5, 10, 15, 20, 25, 50, 100, 200],
+    options: [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000],
   });
 };
 
@@ -401,9 +410,12 @@ exports.addBalanceToAccount = async (req, res) => {
     const { id } = req.params;
     const { accountId, amount, accountType = 'live', note = 'Admin deposit' } = req.body;
 
-    if (!amount || amount <= 0) {
+    if (!amount || amount === 0) {
       return res.status(400).json({ success: false, message: 'Invalid amount' });
     }
+
+    const isReduction = amount < 0;
+    const absAmount = Math.abs(amount);
 
     let account;
 
@@ -432,7 +444,17 @@ exports.addBalanceToAccount = async (req, res) => {
       account = data;
     }
 
-    const newBalance = parseFloat(account.balance || 0) + parseFloat(amount);
+    const currentBalance = parseFloat(account.balance || 0);
+
+    // For reductions, validate sufficient balance
+    if (isReduction && absAmount > currentBalance) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot reduce ₹${absAmount}. Current balance is ₹${currentBalance.toFixed(2)}`,
+      });
+    }
+
+    const newBalance = currentBalance + parseFloat(amount); // amount is negative for reductions
     const newEquity = parseFloat(account.equity || 0) + parseFloat(amount);
     const newFreeMargin = newEquity - parseFloat(account.margin || 0);
 
@@ -450,15 +472,17 @@ exports.addBalanceToAccount = async (req, res) => {
     await supabase.from('transactions').insert({
       user_id: id,
       account_id: account.id,
-      type: 'deposit',
-      amount: parseFloat(amount),
+      type: isReduction ? 'withdrawal' : 'deposit',
+      amount: absAmount,
       status: 'completed',
-      description: note || 'Admin deposit',
+      description: note || (isReduction ? 'Admin reduction' : 'Admin deposit'),
     });
 
     res.json({
       success: true,
-      message: `₹${amount} added to account`,
+      message: isReduction
+        ? `₹${absAmount} reduced from account. New balance: ₹${newBalance.toFixed(2)}`
+        : `₹${absAmount} added to account. New balance: ₹${newBalance.toFixed(2)}`,
       newBalance,
     });
   } catch (error) {
@@ -849,6 +873,150 @@ exports.kiteStatus = async (req, res) => {
     });
   } catch (error) {
     console.error('kiteStatus error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ MARKET HOLIDAY TOGGLE ============
+exports.setMarketHoliday = async (req, res) => {
+  try {
+    const { isHoliday, message } = req.body;
+    const { setHoliday, getHolidayStatus } = require('../services/marketStatus');
+
+    setHoliday(!!isHoliday, message || '');
+
+    const status = getHolidayStatus();
+    res.json({
+      success: true,
+      data: status,
+      message: status.isHoliday
+        ? `Market holiday enabled: ${status.message}`
+        : 'Market holiday disabled. Normal trading resumed.',
+    });
+  } catch (error) {
+    console.error('setMarketHoliday error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMarketHoliday = async (req, res) => {
+  try {
+    const { getHolidayStatus, isMarketOpen } = require('../services/marketStatus');
+    const status = getHolidayStatus();
+
+    res.json({
+      success: true,
+      data: {
+        ...status,
+        marketOpen: isMarketOpen(),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ ADMIN MANUAL CLOSE POSITION ============
+exports.adminClosePosition = async (req, res) => {
+  try {
+    const { tradeId, closePrice: manualPrice, reason } = req.body;
+
+    if (!tradeId) {
+      return res.status(400).json({ success: false, message: 'Trade ID is required' });
+    }
+
+    // Get the trade
+    const { data: trade, error: tradeError } = await supabase
+      .from('trades')
+      .select('*, accounts!inner(user_id, balance, margin)')
+      .eq('id', tradeId)
+      .eq('status', 'open')
+      .single();
+
+    if (tradeError || !trade) {
+      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
+    }
+
+    // Get user brokerage rate
+    const { data: userData } = await supabase
+      .from('users')
+      .select('brokerage_rate')
+      .eq('id', trade.accounts.user_id)
+      .single();
+
+    const brokerageRate = userData?.brokerage_rate || 0.0003;
+
+    // Determine close price
+    let closePrice;
+    if (manualPrice && Number(manualPrice) > 0) {
+      closePrice = Number(manualPrice);
+    } else {
+      // Use live price
+      const kiteStreamService = require('../services/kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(trade.symbol);
+      if (livePrice) {
+        closePrice = trade.trade_type === 'buy' ? livePrice.bid : livePrice.ask;
+      } else {
+        closePrice = parseFloat(trade.current_price || trade.open_price);
+      }
+    }
+
+    if (!closePrice || closePrice <= 0) {
+      return res.status(400).json({ success: false, message: 'Cannot determine close price' });
+    }
+
+    const tradeQuantity = parseFloat(trade.quantity);
+    const direction = trade.trade_type === 'buy' ? 1 : -1;
+    const priceDiff = (closePrice - parseFloat(trade.open_price)) * direction;
+    const grossProfit = priceDiff * tradeQuantity;
+    
+    const sellBrokerage = closePrice * tradeQuantity * brokerageRate;
+    const buyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0);
+    const totalBrokerage = buyBrokerage + sellBrokerage;
+    const netProfit = grossProfit - totalBrokerage;
+
+    const closeTime = new Date().toISOString();
+
+    // Close the trade
+    const { data: closedTrade, error: updateError } = await supabase
+      .from('trades')
+      .update({
+        close_price: closePrice,
+        profit: netProfit,
+        sell_brokerage: sellBrokerage,
+        brokerage: totalBrokerage,
+        status: 'closed',
+        close_time: closeTime,
+        updated_at: closeTime,
+        comment: `Admin close: ${reason || 'Manual close by admin'}`,
+      })
+      .eq('id', tradeId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // Update account
+    const newBalance = parseFloat(trade.accounts.balance) + netProfit;
+    const newMargin = Math.max(0, parseFloat(trade.accounts.margin) - parseFloat(trade.margin || 0));
+
+    await supabase
+      .from('accounts')
+      .update({
+        balance: newBalance,
+        margin: newMargin,
+        free_margin: newBalance - newMargin,
+        updated_at: closeTime,
+      })
+      .eq('id', trade.account_id);
+
+    res.json({
+      success: true,
+      data: closedTrade,
+      message: `Admin closed ${trade.symbol} ${trade.trade_type.toUpperCase()} x${tradeQuantity} @ ₹${closePrice.toFixed(2)}. P&L: ₹${netProfit.toFixed(2)}`,
+    });
+  } catch (error) {
+    console.error('adminClosePosition error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

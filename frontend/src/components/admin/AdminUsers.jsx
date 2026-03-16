@@ -12,23 +12,13 @@ import {
   Copy, 
   Plus,
   X,
-  Wallet
+  Wallet,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 
-// Leverage options (1:1 to 1:200)
-const LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 50, 100, 200];
-
-// Brokerage rate options (in percentage)
-const BROKERAGE_OPTIONS = [
-  { value: 0, label: '0% (No Brokerage)' },
-  { value: 0.0001, label: '0.01%' },
-  { value: 0.0002, label: '0.02%' },
-  { value: 0.0003, label: '0.03% (Default)' },
-  { value: 0.0005, label: '0.05%' },
-  { value: 0.001, label: '0.10%' },
-  { value: 0.002, label: '0.20%' },
-  { value: 0.005, label: '0.50%' },
-];
+// Leverage options — updated to include 1:300, 1:500, 1:1000
+const LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000];
 
 export default function AdminUsers() {
   const [loading, setLoading] = useState(false);
@@ -42,16 +32,18 @@ export default function AdminUsers() {
   const [addMoneyNote, setAddMoneyNote] = useState('');
   const [addMoneyLoading, setAddMoneyLoading] = useState(false);
 
+  // Create user form — Name is OPTIONAL, only Unique ID + Pass required
   const [form, setForm] = useState({
-    email: '',
+    loginId: '',
     firstName: '',
     lastName: '',
     phone: '',
+    email: '',
     role: 'user',
     password: '',
-    leverage: 5,
-    maxSavedAccounts: 3,
-    brokerageRate: 0.0003,
+    leverage: 300,
+    maxSavedAccounts: 10,
+    brokerageRate: '0.06',
     demoBalance: 100000,
     createDemo: true,
     createLive: true,
@@ -61,8 +53,6 @@ export default function AdminUsers() {
     setLoading(true);
     try {
       const res = await api.get(`/admin/users?limit=500&q=${searchQuery}`);
-      
-      // ✅ Handle both response formats for compatibility
       if (res.data?.success) {
         const userData = res.data.data || res.data.users || [];
         setUsers(userData);
@@ -82,7 +72,6 @@ export default function AdminUsers() {
     loadUsers();
   }, [loadUsers]);
 
-  // Copy Login ID to clipboard
   const copyLoginId = (loginId) => {
     if (!loginId) return;
     navigator.clipboard.writeText(loginId);
@@ -90,24 +79,30 @@ export default function AdminUsers() {
   };
 
   const createUser = async () => {
-    if (!form.email || !form.firstName || !form.lastName) {
-      return toast.error('Email, First name, Last name required');
+    if (!form.loginId || !form.loginId.trim()) {
+      return toast.error('User ID is required');
     }
-
     if (!form.createDemo && !form.createLive) {
       return toast.error('Select at least one account type (Demo or Live)');
     }
 
+    // Parse brokerage from percentage string to decimal
+    const brokerageDecimal = parseFloat(form.brokerageRate) / 100;
+    if (isNaN(brokerageDecimal) || brokerageDecimal < 0) {
+      return toast.error('Enter a valid brokerage rate');
+    }
+
     try {
       const res = await api.post('/admin/users', {
-        email: form.email,
-        firstName: form.firstName,
-        lastName: form.lastName,
-        phone: form.phone,
+        loginId: form.loginId.trim().toUpperCase(),
+        email: form.email || undefined,
+        firstName: form.firstName || '',
+        lastName: form.lastName || '',
+        phone: form.phone || '',
         role: form.role,
-        password: form.password || undefined, // Let backend generate if empty
+        password: form.password || 'TA1234',
         leverage: Number(form.leverage),
-        brokerageRate: Number(form.brokerageRate),
+        brokerageRate: brokerageDecimal,
         maxSavedAccounts: Number(form.maxSavedAccounts),
         demoBalance: Number(form.demoBalance),
         createDemo: form.createDemo,
@@ -121,7 +116,6 @@ export default function AdminUsers() {
         
         toast.success('User created successfully!');
 
-        // Show credentials if available
         if (loginId && tempPassword) {
           const credentials = `Login ID: ${loginId}\nPassword: ${tempPassword}`;
           window.prompt('User credentials (copy now):', credentials);
@@ -129,17 +123,17 @@ export default function AdminUsers() {
           window.prompt('Login ID:', loginId);
         }
 
-        // Reset form
         setForm({
-          email: '',
+          loginId: '',
           firstName: '',
           lastName: '',
           phone: '',
+          email: '',
           role: 'user',
           password: '',
-          leverage: 5,
-          maxSavedAccounts: 3,
-          brokerageRate: 0.0003,
+          leverage: 300,
+          maxSavedAccounts: 10,
+          brokerageRate: '0.06',
           demoBalance: 100000,
           createDemo: true,
           createLive: true,
@@ -156,9 +150,19 @@ export default function AdminUsers() {
   };
 
   const toggleActive = async (u) => {
+    // 2FA confirmation for admin accounts
+    if (u.role === 'admin') {
+      const confirmCode = window.prompt(
+        'This is an ADMIN account. Enter "CONFIRM" to proceed with deactivation/activation:'
+      );
+      if (confirmCode !== 'CONFIRM') {
+        return toast.error('Admin account action cancelled');
+      }
+    }
+
     try {
       await api.patch(`/admin/users/${u.id}/active`, { isActive: !u.is_active });
-      toast.success('Updated');
+      toast.success(u.is_active ? 'User deactivated' : 'User activated');
       loadUsers();
     } catch (e) {
       toast.error(e.response?.data?.message || 'Update failed');
@@ -192,6 +196,23 @@ export default function AdminUsers() {
     }
   };
 
+  const deleteUser = async (u) => {
+    // Double confirmation for delete
+    if (!window.confirm(`Are you sure you want to DELETE user ${u.login_id || u.email}? This cannot be undone.`)) return;
+    const confirmCode = window.prompt('Type "DELETE" to confirm:');
+    if (confirmCode !== 'DELETE') {
+      return toast.error('Delete cancelled');
+    }
+
+    try {
+      await api.delete(`/admin/users/${u.id}`);
+      toast.success(`User ${u.login_id || u.email} deleted`);
+      loadUsers();
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Delete failed');
+    }
+  };
+
   const updateLeverage = async (userId, accountId, leverage) => {
     try {
       await api.patch(`/admin/users/${userId}/leverage`, { 
@@ -210,29 +231,30 @@ export default function AdminUsers() {
       await api.patch(`/admin/users/${userId}/brokerage`, { 
         brokerageRate: Number(brokerageRate)
       });
-      toast.success(`Brokerage updated to ${(Number(brokerageRate) * 100).toFixed(2)}%`);
+      toast.success(`Brokerage updated to ${(Number(brokerageRate) * 100).toFixed(4)}%`);
       loadUsers();
     } catch (e) {
       toast.error(e.response?.data?.message || 'Update brokerage failed');
     }
   };
 
-  // Add Money to Account
   const handleAddMoney = async () => {
     if (!addMoneyModal || !addMoneyAmount || Number(addMoneyAmount) <= 0) {
       return toast.error('Enter a valid amount');
     }
 
+    const isReduce = addMoneyModal.mode === 'reduce';
+
     setAddMoneyLoading(true);
     try {
       const res = await api.post(`/admin/users/${addMoneyModal.user.id}/add-balance`, {
         accountId: addMoneyModal.account.id,
-        amount: Number(addMoneyAmount),
-        note: addMoneyNote || 'Admin deposit - Cash received offline',
+        amount: isReduce ? -Number(addMoneyAmount) : Number(addMoneyAmount),
+        note: addMoneyNote || (isReduce ? 'Admin reduction' : 'Admin deposit - Cash received offline'),
       });
 
       if (res.data?.success) {
-        toast.success(`₹${Number(addMoneyAmount).toLocaleString('en-IN')} added to ${addMoneyModal.account.account_number}`);
+        toast.success(`${Number(addMoneyAmount).toLocaleString('en-IN')} added to ${addMoneyModal.account.account_number}`);
         setAddMoneyModal(null);
         setAddMoneyAmount('');
         setAddMoneyNote('');
@@ -248,11 +270,11 @@ export default function AdminUsers() {
     }
   };
 
-  // Add Money Modal Component
   const AddMoneyModal = () => {
     if (!addMoneyModal) return null;
-
-    const { user, account } = addMoneyModal;
+    const { user, account, mode = 'add' } = addMoneyModal;
+    const isReduce = mode === 'reduce';
+    const currentBalance = parseFloat(account.balance || 0);
 
     return (
       <div 
@@ -266,8 +288,10 @@ export default function AdminUsers() {
         >
           <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
             <div className="flex items-center gap-2">
-              <Wallet size={20} color="#26a69a" />
-              <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Add Money</h3>
+              <Wallet size={20} color={isReduce ? '#ef5350' : '#26a69a'} />
+              <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                {isReduce ? 'Reduce Money' : 'Add Money'}
+              </h3>
             </div>
             <button onClick={() => setAddMoneyModal(null)}>
               <X size={22} color="#787b86" />
@@ -275,7 +299,6 @@ export default function AdminUsers() {
           </div>
 
           <div className="p-4 space-y-4">
-            {/* User & Account Info */}
             <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
               <div className="text-sm" style={{ color: '#787b86' }}>User</div>
               <div className="font-bold" style={{ color: '#d1d4dc' }}>
@@ -298,29 +321,34 @@ export default function AdminUsers() {
                   </span>
                 </div>
                 <div className="text-sm mt-1" style={{ color: '#787b86' }}>
-                  Current Balance: <span style={{ color: '#26a69a' }}>₹{parseFloat(account.balance || 0).toLocaleString('en-IN')}</span>
+                  Current Balance: <span style={{ color: '#26a69a' }}>{currentBalance.toLocaleString('en-IN')}</span>
                 </div>
               </div>
             </div>
 
-            {/* Amount Input */}
             <div>
               <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
-                Amount to Add (₹)
+                Amount to {isReduce ? 'Reduce' : 'Add'}
               </label>
               <input
                 type="number"
+                inputMode="numeric"
                 value={addMoneyAmount}
                 onChange={(e) => setAddMoneyAmount(e.target.value)}
+                onFocus={(e) => e.target.select()}
                 placeholder="Enter amount"
                 className="w-full px-4 py-3 rounded-lg text-lg font-bold text-center"
                 style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
                 min="1"
                 autoFocus
               />
+              {isReduce && Number(addMoneyAmount) > currentBalance && (
+                <div className="text-xs mt-1" style={{ color: '#ef5350' }}>
+                  ⚠️ Amount exceeds current balance ({currentBalance.toLocaleString('en-IN')})
+                </div>
+              )}
             </div>
 
-            {/* Quick Amount Buttons */}
             <div className="grid grid-cols-4 gap-2">
               {[1000, 5000, 10000, 50000].map((amt) => (
                 <button
@@ -328,72 +356,68 @@ export default function AdminUsers() {
                   onClick={() => setAddMoneyAmount(String(amt))}
                   className="py-2 rounded-lg text-xs font-medium"
                   style={{
-                    background: Number(addMoneyAmount) === amt ? '#26a69a' : '#2a2e39',
+                    background: Number(addMoneyAmount) === amt ? (isReduce ? '#ef5350' : '#26a69a') : '#2a2e39',
                     color: Number(addMoneyAmount) === amt ? '#fff' : '#787b86',
                     border: '1px solid #363a45',
                   }}
                 >
-                  ₹{(amt / 1000)}K
+                  {(amt / 1000)}K
                 </button>
               ))}
             </div>
 
-            {/* Note */}
             <div>
-              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
-                Note (Optional)
-              </label>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Note (Optional)</label>
               <input
                 type="text"
                 value={addMoneyNote}
                 onChange={(e) => setAddMoneyNote(e.target.value)}
-                placeholder="e.g., Cash received at office"
+                placeholder={isReduce ? 'e.g., Adjustment, correction' : 'e.g., Cash received at office'}
                 className="w-full px-4 py-2.5 rounded-lg text-sm"
                 style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
               />
             </div>
 
-            {/* Preview */}
             {addMoneyAmount && Number(addMoneyAmount) > 0 && (
-              <div className="p-3 rounded-lg" style={{ background: '#26a69a20', border: '1px solid #26a69a50' }}>
+              <div className="p-3 rounded-lg" style={{ 
+                background: isReduce ? '#ef535020' : '#26a69a20', 
+                border: `1px solid ${isReduce ? '#ef535050' : '#26a69a50'}` 
+              }}>
                 <div className="flex justify-between text-sm">
                   <span style={{ color: '#787b86' }}>Current Balance</span>
-                  <span style={{ color: '#d1d4dc' }}>₹{parseFloat(account.balance || 0).toLocaleString('en-IN')}</span>
+                  <span style={{ color: '#d1d4dc' }}>{currentBalance.toLocaleString('en-IN')}</span>
                 </div>
                 <div className="flex justify-between text-sm mt-1">
-                  <span style={{ color: '#787b86' }}>Adding</span>
-                  <span style={{ color: '#26a69a' }}>+₹{Number(addMoneyAmount).toLocaleString('en-IN')}</span>
+                  <span style={{ color: '#787b86' }}>{isReduce ? 'Reducing' : 'Adding'}</span>
+                  <span style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
+                    {isReduce ? '-' : '+'}{Number(addMoneyAmount).toLocaleString('en-IN')}
+                  </span>
                 </div>
-                <div className="flex justify-between text-sm mt-2 pt-2 border-t" style={{ borderColor: '#26a69a50' }}>
+                <div className="flex justify-between text-sm mt-2 pt-2 border-t" style={{ borderColor: isReduce ? '#ef535050' : '#26a69a50' }}>
                   <span className="font-medium" style={{ color: '#d1d4dc' }}>New Balance</span>
-                  <span className="font-bold" style={{ color: '#26a69a' }}>
-                    ₹{(parseFloat(account.balance || 0) + Number(addMoneyAmount)).toLocaleString('en-IN')}
+                  <span className="font-bold" style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
+                    {(isReduce 
+                      ? Math.max(0, currentBalance - Number(addMoneyAmount))
+                      : currentBalance + Number(addMoneyAmount)
+                    ).toLocaleString('en-IN')}
                   </span>
                 </div>
               </div>
             )}
 
-            {/* Submit Button */}
             <button
               onClick={handleAddMoney}
-              disabled={addMoneyLoading || !addMoneyAmount || Number(addMoneyAmount) <= 0}
+              disabled={addMoneyLoading || !addMoneyAmount || Number(addMoneyAmount) <= 0 || (isReduce && Number(addMoneyAmount) > currentBalance)}
               className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50 flex items-center justify-center gap-2"
-              style={{ background: '#26a69a', color: '#fff' }}
+              style={{ background: isReduce ? '#ef5350' : '#26a69a', color: '#fff' }}
             >
-              {addMoneyLoading ? (
-                'Processing...'
-              ) : (
+              {addMoneyLoading ? 'Processing...' : (
                 <>
-                  <Plus size={20} />
-                  Add ₹{Number(addMoneyAmount || 0).toLocaleString('en-IN')} to Account
+                  {isReduce ? <Trash2 size={20} /> : <Plus size={20} />}
+                  {isReduce ? 'Reduce' : 'Add'} {Number(addMoneyAmount || 0).toLocaleString('en-IN')} {isReduce ? 'from' : 'to'} Account
                 </>
               )}
             </button>
-
-            <div className="text-xs text-center" style={{ color: '#787b86' }}>
-              This will directly add funds to the user's account balance.
-              A transaction record will be created.
-            </div>
           </div>
         </div>
       </div>
@@ -434,38 +458,38 @@ export default function AdminUsers() {
 
       <div className="flex-1 overflow-y-auto p-4">
         {/* Create user form */}
+        {/* Create user form */}
         <div className="p-4 rounded-lg mb-4" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
           <div className="text-sm font-semibold mb-3" style={{ color: '#d1d4dc' }}>
             Create New User
           </div>
 
           <div className="grid grid-cols-1 gap-2">
-            <input
-              value={form.email}
-              onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))}
-              placeholder="Email"
-              className="px-3 py-2 rounded text-sm"
-              style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
-            />
-            
+            {/* User ID — set by admin, must be unique */}
+            <div>
+              <label className="text-xs mb-1 block font-medium" style={{ color: '#2962ff' }}>User ID *</label>
+              <input
+                value={form.loginId || ''}
+                onChange={(e) => setForm((p) => ({ ...p, loginId: e.target.value.toUpperCase() }))}
+                placeholder="Enter User ID"
+                className="px-3 py-2.5 rounded text-sm font-mono font-bold"
+                style={{ background: '#1e222d', border: '1px solid #2962ff50', color: '#d1d4dc' }}
+                autoCapitalize="characters"
+              />
+              <div className="text-[10px] mt-0.5" style={{ color: '#787b86' }}>
+                Unique ID set by admin. User will login with this.
+              </div>
+            </div>
+
+            {/* Name + Phone — optional */}
             <div className="grid grid-cols-2 gap-2">
               <input
                 value={form.firstName}
                 onChange={(e) => setForm((p) => ({ ...p, firstName: e.target.value }))}
-                placeholder="First name"
+                placeholder="Name (optional)"
                 className="px-3 py-2 rounded text-sm"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
               />
-              <input
-                value={form.lastName}
-                onChange={(e) => setForm((p) => ({ ...p, lastName: e.target.value }))}
-                placeholder="Last name"
-                className="px-3 py-2 rounded text-sm"
-                style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
               <input
                 value={form.phone}
                 onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))}
@@ -473,14 +497,22 @@ export default function AdminUsers() {
                 className="px-3 py-2 rounded text-sm"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
               />
+            </div>
+
+            {/* Password — default TA2626 */}
+            <div>
+              <label className="text-xs mb-1 block" style={{ color: '#787b86' }}>Password</label>
               <input
                 value={form.password}
                 onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
-                placeholder="Password (auto if empty)"
-                type="password"
-                className="px-3 py-2 rounded text-sm"
+                placeholder="Default: TA1234"
+                type="text"
+                className="px-3 py-2 rounded text-sm font-mono"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
               />
+              <div className="text-[10px] mt-0.5" style={{ color: '#787b86' }}>
+                Leave empty for default password TA1234. User will be asked to change on first login.
+              </div>
             </div>
 
             {/* Account Type Checkboxes */}
@@ -540,17 +572,20 @@ export default function AdminUsers() {
               </div>
 
               <div>
-                <label className="text-xs mb-1 block" style={{ color: '#787b86' }}>Brokerage</label>
-                <select
+                <label className="text-xs mb-1 block" style={{ color: '#787b86' }}>Brokerage (%)</label>
+                <input
+                  type="number"
                   value={form.brokerageRate}
-                  onChange={(e) => setForm((p) => ({ ...p, brokerageRate: Number(e.target.value) }))}
+                  onChange={(e) => setForm((p) => ({ ...p, brokerageRate: e.target.value }))}
+                  placeholder="0.06"
+                  step="0.01"
+                  min="0"
                   className="w-full px-3 py-2 rounded text-sm"
                   style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
-                >
-                  {BROKERAGE_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
+                />
+                <div className="text-[10px] mt-0.5" style={{ color: '#787b86' }}>
+                  Default: 0.06%
+                </div>
               </div>
 
               <div>
@@ -570,7 +605,7 @@ export default function AdminUsers() {
 
             {/* Info about Login ID */}
             <div className="p-2 rounded text-xs" style={{ background: '#2962ff20', color: '#2962ff' }}>
-              💡 A unique Login ID (TA1000, TA1001, etc.) will be auto-generated
+              💡 User ID is set by you (admin). Default password is TA1234. User will be prompted to change password on first login.
             </div>
 
             <button
@@ -699,28 +734,54 @@ export default function AdminUsers() {
                       style={{ borderColor: '#363a45', background: '#252832' }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <div className="flex items-center gap-2 mb-3">
-                        <Settings size={14} color="#787b86" />
-                        <span className="text-xs font-semibold" style={{ color: '#787b86' }}>
-                          Account Settings
-                        </span>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Settings size={14} color="#787b86" />
+                          <span className="text-xs font-semibold" style={{ color: '#787b86' }}>
+                            Account Settings
+                          </span>
+                        </div>
+                        {/* Delete User Button */}
+                        <button
+                          onClick={() => deleteUser(u)}
+                          className="px-3 py-1.5 rounded text-xs font-medium flex items-center gap-1"
+                          style={{ background: '#ef535020', color: '#ef5350', border: '1px solid #ef535050' }}
+                        >
+                          <Trash2 size={14} />
+                          Delete User
+                        </button>
                       </div>
 
                       {/* User Settings */}
                       <div className="grid grid-cols-2 gap-2 mb-3">
-                        {/* Brokerage Rate */}
+                        {/* Brokerage Rate — manual input */}
                         <div className="p-2 rounded" style={{ background: '#1e222d' }}>
-                          <label className="text-xs block mb-1" style={{ color: '#787b86' }}>Brokerage Rate</label>
-                          <select
-                            value={u.brokerage_rate || 0.0003}
-                            onChange={(e) => updateBrokerageRate(u.id, e.target.value)}
-                            className="w-full px-2 py-1 rounded text-xs"
-                            style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
-                          >
-                            {BROKERAGE_OPTIONS.map((opt) => (
-                              <option key={opt.value} value={opt.value}>{opt.label}</option>
-                            ))}
-                          </select>
+                          <label className="text-xs block mb-1" style={{ color: '#787b86' }}>Brokerage Rate (%)</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              defaultValue={((u.brokerage_rate || 0.0003) * 100).toFixed(4)}
+                              step="0.01"
+                              min="0"
+                              onBlur={(e) => {
+                                const pct = parseFloat(e.target.value);
+                                if (!isNaN(pct) && pct >= 0) {
+                                  updateBrokerageRate(u.id, pct / 100);
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const pct = parseFloat(e.target.value);
+                                  if (!isNaN(pct) && pct >= 0) {
+                                    updateBrokerageRate(u.id, pct / 100);
+                                  }
+                                }
+                              }}
+                              className="w-full px-2 py-1 rounded text-xs"
+                              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                            />
+                            <span className="text-xs" style={{ color: '#787b86' }}>%</span>
+                          </div>
                         </div>
 
                         {/* Reset Password */}
@@ -763,14 +824,13 @@ export default function AdminUsers() {
                                     {acc.is_demo ? 'DEMO' : 'LIVE'}
                                   </span>
                                   <span className="text-[10px]" style={{ color: '#787b86' }}>
-                                    ₹{parseFloat(acc.balance || 0).toLocaleString('en-IN')}
+                                    {parseFloat(acc.balance || 0).toLocaleString('en-IN')}
                                   </span>
                                 </div>
                                 
                                 <div className="flex items-center gap-2">
-                                  {/* Add Money Button (for both demo and live) */}
                                   <button
-                                    onClick={() => setAddMoneyModal({ user: u, account: acc })}
+                                    onClick={() => setAddMoneyModal({ user: u, account: acc, mode: 'add' })}
                                     className="px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1"
                                     style={{ 
                                       background: '#26a69a20', 
@@ -780,7 +840,20 @@ export default function AdminUsers() {
                                     title="Add money to this account"
                                   >
                                     <Plus size={12} />
-                                    Add Money
+                                    Add
+                                  </button>
+                                  <button
+                                    onClick={() => setAddMoneyModal({ user: u, account: acc, mode: 'reduce' })}
+                                    className="px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1"
+                                    style={{ 
+                                      background: '#ef535020', 
+                                      border: '1px solid #ef535050', 
+                                      color: '#ef5350' 
+                                    }}
+                                    title="Reduce money from this account"
+                                  >
+                                    <Trash2 size={12} />
+                                    Reduce
                                   </button>
 
                                   <span className="text-xs" style={{ color: '#787b86' }}>Leverage:</span>
@@ -813,7 +886,6 @@ export default function AdminUsers() {
         </div>
       </div>
 
-      {/* Add Money Modal */}
       <AddMoneyModal />
     </div>
   );

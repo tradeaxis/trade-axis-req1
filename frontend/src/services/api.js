@@ -24,8 +24,13 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      window.location.href = '/login';
+      const requestUrl = error.config?.url || '';
+      // Don't auto-redirect for auth check / switch-account calls
+      // Let the store handle those gracefully
+      if (!requestUrl.includes('/auth/me') && !requestUrl.includes('/auth/switch-account')) {
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   }

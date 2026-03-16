@@ -8,20 +8,22 @@ class SocketService {
   isConnecting = false;
   connectionAttempt = 0;
   reconnectTimer = null;
-  _pingInterval = null; // ✅ Keep-alive ping
+  _pingInterval = null;
 
   connect(token) {
-    // If already connected, return existing socket
+    if (!token) {
+      console.warn('⚠️ No token provided for socket connection');
+      return null;
+    }
+
     if (this.socket?.connected) {
       return this.socket;
     }
 
-    // If currently connecting, return the socket being connected
     if (this.isConnecting && this.socket) {
       return this.socket;
     }
 
-    // Clear any pending reconnect
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -31,14 +33,17 @@ class SocketService {
     this.connectionAttempt++;
     const currentAttempt = this.connectionAttempt;
 
+    console.log('🔌 Connecting socket to:', SOCKET_URL);
+
     this.socket = io(SOCKET_URL, {
       auth: { token },
+      withCredentials: true,
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 10, // ✅ Increased from 5
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      timeout: 15000, // ✅ Increased from 10000
+      timeout: 15000,
       forceNew: false,
     });
 
@@ -67,7 +72,6 @@ class SocketService {
       console.warn('⚠️ WebSocket reconnection error:', error.message);
     });
 
-    // ✅ Keep-alive ping every 20s (prevents mobile OS from killing socket)
     if (this._pingInterval) clearInterval(this._pingInterval);
     this._pingInterval = setInterval(() => {
       if (this.socket?.connected) {
@@ -79,39 +83,32 @@ class SocketService {
   }
 
   disconnect() {
-    // Clear reconnect timer
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
-    // ✅ Clear ping interval
     if (this._pingInterval) {
       clearInterval(this._pingInterval);
       this._pingInterval = null;
     }
 
-    // Don't disconnect if socket doesn't exist
     if (!this.socket) {
       return;
     }
 
-    // Only disconnect if actually connected
     if (this.socket.connected) {
       this.socket.disconnect();
     }
 
-    // Clean up listeners
     this.socket.removeAllListeners();
     this.socket = null;
     this.isConnecting = false;
   }
 
-  // Safe disconnect that handles React StrictMode
   safeDisconnect() {
     if (!this.socket) return;
 
-    // If still connecting, schedule disconnect
     if (this.isConnecting) {
       this.reconnectTimer = setTimeout(() => {
         if (this.socket && !this.socket.connected) {
@@ -126,7 +123,6 @@ class SocketService {
 
   subscribe(event, callback) {
     if (this.socket) {
-      // Remove existing listener first to prevent duplicates
       this.socket.off(event);
       this.socket.on(event, callback);
     }
@@ -156,7 +152,6 @@ class SocketService {
     if (this.socket?.connected) {
       this.emit('subscribe:symbols', symbols);
     } else {
-      // Wait for connection then subscribe
       this.socket?.once('connect', () => {
         this.emit('subscribe:symbols', symbols);
       });
@@ -178,12 +173,10 @@ class SocketService {
     this.emit('unsubscribe:account', accountId);
   }
 
-  // Request specific quote
   requestQuote(symbol) {
     this.emit('get:quote', symbol);
   }
 
-  // Ping to keep connection alive
   ping() {
     this.emit('ping');
   }
@@ -197,6 +190,5 @@ class SocketService {
   }
 }
 
-// Export singleton instance
 const socketService = new SocketService();
 export default socketService;
