@@ -2768,7 +2768,18 @@ const Dashboard = () => {
                   <input
                     type="number"
                     value={deviation}
-                    onChange={(e) => setDeviation(Math.max(0, Number(e.target.value || 0)))}
+                    onFocus={(e) => e.target.select()}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw === '') {
+                        setDeviation('');
+                      } else {
+                        setDeviation(Math.max(0, Number(raw)));
+                      }
+                    }}
+                    onBlur={() => {
+                      if (deviation === '' || isNaN(Number(deviation))) setDeviation(0);
+                    }}
                     className="flex-1 h-10 px-2 text-center text-base font-bold"
                     style={{
                       background: '#2a2e39',
