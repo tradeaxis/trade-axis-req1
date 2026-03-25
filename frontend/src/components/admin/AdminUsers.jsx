@@ -33,6 +33,7 @@ export default function AdminUsers() {
   const [addMoneyLoading, setAddMoneyLoading] = useState(false);
 
   // Create user form — Name is OPTIONAL, only Unique ID + Pass required
+  // ✅ FIX 6a: Added liquidationType field
   const [form, setForm] = useState({
     loginId: '',
     firstName: '',
@@ -47,6 +48,7 @@ export default function AdminUsers() {
     demoBalance: 100000,
     createDemo: true,
     createLive: true,
+    liquidationType: 'liquidate', // ✅ NEW: 'liquidate' or 'illiquidate'
   });
 
   const loadUsers = useCallback(async () => {
@@ -107,6 +109,7 @@ export default function AdminUsers() {
         demoBalance: Number(form.demoBalance),
         createDemo: form.createDemo,
         createLive: form.createLive,
+        liquidationType: form.liquidationType, // ✅ NEW: pass liquidation type
       });
       
       if (res.data?.success) {
@@ -123,6 +126,7 @@ export default function AdminUsers() {
           window.prompt('Login ID:', loginId);
         }
 
+        // ✅ FIX 6a: Reset form including liquidationType
         setForm({
           loginId: '',
           firstName: '',
@@ -137,6 +141,7 @@ export default function AdminUsers() {
           demoBalance: 100000,
           createDemo: true,
           createLive: true,
+          liquidationType: 'liquidate',
         });
 
         loadUsers();
@@ -150,7 +155,6 @@ export default function AdminUsers() {
   };
 
   const toggleActive = async (u) => {
-    // 2FA confirmation for admin accounts
     if (u.role === 'admin') {
       const confirmCode = window.prompt(
         'This is an ADMIN account. Enter "CONFIRM" to proceed with deactivation/activation:'
@@ -197,7 +201,6 @@ export default function AdminUsers() {
   };
 
   const deleteUser = async (u) => {
-    // Double confirmation for delete
     if (!window.confirm(`Are you sure you want to DELETE user ${u.login_id || u.email}? This cannot be undone.`)) return;
     const confirmCode = window.prompt('Type "DELETE" to confirm:');
     if (confirmCode !== 'DELETE') {
@@ -238,6 +241,7 @@ export default function AdminUsers() {
     }
   };
 
+  // ✅ FIX 5: handleAddMoney stays the same
   const handleAddMoney = async () => {
     if (!addMoneyModal || !addMoneyAmount || Number(addMoneyAmount) <= 0) {
       return toast.error('Enter a valid amount');
@@ -254,7 +258,7 @@ export default function AdminUsers() {
       });
 
       if (res.data?.success) {
-        toast.success(`${Number(addMoneyAmount).toLocaleString('en-IN')} added to ${addMoneyModal.account.account_number}`);
+        toast.success(`${Number(addMoneyAmount).toLocaleString('en-IN')} ${isReduce ? 'reduced from' : 'added to'} ${addMoneyModal.account.account_number}`);
         setAddMoneyModal(null);
         setAddMoneyAmount('');
         setAddMoneyNote('');
@@ -270,159 +274,9 @@ export default function AdminUsers() {
     }
   };
 
-  const AddMoneyModal = () => {
-    if (!addMoneyModal) return null;
-    const { user, account, mode = 'add' } = addMoneyModal;
-    const isReduce = mode === 'reduce';
-    const currentBalance = parseFloat(account.balance || 0);
-
-    return (
-      <div 
-        className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
-        onClick={() => setAddMoneyModal(null)}
-      >
-        <div 
-          className="w-full max-w-sm rounded-xl"
-          style={{ background: '#1e222d', border: '1px solid #363a45' }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
-            <div className="flex items-center gap-2">
-              <Wallet size={20} color={isReduce ? '#ef5350' : '#26a69a'} />
-              <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
-                {isReduce ? 'Reduce Money' : 'Add Money'}
-              </h3>
-            </div>
-            <button onClick={() => setAddMoneyModal(null)}>
-              <X size={22} color="#787b86" />
-            </button>
-          </div>
-
-          <div className="p-4 space-y-4">
-            <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
-              <div className="text-sm" style={{ color: '#787b86' }}>User</div>
-              <div className="font-bold" style={{ color: '#d1d4dc' }}>
-                {user.login_id || 'N/A'} - {user.first_name} {user.last_name}
-              </div>
-              <div className="text-xs mt-1" style={{ color: '#787b86' }}>{user.email}</div>
-              
-              <div className="mt-3 pt-3 border-t" style={{ borderColor: '#363a45' }}>
-                <div className="text-sm" style={{ color: '#787b86' }}>Account</div>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="font-bold" style={{ color: '#d1d4dc' }}>{account.account_number}</span>
-                  <span 
-                    className="px-2 py-0.5 rounded text-xs"
-                    style={{ 
-                      background: account.is_demo ? '#f5c54220' : '#26a69a20',
-                      color: account.is_demo ? '#f5c542' : '#26a69a'
-                    }}
-                  >
-                    {account.is_demo ? 'DEMO' : 'LIVE'}
-                  </span>
-                </div>
-                <div className="text-sm mt-1" style={{ color: '#787b86' }}>
-                  Current Balance: <span style={{ color: '#26a69a' }}>{currentBalance.toLocaleString('en-IN')}</span>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
-                Amount to {isReduce ? 'Reduce' : 'Add'}
-              </label>
-              <input
-                type="number"
-                inputMode="numeric"
-                value={addMoneyAmount}
-                onChange={(e) => setAddMoneyAmount(e.target.value)}
-                onFocus={(e) => e.target.select()}
-                placeholder="Enter amount"
-                className="w-full px-4 py-3 rounded-lg text-lg font-bold text-center"
-                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
-                min="1"
-                autoFocus
-              />
-              {isReduce && Number(addMoneyAmount) > currentBalance && (
-                <div className="text-xs mt-1" style={{ color: '#ef5350' }}>
-                  ⚠️ Amount exceeds current balance ({currentBalance.toLocaleString('en-IN')})
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-4 gap-2">
-              {[1000, 5000, 10000, 50000].map((amt) => (
-                <button
-                  key={amt}
-                  onClick={() => setAddMoneyAmount(String(amt))}
-                  className="py-2 rounded-lg text-xs font-medium"
-                  style={{
-                    background: Number(addMoneyAmount) === amt ? (isReduce ? '#ef5350' : '#26a69a') : '#2a2e39',
-                    color: Number(addMoneyAmount) === amt ? '#fff' : '#787b86',
-                    border: '1px solid #363a45',
-                  }}
-                >
-                  {(amt / 1000)}K
-                </button>
-              ))}
-            </div>
-
-            <div>
-              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Note (Optional)</label>
-              <input
-                type="text"
-                value={addMoneyNote}
-                onChange={(e) => setAddMoneyNote(e.target.value)}
-                placeholder={isReduce ? 'e.g., Adjustment, correction' : 'e.g., Cash received at office'}
-                className="w-full px-4 py-2.5 rounded-lg text-sm"
-                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
-              />
-            </div>
-
-            {addMoneyAmount && Number(addMoneyAmount) > 0 && (
-              <div className="p-3 rounded-lg" style={{ 
-                background: isReduce ? '#ef535020' : '#26a69a20', 
-                border: `1px solid ${isReduce ? '#ef535050' : '#26a69a50'}` 
-              }}>
-                <div className="flex justify-between text-sm">
-                  <span style={{ color: '#787b86' }}>Current Balance</span>
-                  <span style={{ color: '#d1d4dc' }}>{currentBalance.toLocaleString('en-IN')}</span>
-                </div>
-                <div className="flex justify-between text-sm mt-1">
-                  <span style={{ color: '#787b86' }}>{isReduce ? 'Reducing' : 'Adding'}</span>
-                  <span style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
-                    {isReduce ? '-' : '+'}{Number(addMoneyAmount).toLocaleString('en-IN')}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm mt-2 pt-2 border-t" style={{ borderColor: isReduce ? '#ef535050' : '#26a69a50' }}>
-                  <span className="font-medium" style={{ color: '#d1d4dc' }}>New Balance</span>
-                  <span className="font-bold" style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
-                    {(isReduce 
-                      ? Math.max(0, currentBalance - Number(addMoneyAmount))
-                      : currentBalance + Number(addMoneyAmount)
-                    ).toLocaleString('en-IN')}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            <button
-              onClick={handleAddMoney}
-              disabled={addMoneyLoading || !addMoneyAmount || Number(addMoneyAmount) <= 0 || (isReduce && Number(addMoneyAmount) > currentBalance)}
-              className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50 flex items-center justify-center gap-2"
-              style={{ background: isReduce ? '#ef5350' : '#26a69a', color: '#fff' }}
-            >
-              {addMoneyLoading ? 'Processing...' : (
-                <>
-                  {isReduce ? <Trash2 size={20} /> : <Plus size={20} />}
-                  {isReduce ? 'Reduce' : 'Add'} {Number(addMoneyAmount || 0).toLocaleString('en-IN')} {isReduce ? 'from' : 'to'} Account
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  // ✅ FIX 5: AddMoneyModal component REMOVED — rendered inline below instead
+  // This fixes the single-digit input bug caused by React re-mounting the
+  // component on every parent render (because the function identity changes).
 
   return (
     <div className="h-full flex flex-col" style={{ background: '#1e222d' }}>
@@ -457,7 +311,6 @@ export default function AdminUsers() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
-        {/* Create user form */}
         {/* Create user form */}
         <div className="p-4 rounded-lg mb-4" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
           <div className="text-sm font-semibold mb-3" style={{ color: '#d1d4dc' }}>
@@ -499,7 +352,7 @@ export default function AdminUsers() {
               />
             </div>
 
-            {/* Password — default TA2626 */}
+            {/* Password — default TA1234 */}
             <div>
               <label className="text-xs mb-1 block" style={{ color: '#787b86' }}>Password</label>
               <input
@@ -553,6 +406,50 @@ export default function AdminUsers() {
                   ⚠️ Please select at least one account type
                 </div>
               )}
+            </div>
+
+            {/* ✅ FIX 6a: Liquidation Type (NEW) */}
+            <div className="p-3 rounded-lg" style={{ background: '#1e222d', border: '1px solid #363a45' }}>
+              <label className="text-xs mb-2 block font-medium" style={{ color: '#787b86' }}>
+                Account Liquidation Mode
+              </label>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="liquidationType"
+                    value="liquidate"
+                    checked={form.liquidationType === 'liquidate'}
+                    onChange={(e) => setForm((p) => ({ ...p, liquidationType: e.target.value }))}
+                    className="w-4 h-4"
+                    style={{ accentColor: '#ef5350' }}
+                  />
+                  <div>
+                    <span className="text-sm font-medium" style={{ color: '#ef5350' }}>Liquidate</span>
+                    <div className="text-[10px]" style={{ color: '#787b86' }}>
+                      Auto-close positions when margin level falls below stop-out level
+                    </div>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="liquidationType"
+                    value="illiquidate"
+                    checked={form.liquidationType === 'illiquidate'}
+                    onChange={(e) => setForm((p) => ({ ...p, liquidationType: e.target.value }))}
+                    className="w-4 h-4"
+                    style={{ accentColor: '#26a69a' }}
+                  />
+                  <div>
+                    <span className="text-sm font-medium" style={{ color: '#26a69a' }}>Illiquidate</span>
+                    <div className="text-[10px]" style={{ color: '#787b86' }}>
+                      Positions continue trading even with low margin. No auto-close.
+                    </div>
+                  </div>
+                </label>
+              </div>
             </div>
 
             {/* Trading Settings */}
@@ -681,6 +578,19 @@ export default function AdminUsers() {
                             >
                               <Lock size={10} />
                               Closing Mode
+                            </span>
+                          )}
+
+                          {/* ✅ Show liquidation type badge */}
+                          {u.liquidation_type && (
+                            <span 
+                              className="px-2 py-0.5 rounded text-[10px] font-medium"
+                              style={{ 
+                                background: u.liquidation_type === 'illiquidate' ? '#26a69a20' : '#ef535020',
+                                color: u.liquidation_type === 'illiquidate' ? '#26a69a' : '#ef5350'
+                              }}
+                            >
+                              {u.liquidation_type === 'illiquidate' ? 'Illiquidate' : 'Liquidate'}
                             </span>
                           )}
                         </div>
@@ -886,7 +796,173 @@ export default function AdminUsers() {
         </div>
       </div>
 
-      <AddMoneyModal />
+      {/* ✅ FIX 5: INLINE Add Money Modal — NOT a <Component />.
+          This prevents React from re-mounting on every parent render,
+          which was causing the input to lose focus after each keystroke
+          (only allowing single digit entry). */}
+      {addMoneyModal && (() => {
+        const { user: mUser, account: mAccount, mode = 'add' } = addMoneyModal;
+        const isReduce = mode === 'reduce';
+        const currentBalance = parseFloat(mAccount.balance || 0);
+
+        return (
+          <div 
+            className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+            onClick={() => setAddMoneyModal(null)}
+          >
+            <div 
+              className="w-full max-w-sm rounded-xl"
+              style={{ background: '#1e222d', border: '1px solid #363a45' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+                <div className="flex items-center gap-2">
+                  <Wallet size={20} color={isReduce ? '#ef5350' : '#26a69a'} />
+                  <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                    {isReduce ? 'Reduce Money' : 'Add Money'}
+                  </h3>
+                </div>
+                <button onClick={() => setAddMoneyModal(null)}>
+                  <X size={22} color="#787b86" />
+                </button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+                  <div className="text-sm" style={{ color: '#787b86' }}>User</div>
+                  <div className="font-bold" style={{ color: '#d1d4dc' }}>
+                    {mUser.login_id || 'N/A'} - {mUser.first_name} {mUser.last_name}
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: '#787b86' }}>{mUser.email}</div>
+                  
+                  <div className="mt-3 pt-3 border-t" style={{ borderColor: '#363a45' }}>
+                    <div className="text-sm" style={{ color: '#787b86' }}>Account</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-bold" style={{ color: '#d1d4dc' }}>{mAccount.account_number}</span>
+                      <span 
+                        className="px-2 py-0.5 rounded text-xs"
+                        style={{ 
+                          background: mAccount.is_demo ? '#f5c54220' : '#26a69a20',
+                          color: mAccount.is_demo ? '#f5c542' : '#26a69a'
+                        }}
+                      >
+                        {mAccount.is_demo ? 'DEMO' : 'LIVE'}
+                      </span>
+                    </div>
+                    <div className="text-sm mt-1" style={{ color: '#787b86' }}>
+                      Current Balance: <span style={{ color: '#26a69a' }}>{currentBalance.toLocaleString('en-IN')}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
+                    Amount to {isReduce ? 'Reduce' : 'Add'}
+                  </label>
+                  {/* ✅ FIX 5: Changed type="number" to type="text" with inputMode="decimal"
+                      and manual filtering. This prevents mobile keyboard issues and ensures
+                      the input doesn't lose focus after each keystroke. */}
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={addMoneyAmount}
+                    onChange={(e) => {
+                      // Only allow digits and a single decimal point
+                      const val = e.target.value.replace(/[^0-9.]/g, '');
+                      // Prevent multiple decimal points
+                      const parts = val.split('.');
+                      const sanitized = parts.length > 2 
+                        ? parts[0] + '.' + parts.slice(1).join('') 
+                        : val;
+                      setAddMoneyAmount(sanitized);
+                    }}
+                    onFocus={(e) => e.target.select()}
+                    placeholder="Enter amount"
+                    className="w-full px-4 py-3 rounded-lg text-lg font-bold text-center"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    autoFocus
+                  />
+                  {isReduce && Number(addMoneyAmount) > currentBalance && (
+                    <div className="text-xs mt-1" style={{ color: '#ef5350' }}>
+                      ⚠️ Amount exceeds current balance ({currentBalance.toLocaleString('en-IN')})
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-4 gap-2">
+                  {[1000, 5000, 10000, 50000].map((amt) => (
+                    <button
+                      key={amt}
+                      onClick={() => setAddMoneyAmount(String(amt))}
+                      className="py-2 rounded-lg text-xs font-medium"
+                      style={{
+                        background: Number(addMoneyAmount) === amt ? (isReduce ? '#ef5350' : '#26a69a') : '#2a2e39',
+                        color: Number(addMoneyAmount) === amt ? '#fff' : '#787b86',
+                        border: '1px solid #363a45',
+                      }}
+                    >
+                      {(amt / 1000)}K
+                    </button>
+                  ))}
+                </div>
+
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Note (Optional)</label>
+                  <input
+                    type="text"
+                    value={addMoneyNote}
+                    onChange={(e) => setAddMoneyNote(e.target.value)}
+                    placeholder={isReduce ? 'e.g., Adjustment, correction' : 'e.g., Cash received at office'}
+                    className="w-full px-4 py-2.5 rounded-lg text-sm"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                  />
+                </div>
+
+                {addMoneyAmount && Number(addMoneyAmount) > 0 && (
+                  <div className="p-3 rounded-lg" style={{ 
+                    background: isReduce ? '#ef535020' : '#26a69a20', 
+                    border: `1px solid ${isReduce ? '#ef535050' : '#26a69a50'}` 
+                  }}>
+                    <div className="flex justify-between text-sm">
+                      <span style={{ color: '#787b86' }}>Current Balance</span>
+                      <span style={{ color: '#d1d4dc' }}>{currentBalance.toLocaleString('en-IN')}</span>
+                    </div>
+                    <div className="flex justify-between text-sm mt-1">
+                      <span style={{ color: '#787b86' }}>{isReduce ? 'Reducing' : 'Adding'}</span>
+                      <span style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
+                        {isReduce ? '-' : '+'}{Number(addMoneyAmount).toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm mt-2 pt-2 border-t" style={{ borderColor: isReduce ? '#ef535050' : '#26a69a50' }}>
+                      <span className="font-medium" style={{ color: '#d1d4dc' }}>New Balance</span>
+                      <span className="font-bold" style={{ color: isReduce ? '#ef5350' : '#26a69a' }}>
+                        {(isReduce 
+                          ? Math.max(0, currentBalance - Number(addMoneyAmount))
+                          : currentBalance + Number(addMoneyAmount)
+                        ).toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  onClick={handleAddMoney}
+                  disabled={addMoneyLoading || !addMoneyAmount || Number(addMoneyAmount) <= 0 || (isReduce && Number(addMoneyAmount) > currentBalance)}
+                  className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50 flex items-center justify-center gap-2"
+                  style={{ background: isReduce ? '#ef5350' : '#26a69a', color: '#fff' }}
+                >
+                  {addMoneyLoading ? 'Processing...' : (
+                    <>
+                      {isReduce ? <Trash2 size={20} /> : <Plus size={20} />}
+                      {isReduce ? 'Reduce' : 'Add'} {Number(addMoneyAmount || 0).toLocaleString('en-IN')} {isReduce ? 'from' : 'to'} Account
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

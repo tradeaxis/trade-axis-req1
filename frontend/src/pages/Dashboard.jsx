@@ -175,6 +175,28 @@ const formatINR = (amount) => {
   return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+// ============ DISPLAY SYMBOL FORMATTER ============
+// Converts raw symbol like "HDFCBANK-I" to "HDFCBANK-MAR" format
+const formatDisplaySymbol = (rawSymbol, allSyms) => {
+  if (!rawSymbol) return '—';
+  // Try to find the symbol in our known symbols list to get expiry
+  const symData = (allSyms || []).find((s) => s.symbol === rawSymbol);
+  if (symData && symData.expiry_date) {
+    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const d = new Date(symData.expiry_date);
+    const monthAbbr = months[d.getMonth()] || '';
+    const base = (symData.underlying || rawSymbol)
+      .toUpperCase()
+      .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+      .replace(/FUT$/i, '')
+      .replace(/-I+$/, '')
+      .replace(/-$/, '');
+    return `${base}-${monthAbbr}`;
+  }
+  // Fallback: just clean up the -I suffix
+  return rawSymbol.replace(/-I+$/, '').replace(/FUT$/i, '');
+};
+
 // ============ EXPIRY FILTER HELPER ============
 const filterByExpiry = (symbolsList) => {
   const now = new Date();
@@ -239,7 +261,7 @@ const filterByExpiry = (symbolsList) => {
 };
 
 // ============ MARKET HOURS CHECK (frontend) ============
-const isMarketOpenNow = () => {
+const isMarketOpenNow = (symbol = null) => {
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
   const ist = new Date(utcMs + 5.5 * 3600000);
@@ -248,6 +270,19 @@ const isMarketOpenNow = () => {
   if (day === 0 || day === 6) return false;
 
   const mins = ist.getHours() * 60 + ist.getMinutes();
+
+  // Check if the symbol belongs to commodity (MCX) segment
+  if (symbol) {
+    const sym = String(symbol).toUpperCase();
+    const isCommodity =
+      /GOLD|SILVER|SILVERM|SILVERMIC|GOLDM|GOLDGUINEA|GOLDPETAL|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MCX/i.test(sym);
+    if (isCommodity) {
+      // MCX commodity market: 9:00 AM to 11:30 PM IST (Mon-Fri)
+      return mins >= 9 * 60 && mins <= 23 * 60 + 30;
+    }
+  }
+
+  // Default: Equity/Index market 9:15 AM to 3:30 PM IST
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 };
 
@@ -269,11 +304,13 @@ const Dashboard = () => {
   const {
     openTrades,
     pendingOrders,
+    pendingOrderHistory,
     tradeHistory,
     deals,
     dealsSummary,
     fetchOpenTrades,
     fetchPendingOrders,
+    fetchPendingOrderHistory,
     fetchTradeHistory,
     fetchDeals,
     placeOrder,
@@ -360,7 +397,7 @@ const Dashboard = () => {
   const [orderConfirmation, setOrderConfirmation] = useState(null);
 
   // History
-  const [historyPeriod, setHistoryPeriod] = useState('month');
+  const [historyPeriod, setHistoryPeriod] = useState('today');
   const [historyViewMode, setHistoryViewMode] = useState('positions');
   const [historyFilter, setHistoryFilter] = useState('all');
   const [historySymbolFilter, setHistorySymbolFilter] = useState('');
@@ -405,7 +442,19 @@ const Dashboard = () => {
 
   // ── LIFTED from CloseConfirmModal ──
   const [closeQty, setCloseQty] = useState(1);
+  // ── Staleness ticker — re-renders every 5s to update grey/off-quotes status ──
+  const [staleTick, setStaleTick] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => setStaleTick((v) => v + 1), 5000);
+    return () => clearInterval(interval);
+  }, []);
   const [isPartialClose, setIsPartialClose] = useState(false);
+
+    // ── Modify Pending Order Modal ──
+  const [modifyPendingModal, setModifyPendingModal] = useState(null);
+  const [modifyPendingPrice, setModifyPendingPrice] = useState('');
+  const [modifyPendingSL, setModifyPendingSL] = useState('');
+  const [modifyPendingTP, setModifyPendingTP] = useState('');
 
   // ──────────────────────────────────────
   //  EFFECTS
@@ -688,21 +737,30 @@ const Dashboard = () => {
 
   const bid = Number(currentQuote?.bid || 0);
   const ask = Number(currentQuote?.ask || 0);
+  // Gross P&L for display (without commission)
   const totalPnL = (openTrades || []).reduce(
-    (sum, t) => sum + Number(t.profit || 0),
+    (sum, t) => sum + Number(t.profit || 0) + Number(t.brokerage || 0),
+    0
+  );
+
+  // Total commission from open trades
+  const totalCommission = (openTrades || []).reduce(
+    (sum, t) => sum + Number(t.brokerage || 0),
     0
   );
 
   const accountStats = useMemo(() => {
     const balance = Number(selectedAccount?.balance || 0);
+    const credit = Number(selectedAccount?.credit || 0);
     const margin = Number(selectedAccount?.margin || 0);
-    const equity = balance + totalPnL;
+    // Equity = balance + grossPnL - commission (commission deducted from equity)
+    const equity = balance + totalPnL - totalCommission;
     const freeMargin = Math.max(0, equity - margin);
     const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
     const leverage = selectedAccount?.leverage || 5;
 
-    return { balance, equity, margin, freeMargin, marginLevel, leverage, totalPnL };
-  }, [selectedAccount, totalPnL]);
+    return { balance, credit, equity, margin, freeMargin, marginLevel, leverage, totalPnL, totalCommission };
+  }, [selectedAccount, totalPnL, totalCommission]);
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -984,16 +1042,38 @@ const Dashboard = () => {
     if (res?.success === false) toast.error(res.message || 'Failed');
   };
 
-  const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
+const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
     if (!selectedAccount?.id || !selectedSymbol) return;
 
-    // Frontend market-hours check (backend also validates)
-    if (!isMarketOpenNow()) {
-      toast.error('Market is closed. Orders cannot be placed outside trading hours (9:15 AM – 3:30 PM IST, Mon–Fri).');
+    // ── 1. Off-Quotes check: reject if price is stale > 10s ──
+    const currentQ = quotes?.[selectedSymbol];
+    const hasLiveData = currentQ?.source === 'socket';
+    const quoteAge = currentQ?.timestamp ? Date.now() - currentQ.timestamp : 0;
+    if (hasLiveData && quoteAge > 10000) {
+      setOrderConfirmation({
+        phase: 'offquotes',
+        symbol: selectedSymbol,
+      });
+      setTimeout(() => setOrderConfirmation(null), 3000);
       return;
     }
 
-    // Determine effective order type
+    // ── 2. Market-hours check (symbol-aware for commodities) ──
+    if (!isMarketOpenNow(selectedSymbol)) {
+      const isCommodity = /GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/i.test(selectedSymbol);
+      setOrderConfirmation({
+        phase: 'rejected',
+        type: type.toUpperCase(),
+        symbol: selectedSymbol,
+        message: isCommodity
+          ? 'Commodity market is closed. Trading hours: 9:00 AM – 11:30 PM IST, Mon–Fri.'
+          : 'Market is closed. Trading hours: 9:15 AM – 3:30 PM IST, Mon–Fri.',
+      });
+      setTimeout(() => setOrderConfirmation(null), 4000);
+      return;
+    }
+
+    // ── 3. Determine effective order type ──
     let effectiveOrderType = 'market';
     let effectivePrice = 0;
 
@@ -1002,27 +1082,49 @@ const Dashboard = () => {
       effectivePrice = Number(execPrice);
 
       if (!effectivePrice || effectivePrice <= 0) {
-        toast.error('Please enter a valid price for this order type.');
+        setOrderConfirmation({
+          phase: 'rejected',
+          type: type.toUpperCase(),
+          symbol: selectedSymbol,
+          message: 'Please enter a valid price for this order type.',
+        });
+        setTimeout(() => setOrderConfirmation(null), 3000);
         return;
       }
 
       const cmp = type === 'buy' ? ask : bid;
 
-      // Validate Buy Limit: must be ≤ 0.5% below CMP
       if (execType === 'buy_limit' && effectivePrice > cmp * 0.995) {
-        toast.error(`Buy Limit price must be at least 0.5% below current price (≤ ${(cmp * 0.995).toFixed(2)})`);
+        setOrderConfirmation({
+          phase: 'rejected',
+          type: 'BUY LIMIT',
+          symbol: selectedSymbol,
+          message: `Price must be at least 0.5% below current price (≤ ${(cmp * 0.995).toFixed(2)})`,
+        });
+        setTimeout(() => setOrderConfirmation(null), 3000);
         return;
       }
-      // Validate Sell Limit: must be ≥ 0.5% above CMP
       if (execType === 'sell_limit' && effectivePrice < cmp * 1.005) {
-        toast.error(`Sell Limit price must be at least 0.5% above current price (≥ ${(cmp * 1.005).toFixed(2)})`);
+        setOrderConfirmation({
+          phase: 'rejected',
+          type: 'SELL LIMIT',
+          symbol: selectedSymbol,
+          message: `Price must be at least 0.5% above current price (≥ ${(cmp * 1.005).toFixed(2)})`,
+        });
+        setTimeout(() => setOrderConfirmation(null), 3000);
         return;
       }
     }
 
-    // Immediate feedback
-    const loadingId = toast.loading(`Placing ${type.toUpperCase()} order…`);
+    // ── 4. Show full-screen "Executing..." overlay ──
+    setOrderConfirmation({
+      phase: 'executing',
+      type: type.toUpperCase(),
+      symbol: selectedSymbol,
+      quantity: qty,
+    });
 
+    // ── 5. API call ──
     const result = await placeOrder({
       accountId: selectedAccount.id,
       symbol: selectedSymbol,
@@ -1034,23 +1136,21 @@ const Dashboard = () => {
       price: effectivePrice || (entryPrice ? Number(entryPrice) : 0),
     });
 
-    toast.dismiss(loadingId);
-
+    // ── 6. Show result in full-screen overlay ──
     if (result.success) {
-      const execPrice = result.data?.open_price ? Number(result.data.open_price).toFixed(2) : '';
-      const mergedStr = result.merged ? ' (merged into existing position)' : '';
+      const resultPrice = result.data?.open_price ? Number(result.data.open_price).toFixed(2) : '';
 
-      // Show full-screen confirmation immediately
       setOrderConfirmation({
+        phase: 'success',
         type: type.toUpperCase(),
         symbol: selectedSymbol,
         quantity: qty,
-        price: execPrice,
+        price: resultPrice,
         merged: result.merged || false,
         pending: result.pending || false,
         message: result.pending
-          ? `${type.toUpperCase()} LIMIT order placed for ${selectedSymbol}`
-          : `Order Executed${mergedStr}`,
+          ? `${type.toUpperCase()} LIMIT order placed`
+          : `Order Executed`,
       });
 
       fetchOpenTrades(selectedAccount.id);
@@ -1058,14 +1158,17 @@ const Dashboard = () => {
       setShowOrderModal(false);
       setLimitPrice('');
       setOrderExecType('instant');
-
-      // Auto-dismiss after 3 seconds
       setTimeout(() => setOrderConfirmation(null), 3000);
     } else {
-      toast.error(result.message || 'Order failed');
+      setOrderConfirmation({
+        phase: 'rejected',
+        type: type.toUpperCase(),
+        symbol: selectedSymbol,
+        message: result.message || 'Order failed',
+      });
+      setTimeout(() => setOrderConfirmation(null), 3000);
     }
   };
-
   const handleCloseTrade = async (tradeId) => {
     const result = await closeTrade(tradeId, selectedAccount?.id);
     if (result.success) {
@@ -1292,23 +1395,42 @@ const Dashboard = () => {
     if (!closeConfirmTrade) return null;
 
     const trade = closeConfirmTrade;
-    const pnl = Number(trade.profit || 0);
+    const pnl = Number(trade.profit || 0) + Number(trade.brokerage || 0);
     const isProfit = pnl >= 0;
     const maxQty = Number(trade.quantity);
     const partialPnL = isPartialClose ? (pnl / maxQty) * closeQty : pnl;
 
     const handleClose = async () => {
-      if (isPartialClose && closeQty >= maxQty) {
-        await handleCloseTrade(trade.id);
-      } else if (isPartialClose && closeQty > 0 && closeQty < maxQty) {
+      if (isPartialClose && closeQty > 0 && closeQty < maxQty) {
+        // Partial close
+        setOrderConfirmation({
+          phase: 'executing',
+          type: 'CLOSE',
+          symbol: trade.symbol,
+        });
         const result = await closeTrade(trade.id, selectedAccount?.id, closeQty);
         if (result.success) {
-          toast.success(`Closed ${closeQty} of ${maxQty} positions`);
+          setOrderConfirmation({
+            phase: 'success',
+            type: 'CLOSE',
+            symbol: trade.symbol,
+            quantity: closeQty,
+            message: `Closed ${closeQty} of ${maxQty}`,
+          });
           setCloseConfirmTrade(null);
+          fetchOpenTrades(selectedAccount.id);
+          setTimeout(() => setOrderConfirmation(null), 3000);
         } else {
-          toast.error(result.message || 'Partial close failed');
+          setOrderConfirmation({
+            phase: 'rejected',
+            type: 'CLOSE',
+            symbol: trade.symbol,
+            message: result.message || 'Partial close failed',
+          });
+          setTimeout(() => setOrderConfirmation(null), 3000);
         }
       } else {
+        // Full close (handleCloseTrade already uses full dialog)
         await handleCloseTrade(trade.id);
       }
     };
@@ -1904,22 +2026,30 @@ const Dashboard = () => {
 
   // ============ QUOTES TAB (render function — NO hooks) ============
   const renderQuotesTab = () => {
+    // ── Theme-aware colors ──
+    const bg = theme === 'light' ? '#ffffff' : '#1e222d';
+    const bgAlt = theme === 'light' ? '#f1f5f9' : '#2a2e39';
+    const bgAlt2 = theme === 'light' ? '#f1f5f9' : '#252832';
+    const border = theme === 'light' ? '#e2e8f0' : '#363a45';
+    const textPrimary = theme === 'light' ? '#1e293b' : '#d1d4dc';
+    const textMuted = theme === 'light' ? '#64748b' : '#787b86';
+
     return (
-      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+      <div className="flex flex-col h-full" style={{ background: bg }}>
         {/* ── Fixed Header ── */}
-        <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45' }}>
+        <div className="p-3 border-b shrink-0" style={{ borderColor: border }}>
           {/* Watchlist Selector */}
           <div className="flex items-center justify-between mb-3">
             <button
               onClick={() => setShowWatchlistMenu(true)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg"
-              style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+              style={{ background: bgAlt, border: `1px solid ${border}` }}
             >
               <Star size={16} color="#f5c542" />
-              <span className="font-medium" style={{ color: '#d1d4dc' }}>
+              <span className="font-medium" style={{ color: textPrimary }}>
                 {currentWatchlist?.name || 'Select Watchlist'}
               </span>
-              <ChevronDown size={16} color="#787b86" />
+              <ChevronDown size={16} color={textMuted} />
             </button>
             <div className="flex items-center gap-2">
               <button
@@ -1928,10 +2058,10 @@ const Dashboard = () => {
                   fetchAllFuturesSymbols();
                 }}
                 className="p-2 rounded-lg"
-                style={{ background: '#2a2e39' }}
+                style={{ background: bgAlt }}
                 title="Refresh Symbols"
               >
-                <RefreshCw size={18} color="#787b86" className={loadingAllSymbols ? 'animate-spin' : ''} />
+                <RefreshCw size={18} color={textMuted} className={loadingAllSymbols ? 'animate-spin' : ''} />
               </button>
               <button
                 onClick={(e) => handleCreateWatchlist(e)}
@@ -1951,8 +2081,8 @@ const Dashboard = () => {
                 onClick={() => setSelectedCategory(cat.id)}
                 className="px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
                 style={{
-                  background: selectedCategory === cat.id ? '#2962ff' : '#2a2e39',
-                  color: selectedCategory === cat.id ? '#fff' : '#787b86',
+                  background: selectedCategory === cat.id ? '#2962ff' : bgAlt,
+                  color: selectedCategory === cat.id ? '#fff' : textMuted,
                 }}
               >
                 {cat.label}
@@ -1963,47 +2093,45 @@ const Dashboard = () => {
           {/* Search */}
           <div className="relative mt-2">
             <Search
-              size={14}
-              className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none"
-              style={{ color: '#787b86' }}
+              size={16}
+              className="absolute top-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ color: textMuted, left: '14px' }}
             />
             <input
               ref={quotesSearchInputRef}
               type="text"
               value={quotesLocalSearch}
               onChange={(e) => setQuotesLocalSearch(e.target.value)}
-              placeholder="Find"
-              className="w-full pl-14 pr-10 py-4 rounded-lg border text-base font-medium"
+              placeholder="Find symbol"
+              className="w-full pr-10 rounded-lg border font-medium"
               style={{
-                background: '#2a2e39',
-                borderColor: '#363a45',
-                color: '#d1d4dc',
+                background: bgAlt,
+                borderColor: border,
+                color: textPrimary,
                 fontSize: '16px',
+                paddingLeft: '42px',
+                paddingTop: '14px',
+                paddingBottom: '14px',
               }}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
               spellCheck="false"
             />
-              {/* autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              spellCheck="false"
-            /> */}
             {quotesLocalSearch && (
               <button
                 onClick={() => { setQuotesLocalSearch(''); quotesSearchInputRef.current?.focus(); }}
                 className="absolute right-3.5 top-1/2 -translate-y-1/2"
               >
-                <X size={18} color="#787b86" />
+                <X size={18} color={textMuted} />
               </button>
             )}
           </div>
 
           {searchTerm && (
             <div className="flex items-center justify-between mt-2">
-              <span className="text-xs" style={{ color: '#787b86' }}>
-                {quotesDisplayedSymbols.length} results for "{searchTerm}"
+              <span className="text-xs" style={{ color: textMuted }}>
+                {quotesDisplayedSymbols.length} results for &quot;{searchTerm}&quot;
               </span>
               <span className="text-xs" style={{ color: '#2962ff' }}>Tap to trade</span>
             </div>
@@ -2015,9 +2143,9 @@ const Dashboard = () => {
           className="grid px-3 py-2 text-xs font-semibold border-b shrink-0"
           style={{
             gridTemplateColumns: '2.5fr 1fr 1fr',
-            background: '#252832',
-            borderColor: '#363a45',
-            color: '#787b86',
+            background: bgAlt2,
+            borderColor: border,
+            color: textMuted,
           }}
         >
           <div>Symbol</div>
@@ -2028,16 +2156,16 @@ const Dashboard = () => {
         {/* ── Symbol List ── */}
         <div className="flex-1 overflow-y-auto">
           {loadingAllSymbols && allFuturesSymbols.length === 0 ? (
-            <div className="p-8 text-center" style={{ color: '#787b86' }}>
+            <div className="p-8 text-center" style={{ color: textMuted }}>
               <RefreshCw size={32} className="animate-spin mx-auto mb-3" />
               <div>Loading symbols...</div>
             </div>
           ) : quotesDisplayedSymbols.length === 0 ? (
-            <div className="p-8 text-center" style={{ color: '#787b86' }}>
+            <div className="p-8 text-center" style={{ color: textMuted }}>
               {searchTerm ? (
                 <>
                   <Search size={48} className="mx-auto mb-3 opacity-30" />
-                  <div className="text-base mb-1">No symbols found for "{searchTerm}"</div>
+                  <div className="text-base mb-1">No symbols found for &quot;{searchTerm}&quot;</div>
                   <div className="text-sm">Try searching by underlying name (e.g., RELIANCE, TCS, GOLD)</div>
                 </>
               ) : (
@@ -2055,21 +2183,33 @@ const Dashboard = () => {
               const quote = quotes?.[sym.symbol] || sym;
               const symBid = Number(quote.bid || sym.bid || sym.last_price || 0);
               const symAsk = Number(quote.ask || sym.ask || sym.last_price || 0);
-              const symLow = Number(
-                quote?.low || quote?.day_low || quote?.ohlc_low ||
-                sym.low || sym.day_low || sym.low_price || sym.ohlc_low ||
-                (sym.ohlc && sym.ohlc.low) ||
-                0
+              const rawLow = Number(
+                quote?.day_low || quote?.ohlc_low ||
+                sym.day_low || sym.low_price || sym.ohlc_low ||
+                (sym.ohlc && sym.ohlc.low) || 0
               );
-              const symHigh = Number(
-                quote?.high || quote?.day_high || quote?.ohlc_high ||
-                sym.high || sym.day_high || sym.high_price || sym.ohlc_high ||
-                (sym.ohlc && sym.ohlc.high) ||
-                0
+              const rawHigh = Number(
+                quote?.day_high || quote?.ohlc_high ||
+                sym.day_high || sym.high_price || sym.ohlc_high ||
+                (sym.ohlc && sym.ohlc.high) || 0
               );
+              const quoteLow = Number(quote?.low || 0);
+              const quoteHigh = Number(quote?.high || 0);
+              const symLow = rawLow > 0 ? rawLow
+                : (quoteLow > 0 && quoteLow !== symBid && quoteLow !== symAsk) ? quoteLow : 0;
+              const symHigh = rawHigh > 0 ? rawHigh
+                : (quoteHigh > 0 && quoteHigh !== symBid && quoteHigh !== symAsk) ? quoteHigh : 0;
               const symChange = Number(quote?.change ?? quote?.change_value ?? sym.change_value ?? 0);
               const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
-              const marketOpen = isMarketOpenNow();
+              const marketOpen = isMarketOpenNow(sym.symbol);
+
+              const hasLiveData = quote?.source === 'socket';
+              const isStale = hasLiveData && quote?.timestamp && (Date.now() - quote.timestamp > 10000);
+              void staleTick;
+
+              const bidColor = isStale ? textMuted : (marketOpen ? '#ef5350' : textMuted);
+              const askColor = isStale ? textMuted : (marketOpen ? '#26a69a' : textMuted);
+              const nameColor = isStale ? textMuted : textPrimary;
 
               const getMonthAbbr = (dateStr) => {
                 if (!dateStr) return '';
@@ -2092,82 +2232,76 @@ const Dashboard = () => {
                 ? new Date(sym.expiry_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
                 : '';
 
-              const liveTime = new Date().toLocaleTimeString('en-IN', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false,
-              });
-
               return (
                 <div
                   key={sym.symbol}
                   onClick={(e) => handleSymbolTap(sym, e)}
-                  className="grid items-center px-3 py-3 border-b cursor-pointer hover:bg-white/5"
+                  className="grid items-center px-3 py-3 border-b cursor-pointer"
                   style={{
                     gridTemplateColumns: '2.5fr 1fr 1fr',
-                    background: isSelected ? '#2a2e39' : 'transparent',
-                    borderColor: '#363a45',
+                    background: isSelected ? bgAlt : 'transparent',
+                    borderColor: border,
                     borderLeft: isSelected ? '3px solid #2962ff' : '3px solid transparent',
+                    opacity: isStale ? 0.6 : 1,
                   }}
                 >
-                  {/* Symbol Column — name + change + time */}
+                  {/* Symbol Column */}
                   <div className="flex items-start gap-2 min-w-0">
                     <Star
                       size={14}
-                      color={inWL ? '#f5c542' : '#787b86'}
+                      color={inWL ? '#f5c542' : textMuted}
                       fill={inWL ? '#f5c542' : 'none'}
                       onClick={(e) => { e.stopPropagation(); toggleSymbolInWatchlist(sym.symbol); }}
                       className="shrink-0 cursor-pointer mt-1"
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="font-bold text-sm leading-tight" style={{ color: '#d1d4dc', wordBreak: 'break-word' }}>
+                      <div className="font-bold leading-tight" style={{ color: nameColor, fontSize: '14px', lineHeight: '18px', wordBreak: 'break-word' }}>
                         {displaySymbol}
                       </div>
-                      {/* Net change + % */}
-                      <div className="flex items-center gap-1 mt-0.5">
+                      <div className="flex items-center gap-1" style={{ marginTop: '2px' }}>
                         <span
-                          className="text-xs font-semibold"
-                          style={{ color: symChange >= 0 ? '#26a69a' : '#ef5350' }}
+                          className="font-semibold"
+                          style={{ color: symChange >= 0 ? '#26a69a' : '#ef5350', fontSize: '12px' }}
                         >
                           {symChange >= 0 ? '+' : ''}{symChange.toFixed(2)}
                         </span>
                         <span
-                          className="text-xs font-medium"
-                          style={{ color: symChangePercent >= 0 ? '#26a69a' : '#ef5350' }}
+                          className="font-medium"
+                          style={{ color: symChangePercent >= 0 ? '#26a69a' : '#ef5350', fontSize: '12px' }}
                         >
                           ({symChangePercent >= 0 ? '+' : ''}{symChangePercent.toFixed(2)}%)
                         </span>
                       </div>
-                      {/* Live time + expiry */}
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[10px]" style={{ color: '#787b86' }}>{liveTime}</span>
+                      <div className="flex items-center gap-2" style={{ marginTop: '2px' }}>
+                        {isStale && (
+                          <span style={{ color: '#ff9800', fontSize: '10px', fontWeight: 700 }}>Off Quotes</span>
+                        )}
                         {expiry && (
-                          <span className="text-[10px]" style={{ color: '#787b86' }}>• {expiry}</span>
+                          <span style={{ color: textMuted, fontSize: '10px' }}>{expiry}</span>
                         )}
                         {sym.lot_size && (
-                          <span className="text-[10px]" style={{ color: '#f5c542' }}>Lot:{sym.lot_size}</span>
+                          <span style={{ color: '#f5c542', fontSize: '10px' }}>Lot:{sym.lot_size}</span>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  {/* Bid + L below */}
+                  {/* Bid */}
                   <div className="text-right">
-                    <div className="text-lg font-bold font-mono leading-tight" style={{ color: marketOpen ? '#ef5350' : '#787b86' }}>
+                    <div className="font-bold font-mono" style={{ fontSize: '18px', lineHeight: '22px', color: bidColor }}>
                       {symBid > 0 ? symBid.toFixed(2) : '—'}
                     </div>
-                    <div className="text-[10px] font-mono mt-0.5" style={{ color: '#787b86' }}>
+                    <div className="font-mono" style={{ fontSize: '10px', lineHeight: '14px', color: textMuted, marginTop: '2px' }}>
                       L: {symLow > 0 ? symLow.toFixed(2) : '—'}
                     </div>
                   </div>
 
-                  {/* Ask + H below */}
+                  {/* Ask */}
                   <div className="text-right">
-                    <div className="text-lg font-bold font-mono leading-tight" style={{ color: marketOpen ? '#26a69a' : '#787b86' }}>
+                    <div className="font-bold font-mono" style={{ fontSize: '18px', lineHeight: '22px', color: askColor }}>
                       {symAsk > 0 ? symAsk.toFixed(2) : '—'}
                     </div>
-                    <div className="text-[10px] font-mono mt-0.5" style={{ color: '#787b86' }}>
+                    <div className="font-mono" style={{ fontSize: '10px', lineHeight: '14px', color: textMuted, marginTop: '2px' }}>
                       H: {symHigh > 0 ? symHigh.toFixed(2) : '—'}
                     </div>
                   </div>
@@ -2218,6 +2352,22 @@ const Dashboard = () => {
     }
   }, [modifyModal]);
 
+  // Reset modify-pending values when modal opens
+  useEffect(() => {
+    if (modifyPendingModal) {
+      setModifyPendingPrice(Number(modifyPendingModal.price || 0).toFixed(2));
+      setModifyPendingSL(modifyPendingModal.stop_loss || '');
+      setModifyPendingTP(modifyPendingModal.take_profit || '');
+    }
+  }, [modifyPendingModal]);
+
+  // Fetch pending order history for Orders sub-tab
+  useEffect(() => {
+    if (activeTab === 'history' && historyViewMode === 'orders' && selectedAccount?.id) {
+      fetchPendingOrderHistory(selectedAccount.id);
+    }
+  }, [activeTab, historyViewMode, selectedAccount, fetchPendingOrderHistory]);
+
   // History memos (lifted from HistoryTab)
   const historyUniqueSymbols = useMemo(() => {
     const syms = new Set((tradeHistory || []).map((t) => t.symbol));
@@ -2229,13 +2379,15 @@ const Dashboard = () => {
     if (historyLocalSymbolFilter) {
       filtered = filtered.filter((t) => t.symbol === historyLocalSymbolFilter);
     }
+    // Gross P&L (without commission) for display
+    const getGross = (t) => Number(t.profit || 0) + Number(t.brokerage || 0);
     const totalProfit = filtered
-      .filter((t) => Number(t.profit || 0) > 0)
-      .reduce((sum, t) => sum + Number(t.profit || 0), 0);
+      .filter((t) => getGross(t) > 0)
+      .reduce((sum, t) => sum + getGross(t), 0);
     const totalLoss = Math.abs(
       filtered
-        .filter((t) => Number(t.profit || 0) < 0)
-        .reduce((sum, t) => sum + Number(t.profit || 0), 0)
+        .filter((t) => getGross(t) < 0)
+        .reduce((sum, t) => sum + getGross(t), 0)
     );
     const netPnL = totalProfit - totalLoss;
     return { totalProfit, totalLoss, netPnL, count: filtered.length };
@@ -3281,17 +3433,153 @@ const Dashboard = () => {
     );
   };
 
+    // ============ MODIFY PENDING ORDER MODAL (MT5 Style) ============
+  const renderModifyPendingOrderModal = () => {
+    if (!modifyPendingModal) return null;
+
+    const order = modifyPendingModal;
+    const currentSymbolData = (symbols || []).find((s) => s.symbol === order.symbol);
+    const tickSize = Number(currentSymbolData?.tick_size || 0.05);
+
+    const stepPrice = (dir) => {
+      const current = Number(modifyPendingPrice) || Number(order.price) || 0;
+      setModifyPendingPrice((current + dir * tickSize).toFixed(2));
+    };
+    const stepSL = (dir) => {
+      const current = Number(modifyPendingSL) || 0;
+      setModifyPendingSL((current + dir * tickSize).toFixed(2));
+    };
+    const stepTP = (dir) => {
+      const current = Number(modifyPendingTP) || 0;
+      setModifyPendingTP((current + dir * tickSize).toFixed(2));
+    };
+
+    const handleModify = async () => {
+      const result = await useTradingStore.getState().modifyPendingOrder(order.id, {
+        price: Number(modifyPendingPrice),
+        stopLoss: Number(modifyPendingSL) || 0,
+        takeProfit: Number(modifyPendingTP) || 0,
+      });
+      if (result?.success) {
+        toast.success('Pending order modified');
+        setModifyPendingModal(null);
+        fetchPendingOrders?.(selectedAccount?.id);
+      } else {
+        toast.error(result?.message || 'Modify failed');
+      }
+    };
+
+    return (
+      <div
+        className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
+        onClick={() => setModifyPendingModal(null)}
+      >
+        <div
+          className="w-full max-w-sm rounded-xl"
+          style={{ background: '#1e222d', border: '1px solid #363a45' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+            <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Modify Order</h3>
+            <button onClick={() => setModifyPendingModal(null)}>
+              <X size={22} color="#787b86" />
+            </button>
+          </div>
+
+          <div className="p-4 space-y-4">
+            {/* Order Info */}
+            <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>{order.symbol}</div>
+                  <span className="text-xs px-2 py-0.5 rounded font-medium" style={{
+                    background: order.trade_type === 'buy' ? '#26a69a20' : '#ef535020',
+                    color: order.trade_type === 'buy' ? '#26a69a' : '#ef5350',
+                  }}>
+                    {String(order.order_type || '').replace('_', ' ').toUpperCase()}
+                  </span>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm" style={{ color: '#787b86' }}>Qty: {order.quantity}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Price */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>Price</label>
+              <div className="flex items-center gap-0">
+                <button onClick={() => stepPrice(-1)} className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>−</button>
+                <input type="number" value={modifyPendingPrice} onChange={(e) => setModifyPendingPrice(e.target.value)} className="flex-1 h-10 px-2 text-center text-base font-bold" style={{ background: '#2a2e39', border: '1px solid #363a45', borderLeft: 'none', borderRight: 'none', color: '#d1d4dc' }} />
+                <button onClick={() => stepPrice(1)} className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>+</button>
+              </div>
+            </div>
+
+            {/* Stop Loss */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>Stop Loss</label>
+              <div className="flex items-center gap-0">
+                <button onClick={() => stepSL(-1)} className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>−</button>
+                <input type="number" value={modifyPendingSL} onChange={(e) => setModifyPendingSL(e.target.value)} placeholder="0.00" className="flex-1 h-10 px-2 text-center text-base font-bold" style={{ background: '#2a2e39', border: '1px solid #363a45', borderLeft: 'none', borderRight: 'none', color: '#d1d4dc' }} />
+                <button onClick={() => stepSL(1)} className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>+</button>
+              </div>
+            </div>
+
+            {/* Take Profit */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>Take Profit</label>
+              <div className="flex items-center gap-0">
+                <button onClick={() => stepTP(-1)} className="h-10 w-10 flex items-center justify-center rounded-l-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>−</button>
+                <input type="number" value={modifyPendingTP} onChange={(e) => setModifyPendingTP(e.target.value)} placeholder="0.00" className="flex-1 h-10 px-2 text-center text-base font-bold" style={{ background: '#2a2e39', border: '1px solid #363a45', borderLeft: 'none', borderRight: 'none', color: '#d1d4dc' }} />
+                <button onClick={() => stepTP(1)} className="h-10 w-10 flex items-center justify-center rounded-r-lg text-lg font-bold shrink-0" style={{ background: '#363a45', color: '#d1d4dc', border: '1px solid #363a45' }}>+</button>
+              </div>
+            </div>
+
+            <button
+              onClick={handleModify}
+              className="w-full py-3.5 rounded-lg font-semibold text-base text-white"
+              style={{ background: '#2962ff' }}
+            >
+              Modify Order
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ============ TRADE TAB ============
   const renderTradeTab = () => (
-    <div
-      className="flex flex-col h-full"
-      style={{ background: theme === 'light' ? '#ffffff' : '#1e222d' }}
-    >
       <div
-        className="p-3 border-b"
-        style={{ borderColor: '#363a45' }}
+        className="flex flex-col h-full"
+        style={{ background: theme === 'light' ? '#ffffff' : '#1e222d' }}
       >
-        <div className="grid grid-cols-3 gap-2 text-center mb-3">
+        <div
+          className="p-3 border-b"
+          style={{ borderColor: theme === 'light' ? '#e2e8f0' : '#363a45' }}
+        >
+          {/* Trade Axis ID */}
+          <div className="flex items-center justify-between mb-2 px-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium" style={{ color: theme === 'light' ? '#64748b' : '#787b86' }}>
+                Trade Axis
+              </span>
+              <span className="font-bold text-sm font-mono" style={{ color: '#2962ff' }}>
+                {user?.loginId || user?.login_id || '—'}
+              </span>
+            </div>
+            <span
+              className="px-2 py-0.5 rounded text-[10px] font-medium"
+              style={{
+                background: selectedAccount?.is_demo ? '#f5c54220' : '#26a69a20',
+                color: selectedAccount?.is_demo ? '#f5c542' : '#26a69a',
+              }}
+            >
+              {selectedAccount?.is_demo ? 'DEMO' : 'LIVE'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-center mb-3">
           <div
             className="p-3 rounded-lg"
             style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
@@ -3306,7 +3594,7 @@ const Dashboard = () => {
               className="font-bold text-base"
               style={{ color: '#d1d4dc' }}
             >
-              {formatINR(accountStats.balance)}
+              {formatINR(accountStats.credit)}
             </div>
           </div>
           <div
@@ -3334,16 +3622,13 @@ const Dashboard = () => {
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Floating P&L
+              Balance
             </div>
             <div
               className="font-bold text-base"
-              style={{
-                color: totalPnL >= 0 ? '#26a69a' : '#ef5350',
-              }}
+              style={{ color: '#d1d4dc' }}
             >
-              {totalPnL >= 0 ? '+' : ''}
-              {formatINR(totalPnL)}
+              {formatINR(accountStats.equity - accountStats.credit)}
             </div>
           </div>
         </div>
@@ -3475,7 +3760,8 @@ const Dashboard = () => {
               </div>
             ) : (
               openTrades.map((trade) => {
-                const pnl = Number(trade.profit || 0);
+                // Gross P&L without commission
+                const pnl = Number(trade.profit || 0) + Number(trade.brokerage || 0);
                 const isProfit = pnl >= 0;
                 const isExpanded = expandedTradeId === trade.id;
 
@@ -3506,7 +3792,7 @@ const Dashboard = () => {
                                 className="font-bold text-base"
                                 style={{ color: theme === 'light' ? '#1e293b' : '#d1d4dc' }}
                               >
-                                {trade.symbol}
+                                {formatDisplaySymbol(trade.symbol, allFuturesSymbols)}
                               </span>
                               <span
                                 className="font-bold text-sm px-2 py-1 rounded"
@@ -3611,18 +3897,18 @@ const Dashboard = () => {
                             Close
                           </button>
                         </div>
-                        {/* Modify SL/TP link */}
-                        {/* <button
+                        {/* Modify Position (SL/TP) */}
+                        <button
                           onClick={(e) => {
                             e.stopPropagation();
                             setModifyModal(trade);
                           }}
-                          className="w-full mt-2 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
-                          style={{ background: '#2a2e39', color: '#787b86', border: '1px solid #363a45' }}
+                          className="w-full mt-2 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                          style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
                         >
-                          <Edit3 size={14} />
-                          Modify SL/TP
-                        </button> */}
+                          <Edit3 size={16} />
+                          Modify Position
+                        </button>
 
                         {(trade.stop_loss > 0 ||
                           trade.take_profit > 0) && (
@@ -3708,21 +3994,7 @@ const Dashboard = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          const newPrice = window.prompt('New price:', Number(o.price || 0).toFixed(2));
-                          if (newPrice && !isNaN(Number(newPrice))) {
-                            useTradingStore.getState().modifyPendingOrder(o.id, {
-                              price: Number(newPrice),
-                              stopLoss: o.stop_loss || 0,
-                              takeProfit: o.take_profit || 0,
-                            }).then((res) => {
-                              if (res?.success) {
-                                toast.success('Order modified');
-                                fetchPendingOrders?.(selectedAccount?.id);
-                              } else {
-                                toast.error(res?.message || 'Modify failed');
-                              }
-                            });
-                          }
+                          setModifyPendingModal(o);
                         }}
                         className="flex-1 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
                         style={{ background: '#2962ff20', color: '#2962ff', border: '1px solid #2962ff50' }}
@@ -3874,29 +4146,118 @@ const Dashboard = () => {
       </div>
 
       {renderModifyPositionModal()}
+      {renderModifyPendingOrderModal()}
       {renderCloseConfirmModal()}
     </div>
   );
 
   // ============ ORDER CONFIRMATION OVERLAY ============
-  const renderOrderConfirmation = () => {
+const renderOrderConfirmation = () => {
     if (!orderConfirmation) return null;
     const oc = orderConfirmation;
+
+    // ── Phase: Executing ──
+    if (oc.phase === 'executing') {
+      return (
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center p-6"
+          style={{ background: 'rgba(30, 34, 45, 0.97)' }}
+        >
+          <div className="text-center text-white">
+            <div
+              className="w-16 h-16 border-4 rounded-full animate-spin mx-auto mb-6"
+              style={{ borderColor: 'rgba(255,255,255,0.2)', borderTopColor: '#fff' }}
+            />
+            <div className="text-2xl font-bold mb-2">Executing Order...</div>
+            <div className="text-xl opacity-90">
+              {oc.type} {oc.symbol}
+            </div>
+            {oc.quantity && (
+              <div className="text-lg opacity-70 mt-1">Qty: {oc.quantity}</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Phase: Off Quotes ──
+    if (oc.phase === 'offquotes') {
+      return (
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center p-6"
+          style={{ background: 'rgba(120, 123, 134, 0.95)' }}
+          onClick={() => setOrderConfirmation(null)}
+        >
+          <div className="text-center text-white">
+            <div className="text-6xl mb-4">⚠️</div>
+            <div className="text-3xl font-bold mb-3">Off Quotes</div>
+            <div className="text-xl font-semibold">{oc.symbol}</div>
+            <div className="text-base mt-4 opacity-80 max-w-xs mx-auto">
+              Prices are not updating. Please wait for live quotes before placing orders.
+            </div>
+            <div className="mt-8 text-sm opacity-50">Tap anywhere to dismiss</div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Phase: Rejected ──
+    if (oc.phase === 'rejected') {
+      return (
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center p-6"
+          style={{ background: 'rgba(239, 83, 80, 0.95)' }}
+          onClick={() => setOrderConfirmation(null)}
+        >
+          <div className="text-center text-white">
+            <div className="text-6xl mb-4">❌</div>
+            <div className="text-3xl font-bold mb-2">
+              {oc.type ? `${oc.type} REJECTED` : 'REJECTED'}
+            </div>
+            {oc.symbol && (
+              <div className="text-xl font-semibold mb-1">{oc.symbol}</div>
+            )}
+            <div className="text-base mt-3 opacity-90 max-w-xs mx-auto">
+              {oc.message}
+            </div>
+            <div className="mt-8 text-sm opacity-50">Tap anywhere to dismiss</div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Phase: Success (buy/sell/close/modify) ──
     const isBuy = oc.type === 'BUY';
+    const isSell = oc.type === 'SELL';
+    const isClose = oc.type === 'CLOSE';
+    const isModify = oc.type === 'MODIFY';
+
+    let bgColor = 'rgba(38, 166, 154, 0.95)';
+    if (isSell || isClose) bgColor = 'rgba(239, 83, 80, 0.95)';
+    if (isModify) bgColor = 'rgba(41, 98, 255, 0.95)';
+
+    let emoji = '📈';
+    if (isSell) emoji = '📉';
+    if (isClose) emoji = '✅';
+    if (isModify) emoji = '✏️';
+
+    let title = `${oc.type} ${oc.pending ? 'ORDER PLACED' : 'EXECUTED'}`;
+    if (isClose) title = 'POSITION CLOSED';
+    if (isModify) title = 'POSITION MODIFIED';
 
     return (
       <div
         className="fixed inset-0 z-[10001] flex items-center justify-center p-6"
-        style={{ background: isBuy ? 'rgba(38, 166, 154, 0.95)' : 'rgba(239, 83, 80, 0.95)' }}
+        style={{ background: bgColor }}
         onClick={() => setOrderConfirmation(null)}
       >
         <div className="text-center text-white" onClick={(e) => e.stopPropagation()}>
-          <div className="text-6xl mb-4">{isBuy ? '📈' : '📉'}</div>
-          <div className="text-3xl font-bold mb-2">
-            {oc.type} {oc.pending ? 'ORDER PLACED' : 'EXECUTED'}
-          </div>
+          <div className="text-6xl mb-4">{emoji}</div>
+          <div className="text-3xl font-bold mb-2">{title}</div>
           <div className="text-xl font-semibold mb-1">{oc.symbol}</div>
-          <div className="text-lg opacity-90 mb-1">Qty: {oc.quantity}</div>
+          {oc.quantity && (
+            <div className="text-lg opacity-90 mb-1">Qty: {oc.quantity}</div>
+          )}
           {oc.price && (
             <div className="text-2xl font-bold mt-3">@ ₹{oc.price}</div>
           )}
@@ -3911,12 +4272,20 @@ const Dashboard = () => {
 
   // ============ HISTORY TAB ============
   const renderHistoryTab = () => {
-    const periodLabel = HISTORY_PERIODS.find((p) => p.id === historyPeriod)?.label || 'Last Month';
+    const periodLabel = HISTORY_PERIODS.find((p) => p.id === historyPeriod)?.label || 'Today';
+
+    // ── Theme-aware colors ──
+    const bg = theme === 'light' ? '#ffffff' : '#1e222d';
+    const bgAlt = theme === 'light' ? '#f1f5f9' : '#2a2e39';
+    const bgAlt2 = theme === 'light' ? '#f1f5f9' : '#252832';
+    const border = theme === 'light' ? '#e2e8f0' : '#363a45';
+    const textPrimary = theme === 'light' ? '#1e293b' : '#d1d4dc';
+    const textMuted = theme === 'light' ? '#64748b' : '#787b86';
 
     return (
-      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+      <div className="flex flex-col h-full" style={{ background: bg }}>
         {/* ── Header ── */}
-        <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45' }}>
+        <div className="p-3 border-b shrink-0" style={{ borderColor: border }}>
           <div className="flex items-center justify-between mb-3">
             <div className="flex gap-2">
               {[
@@ -3929,9 +4298,9 @@ const Dashboard = () => {
                   onClick={() => setHistoryViewMode(m.id)}
                   className="px-3 py-2 rounded-lg text-sm font-medium"
                   style={{
-                    background: historyViewMode === m.id ? '#2a2e39' : 'transparent',
-                    color: historyViewMode === m.id ? '#d1d4dc' : '#787b86',
-                    border: `1px solid ${historyViewMode === m.id ? '#363a45' : 'transparent'}`,
+                    background: historyViewMode === m.id ? bgAlt : 'transparent',
+                    color: historyViewMode === m.id ? textPrimary : textMuted,
+                    border: `1px solid ${historyViewMode === m.id ? border : 'transparent'}`,
                   }}
                 >
                   {m.label}
@@ -3943,24 +4312,24 @@ const Dashboard = () => {
               <button
                 onClick={() => setShowHistoryCalendar(!showHistoryCalendar)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg"
-                style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+                style={{ background: bgAlt, border: `1px solid ${border}` }}
               >
-                <CalendarDays size={16} color="#787b86" />
-                <span className="text-xs font-medium" style={{ color: '#d1d4dc' }}>{periodLabel}</span>
-                <ChevronDown size={14} color="#787b86" />
+                <CalendarDays size={16} color={textMuted} />
+                <span className="text-xs font-medium" style={{ color: textPrimary }}>{periodLabel}</span>
+                <ChevronDown size={14} color={textMuted} />
               </button>
 
               {showHistoryCalendar && (
                 <div
                   className="absolute top-full right-0 mt-1 rounded-lg overflow-hidden z-30 w-44"
-                  style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+                  style={{ background: bgAlt, border: `1px solid ${border}` }}
                 >
                   {HISTORY_PERIODS.map((p) => (
                     <button
                       key={p.id}
                       onClick={() => { setHistoryPeriod(p.id); setShowHistoryCalendar(false); }}
                       className="w-full px-3 py-2.5 text-left text-sm hover:bg-white/5"
-                      style={{ color: historyPeriod === p.id ? '#2962ff' : '#d1d4dc' }}
+                      style={{ color: historyPeriod === p.id ? '#2962ff' : textPrimary }}
                     >
                       {p.label}
                     </button>
@@ -3978,30 +4347,34 @@ const Dashboard = () => {
                   else setShowHistorySymbolDropdown(!showHistorySymbolDropdown);
                 }}
                 className="w-full px-3 py-2 rounded-lg text-sm text-left flex items-center justify-between"
-                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
               >
                 <span>
                   {historyViewMode === 'deals'
-                    ? dealsSymbolFilter || 'All Symbols'
-                    : historyLocalSymbolFilter || 'All Symbols'}
+                    ? (dealsSymbolFilter ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols) : 'All Symbols')
+                    : (historyLocalSymbolFilter ? formatDisplaySymbol(historyLocalSymbolFilter, allFuturesSymbols) : 'All Symbols')}
                 </span>
-                <ChevronDown size={16} color="#787b86" />
+                <ChevronDown size={16} color={textMuted} />
               </button>
 
               {historyViewMode === 'positions' && showHistorySymbolDropdown && (
-                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
-                  <button onClick={() => { setHistoryLocalSymbolFilter(''); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !historyLocalSymbolFilter ? '#2962ff' : '#d1d4dc' }}>All Symbols</button>
+                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
+                  <button onClick={() => { setHistoryLocalSymbolFilter(''); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !historyLocalSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
                   {historyUniqueSymbols.map((sym) => (
-                    <button key={sym} onClick={() => { setHistoryLocalSymbolFilter(sym); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : '#d1d4dc' }}>{sym}</button>
+                    <button key={sym} onClick={() => { setHistoryLocalSymbolFilter(sym); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : textPrimary }}>
+                      {formatDisplaySymbol(sym, allFuturesSymbols)}
+                    </button>
                   ))}
                 </div>
               )}
 
               {historyViewMode === 'deals' && showDealsSymbolDropdown && (
-                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
-                  <button onClick={() => { setDealsSymbolFilter(''); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !dealsSymbolFilter ? '#2962ff' : '#d1d4dc' }}>All Symbols</button>
+                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
+                  <button onClick={() => { setDealsSymbolFilter(''); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !dealsSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
                   {dealsUniqueSymbols.map((sym) => (
-                    <button key={sym} onClick={() => { setDealsSymbolFilter(sym); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: dealsSymbolFilter === sym ? '#2962ff' : '#d1d4dc' }}>{sym}</button>
+                    <button key={sym} onClick={() => { setDealsSymbolFilter(sym); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: dealsSymbolFilter === sym ? '#2962ff' : textPrimary }}>
+                      {formatDisplaySymbol(sym, allFuturesSymbols)}
+                    </button>
                   ))}
                 </div>
               )}
@@ -4011,22 +4384,22 @@ const Dashboard = () => {
 
         {/* ── Positions Stats ── */}
         {historyViewMode === 'positions' && (
-          <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45', background: '#252832' }}>
+          <div className="p-3 border-b shrink-0" style={{ borderColor: border, background: bgAlt2 }}>
             <div className="grid grid-cols-4 gap-2 text-center">
               <div>
-                <div className="text-xs" style={{ color: '#787b86' }}>Trades</div>
-                <div className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{historyOverallStats.count}</div>
+                <div className="text-xs" style={{ color: textMuted }}>Trades</div>
+                <div className="font-bold text-sm" style={{ color: textPrimary }}>{historyOverallStats.count}</div>
               </div>
               <div>
-                <div className="text-xs" style={{ color: '#787b86' }}>Total Buy</div>
+                <div className="text-xs" style={{ color: textMuted }}>Total Buy</div>
                 <div className="font-bold text-sm" style={{ color: '#26a69a' }}>{positionAggregates.totalBuyQty}</div>
               </div>
               <div>
-                <div className="text-xs" style={{ color: '#787b86' }}>Total Sell</div>
+                <div className="text-xs" style={{ color: textMuted }}>Total Sell</div>
                 <div className="font-bold text-sm" style={{ color: '#ef5350' }}>{positionAggregates.totalSellQty}</div>
               </div>
               <div>
-                <div className="text-xs" style={{ color: '#787b86' }}>Net P&L</div>
+                <div className="text-xs" style={{ color: textMuted }}>Net P&L</div>
                 <div className="font-bold text-sm" style={{ color: historyOverallStats.netPnL >= 0 ? '#26a69a' : '#ef5350' }}>
                   {historyOverallStats.netPnL >= 0 ? '+' : ''}{formatINR(historyOverallStats.netPnL)}
                 </div>
@@ -4038,17 +4411,31 @@ const Dashboard = () => {
         {/* ── Scrollable Content ── */}
         <div className="flex-1 overflow-y-auto">
           {historyViewMode === 'positions' && (() => {
-            // Aggregate net positions by symbol
             const netMap = {};
             (historyDisplayTrades || []).forEach((t) => {
               const sym = t.symbol;
               if (!netMap[sym]) {
-                netMap[sym] = { symbol: sym, buyQty: 0, sellQty: 0, totalPnL: 0, trades: 0, lastClose: null };
+                netMap[sym] = {
+                  symbol: sym, buyQty: 0, sellQty: 0, totalPnL: 0, trades: 0, lastClose: null,
+                  totalBuyValue: 0, totalSellValue: 0, totalCommission: 0,
+                };
               }
               const q = Number(t.quantity || 0);
-              if (t.trade_type === 'buy') netMap[sym].buyQty += q;
-              else netMap[sym].sellQty += q;
-              netMap[sym].totalPnL += Number(t.profit || 0);
+              const openP = Number(t.open_price || 0);
+              const closeP = Number(t.close_price || 0);
+              const commission = Number(t.brokerage || 0);
+
+              if (t.trade_type === 'buy') {
+                netMap[sym].buyQty += q;
+                netMap[sym].totalBuyValue += openP * q;
+                netMap[sym].totalSellValue += closeP * q;
+              } else {
+                netMap[sym].sellQty += q;
+                netMap[sym].totalSellValue += openP * q;
+                netMap[sym].totalBuyValue += closeP * q;
+              }
+              netMap[sym].totalPnL += Number(t.profit || 0) + Number(t.brokerage || 0);
+              netMap[sym].totalCommission += commission;
               netMap[sym].trades += 1;
               const ct = t.close_time || t.closeTime;
               if (ct && (!netMap[sym].lastClose || new Date(ct) > new Date(netMap[sym].lastClose))) {
@@ -4064,7 +4451,7 @@ const Dashboard = () => {
             return (
               <>
                 {netPositions.length === 0 ? (
-                  <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <div className="p-8 text-center" style={{ color: textMuted }}>
                     <Clock size={48} className="mx-auto mb-3 opacity-30" />
                     <div className="text-base">No closed positions</div>
                   </div>
@@ -4072,22 +4459,31 @@ const Dashboard = () => {
                   netPositions.map((np) => {
                     const netQty = np.buyQty - np.sellQty;
                     const pnl = np.totalPnL;
+                    const avgBuyPrice = np.buyQty > 0 ? np.totalBuyValue / np.buyQty : 0;
+                    const avgSellPrice = np.sellQty > 0 ? np.totalSellValue / np.sellQty : 0;
                     return (
-                      <div key={np.symbol} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                      <div key={np.symbol} className="p-3 border-b" style={{ borderColor: border }}>
                         <div className="flex items-start justify-between">
-                          <div>
+                          <div className="flex-1">
                             <div className="flex items-center gap-2">
-                              <span className="font-bold text-base" style={{ color: '#d1d4dc' }}>{np.symbol}</span>
+                              <span className="font-bold text-base" style={{ color: textPrimary }}>
+                                {formatDisplaySymbol(np.symbol, allFuturesSymbols)}
+                              </span>
                               <span className="text-xs px-2 py-0.5 rounded font-medium" style={{ background: '#2962ff20', color: '#2962ff' }}>
                                 {np.trades} trade{np.trades > 1 ? 's' : ''}
                               </span>
                             </div>
-                            <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: '#787b86' }}>
-                              <span>Buy: <span style={{ color: '#26a69a' }}>{np.buyQty}</span></span>
-                              <span>Sell: <span style={{ color: '#ef5350' }}>{np.sellQty}</span></span>
-                              <span>Net: <span style={{ color: '#d1d4dc', fontWeight: 700 }}>{netQty}</span></span>
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1 text-xs" style={{ color: textMuted }}>
+                              <span>Buy Qty: <span style={{ color: '#26a69a', fontWeight: 600 }}>{np.buyQty}</span></span>
+                              <span>Sell Qty: <span style={{ color: '#ef5350', fontWeight: 600 }}>{np.sellQty}</span></span>
+                              {avgBuyPrice > 0 && <span>Buy Avg: <span style={{ color: textPrimary }}>{formatINR(avgBuyPrice)}</span></span>}
+                              {avgSellPrice > 0 && <span>Sell Avg: <span style={{ color: textPrimary }}>{formatINR(avgSellPrice)}</span></span>}
                             </div>
-                            <div className="text-[11px] mt-0.5" style={{ color: '#787b86' }}>
+                            <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: textMuted }}>
+                              <span>Net: <span style={{ color: textPrimary, fontWeight: 700 }}>{netQty}</span></span>
+                              <span>Comm: <span style={{ color: '#f5c542' }}>{formatINR(np.totalCommission)}</span></span>
+                            </div>
+                            <div className="text-[11px] mt-0.5" style={{ color: textMuted }}>
                               {np.lastClose ? new Date(np.lastClose).toLocaleString() : ''}
                             </div>
                           </div>
@@ -4103,86 +4499,147 @@ const Dashboard = () => {
             );
           })()}
 
-          {historyViewMode === 'orders' && (
-            <>
-              {(historyDisplayTrades || []).length === 0 ? (
-                <div className="p-8 text-center" style={{ color: '#787b86' }}>
-                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
-                  <div className="text-base">No orders found</div>
-                </div>
-              ) : (
-                (historyDisplayTrades || []).map((o) => (
-                  <div key={o.id} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{o.symbol}</span>
-                        <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ background: o.trade_type === 'buy' ? '#26a69a20' : '#ef535020', color: o.trade_type === 'buy' ? '#26a69a' : '#ef5350' }}>
-                          {String(o.trade_type || '').toUpperCase()} {o.quantity}
-                        </span>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded" style={{ background: '#26a69a20', color: '#26a69a' }}>
-                        executed
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between mt-1">
-                      <div className="text-xs" style={{ color: '#787b86' }}>@ {Number(o.open_price || 0).toFixed(2)}</div>
-                      <div className="text-xs" style={{ color: '#787b86' }}>{o.open_time ? new Date(o.open_time).toLocaleString() : ''}</div>
-                    </div>
+          {historyViewMode === 'orders' && (() => {
+            const executedOrders = (historyDisplayTrades || []).map((o) => ({
+              ...o, _source: 'trade', _status: o.trade_type, _time: o.open_time,
+            }));
+            const pendingHistory = (pendingOrderHistory || []).map((o) => ({
+              ...o, _source: 'pending', _status: o.status, _time: o.created_at || o.updated_at,
+            }));
+            const allOrders = [...executedOrders, ...pendingHistory].sort(
+              (a, b) => new Date(b._time || 0) - new Date(a._time || 0)
+            );
+
+            const getStatusStyle = (status) => {
+              switch (status) {
+                case 'buy': return { bg: '#26a69a20', color: '#26a69a', label: 'Buy' };
+                case 'sell': return { bg: '#ef535020', color: '#ef5350', label: 'Sell' };
+                case 'cancelled': return { bg: '#ff980020', color: '#ff9800', label: 'Cancelled' };
+                case 'triggered': return { bg: '#2962ff20', color: '#2962ff', label: 'Filled' };
+                case 'expired': return { bg: '#787b8620', color: '#787b86', label: 'Expired' };
+                case 'rejected': return { bg: '#ef535020', color: '#ef5350', label: 'Rejected' };
+                case 'modified': return { bg: '#f5c54220', color: '#f5c542', label: 'Modified' };
+                default: return { bg: '#787b8620', color: '#787b86', label: String(status || 'unknown').toUpperCase() };
+              }
+            };
+
+            return (
+              <>
+                {allOrders.length === 0 ? (
+                  <div className="p-8 text-center" style={{ color: textMuted }}>
+                    <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                    <div className="text-base">No orders found</div>
                   </div>
-                ))
-              )}
-            </>
-          )}
+                ) : (
+                  allOrders.map((o, idx) => {
+                    const st = getStatusStyle(o._status);
+                    const orderTypeLabel = o._source === 'pending'
+                      ? String(o.order_type || '').replace('_', ' ').toUpperCase()
+                      : String(o.trade_type || '').toUpperCase();
+                    const price = o._source === 'pending' ? Number(o.price || 0) : Number(o.open_price || 0);
+                    const time = o._time ? new Date(o._time).toLocaleString() : '';
+
+                    return (
+                      <div key={`${o._source}-${o.id}-${idx}`} className="p-3 border-b" style={{ borderColor: border }}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm" style={{ color: textPrimary }}>
+                              {formatDisplaySymbol(o.symbol, allFuturesSymbols)}
+                            </span>
+                            <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{
+                              background: (o.trade_type === 'buy' || o._status === 'buy') ? '#26a69a20' : '#ef535020',
+                              color: (o.trade_type === 'buy' || o._status === 'buy') ? '#26a69a' : '#ef5350',
+                            }}>
+                              {orderTypeLabel} {o.quantity}
+                            </span>
+                          </div>
+                          <span className="text-xs px-2 py-0.5 rounded font-medium" style={{ background: st.bg, color: st.color }}>
+                            {st.label}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between mt-1">
+                          <div className="text-xs" style={{ color: textMuted }}>@ {price.toFixed(2)}</div>
+                          <div className="text-xs" style={{ color: textMuted }}>{time}</div>
+                        </div>
+                        {o._source === 'pending' && o.comment && (
+                          <div className="text-[10px] mt-0.5" style={{ color: textMuted }}>{o.comment}</div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </>
+            );
+          })()}
 
           {historyViewMode === 'deals' && (
             <>
               {dealsSummary && (
-                <div className="p-3 border-b shrink-0" style={{ borderColor: '#363a45', background: '#252832' }}>
+                <div className="p-3 border-b shrink-0" style={{ borderColor: border, background: bgAlt2 }}>
                   <div className="grid grid-cols-2 gap-2 text-sm">
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>Profit:</span>
-                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalProfit)}</span>
+                      <span style={{ color: textMuted }}>Profit:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(
+                        dealsSymbolFilter
+                          ? filteredDeals.filter(d => d.source === 'trade' && d.side === 'exit' && d.amount > 0).reduce((s, d) => s + d.amount, 0)
+                          : dealsSummary.totalProfit
+                      )}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>Loss:</span>
-                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalLoss)}</span>
+                      <span style={{ color: textMuted }}>Loss:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(
+                        dealsSymbolFilter
+                          ? Math.abs(filteredDeals.filter(d => d.source === 'trade' && d.side === 'exit' && d.amount < 0).reduce((s, d) => s + d.amount, 0))
+                          : dealsSummary.totalLoss
+                      )}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>Deposits:</span>
-                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalDeposits)}</span>
+                      <span style={{ color: textMuted }}>Deposits:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSymbolFilter ? 0 : dealsSummary.totalDeposits)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span style={{ color: '#787b86' }}>Withdrawals:</span>
-                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalWithdrawals)}</span>
+                      <span style={{ color: textMuted }}>Withdrawals:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSymbolFilter ? 0 : dealsSummary.totalWithdrawals)}</span>
                     </div>
-                    <div className="flex justify-between col-span-2 pt-2 border-t" style={{ borderColor: '#363a45' }}>
-                      <span style={{ color: '#787b86' }}>Commission:</span>
-                      <span className="font-bold" style={{ color: '#f5c542' }}>{formatINR(dealsSummary.totalCommission)}</span>
+                    <div className="flex justify-between col-span-2 pt-2 border-t" style={{ borderColor: border }}>
+                      <span style={{ color: textMuted }}>
+                        Commission{dealsSymbolFilter ? ` (${formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)})` : ''}:
+                      </span>
+                      <span className="font-bold" style={{ color: '#f5c542' }}>{formatINR(
+                        dealsSymbolFilter
+                          ? filteredDeals.reduce((s, d) => s + Number(d.commission || 0), 0)
+                          : dealsSummary.totalCommission
+                      )}</span>
+                    </div>
+                    <div className="flex justify-between col-span-2">
+                      <span style={{ color: textMuted }}>Balance:</span>
+                      <span className="font-bold" style={{ color: textPrimary }}>{formatINR(dealsSummary.currentBalance)}</span>
                     </div>
                   </div>
                 </div>
               )}
 
               {filteredDeals.length === 0 ? (
-                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                <div className="p-8 text-center" style={{ color: textMuted }}>
                   <Clock size={48} className="mx-auto mb-3 opacity-30" />
                   <div className="text-base">No deals found</div>
                 </div>
               ) : (
-              filteredDeals.map((d, idx) => {
-                  const dp = Number(d.profit || 0);
+                filteredDeals.map((d, idx) => {
+                  const dp = Number(d.profit || 0) + Number(d.brokerage || 0);
                   const dt = d.time || d.close_time || d.open_time || d.created_at;
                   const dealPrice = Number(d.price || d.open_price || d.close_price || 0);
                   const dealType = d.type || d.trade_type || '';
                   const isBuyIn = dealType === 'buy';
                   const dealLabel = isBuyIn ? 'Buy In' : dealType === 'sell' ? 'Sell Out' : String(dealType).toUpperCase();
                   return (
-                    <div key={d.id || idx} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                    <div key={d.id || idx} className="p-3 border-b" style={{ borderColor: border }}>
                       <div className="flex items-start justify-between">
-                        {/* Left: Symbol + type + qty @ price */}
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="font-bold text-sm" style={{ color: '#d1d4dc' }}>{d.symbol || '—'}</span>
+                            <span className="font-bold text-sm" style={{ color: textPrimary }}>
+                              {d.symbol ? formatDisplaySymbol(d.symbol, allFuturesSymbols) : '—'}
+                            </span>
                             {dealType && (
                               <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{
                                 background: isBuyIn ? '#26a69a20' : '#ef535020',
@@ -4192,17 +4649,22 @@ const Dashboard = () => {
                               </span>
                             )}
                           </div>
-                          <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                          <div className="text-xs mt-1" style={{ color: textMuted }}>
                             {d.quantity ? `Qty: ${d.quantity}` : ''}
                             {dealPrice > 0 ? ` @ ₹${dealPrice.toFixed(2)}` : ''}
                           </div>
+                          {/* Show commission per deal row */}
+                          {Number(d.commission || 0) > 0 && (
+                            <div className="text-[10px] mt-0.5" style={{ color: '#f5c542' }}>
+                              Comm: {formatINR(d.commission)}
+                            </div>
+                          )}
                         </div>
-                        {/* Right: Date/time + P&L */}
                         <div className="text-right shrink-0">
-                          <div className="text-xs" style={{ color: '#787b86' }}>
+                          <div className="text-xs" style={{ color: textMuted }}>
                             {dt ? new Date(dt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : ''}
                           </div>
-                          <div className="text-[10px]" style={{ color: '#787b86' }}>
+                          <div className="text-[10px]" style={{ color: textMuted }}>
                             {dt ? new Date(dt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}
                           </div>
                           {dp !== 0 && (
@@ -4224,123 +4686,104 @@ const Dashboard = () => {
   };
 
   // ============ MESSAGES TAB ============
-  const renderMessagesTab = () => (
-    <div
-      className="flex flex-col h-full"
-      style={{ background: '#1e222d' }}
-    >
-      <div
-        className="p-4 border-b"
-        style={{ borderColor: '#363a45' }}
-      >
-        <div className="flex items-center justify-between mb-3">
-          <h2
-            className="font-bold text-xl"
-            style={{ color: '#d1d4dc' }}
-          >
-            Messages
-          </h2>
-          <button
-            className="text-sm font-medium px-3 py-1.5 rounded-lg"
-            style={{ background: '#2a2e39', color: '#2962ff' }}
-            onClick={markAllRead}
-          >
-            Mark All Read
-          </button>
-        </div>
+  const renderMessagesTab = () => {
+    // ── Theme-aware colors ──
+    const bg = theme === 'light' ? '#ffffff' : '#1e222d';
+    const bgAlt = theme === 'light' ? '#f1f5f9' : '#2a2e39';
+    const border = theme === 'light' ? '#e2e8f0' : '#363a45';
+    const textPrimary = theme === 'light' ? '#1e293b' : '#d1d4dc';
+    const textMuted = theme === 'light' ? '#64748b' : '#787b86';
 
-        <div className="flex gap-2 overflow-x-auto">
-          {[
-            { id: 'all', label: 'All' },
-            { id: 'system', label: 'System' },
-            { id: 'trade', label: 'Trade' },
-          ].map((c) => (
+    return (
+      <div className="flex flex-col h-full" style={{ background: bg }}>
+        <div className="p-4 border-b" style={{ borderColor: border }}>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-bold text-xl" style={{ color: textPrimary }}>
+              Messages
+            </h2>
             <button
-              key={c.id}
-              onClick={() => setMessageCategory(c.id)}
-              className="px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
-              style={{
-                background:
-                  messageCategory === c.id ? '#2962ff' : '#2a2e39',
-                color:
-                  messageCategory === c.id ? '#fff' : '#787b86',
-              }}
+              className="text-sm font-medium px-3 py-1.5 rounded-lg"
+              style={{ background: bgAlt, color: '#2962ff' }}
+              onClick={markAllRead}
             >
-              {c.label}
+              Mark All Read
             </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        {filteredMessages.length === 0 ? (
-          <div
-            className="p-8 text-center"
-            style={{ color: '#787b86' }}
-          >
-            <MessageSquare
-              size={48}
-              className="mx-auto mb-3 opacity-30"
-            />
-            <div className="text-base">No messages yet</div>
           </div>
-        ) : (
-          filteredMessages.map((m) => (
-            <div
-              key={m.id}
-              className="p-4 border-b"
-              style={{
-                borderColor: '#363a45',
-                background: m.read
-                  ? 'transparent'
-                  : 'rgba(41, 98, 255, 0.06)',
-              }}
-            >
-              <div className="flex items-start gap-3">
-                <div
-                  className="w-11 h-11 rounded-full flex items-center justify-center shrink-0"
-                  style={{ background: '#2a2e39' }}
-                >
-                  {m.type === 'trade' ? (
-                    <TrendingUp size={20} color="#26a69a" />
-                  ) : (
-                    <Bell size={20} color="#2962ff" />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span
-                      className="font-semibold text-base"
-                      style={{ color: '#d1d4dc' }}
-                    >
-                      {m.title}
-                    </span>
-                    <span
-                      className="text-xs"
-                      style={{ color: '#787b86' }}
-                    >
-                      {m.time
-                        ? new Date(m.time).toLocaleTimeString()
-                        : ''}
-                    </span>
-                  </div>
-                  <p
-                    className="text-sm mt-1"
-                    style={{
-                      color: '#787b86',
-                      wordBreak: 'break-word',
-                    }}
+
+          <div className="flex gap-2 overflow-x-auto">
+            {[
+              { id: 'all', label: 'All' },
+              { id: 'system', label: 'System' },
+              { id: 'trade', label: 'Trade' },
+            ].map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setMessageCategory(c.id)}
+                className="px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
+                style={{
+                  background: messageCategory === c.id ? '#2962ff' : bgAlt,
+                  color: messageCategory === c.id ? '#fff' : textMuted,
+                }}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {filteredMessages.length === 0 ? (
+            <div className="p-8 text-center" style={{ color: textMuted }}>
+              <MessageSquare size={48} className="mx-auto mb-3 opacity-30" />
+              <div className="text-base">No messages yet</div>
+            </div>
+          ) : (
+            filteredMessages.map((m) => (
+              <div
+                key={m.id}
+                className="p-4 border-b"
+                style={{
+                  borderColor: border,
+                  background: m.read
+                    ? 'transparent'
+                    : (theme === 'light' ? 'rgba(41, 98, 255, 0.04)' : 'rgba(41, 98, 255, 0.06)'),
+                }}
+              >
+                <div className="flex items-start gap-3">
+                  <div
+                    className="w-11 h-11 rounded-full flex items-center justify-center shrink-0"
+                    style={{ background: bgAlt }}
                   >
-                    {m.message}
-                  </p>
+                    {m.type === 'trade' ? (
+                      <TrendingUp size={20} color="#26a69a" />
+                    ) : (
+                      <Bell size={20} color="#2962ff" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-base" style={{ color: textPrimary }}>
+                        {m.title}
+                      </span>
+                      <span className="text-xs" style={{ color: textMuted }}>
+                        {m.time ? new Date(m.time).toLocaleTimeString() : ''}
+                      </span>
+                    </div>
+                    <p
+                      className="text-sm mt-1"
+                      style={{ color: textMuted, wordBreak: 'break-word' }}
+                    >
+                      {m.message}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ============ ADD ACCOUNT MODAL ============
   const renderAddAccountModal = () => {
@@ -4458,27 +4901,24 @@ const Dashboard = () => {
 
   // ============ SETTINGS TAB ============
   const renderSettingsTab = () => {
-    const maxAccounts = 10;
+    // ── Theme-aware colors ──
+    const bg = theme === 'light' ? '#ffffff' : '#1e222d';
+    const bgAlt = theme === 'light' ? '#f1f5f9' : '#2a2e39';
+    const bgAlt2 = theme === 'light' ? '#e2e8f0' : '#252832';
+    const border = theme === 'light' ? '#e2e8f0' : '#363a45';
+    const textPrimary = theme === 'light' ? '#1e293b' : '#d1d4dc';
+    const textMuted = theme === 'light' ? '#64748b' : '#787b86';
 
     return (
-      <div
-        className="flex flex-col h-full"
-        style={{ background: '#1e222d' }}
-      >
-        <div
-          className="p-4 border-b"
-          style={{ borderColor: '#363a45' }}
-        >
+      <div className="flex flex-col h-full" style={{ background: bg }}>
+        <div className="p-4 border-b" style={{ borderColor: border }}>
           <div className="flex items-center justify-between">
             <div>
-              <div
-                className="font-bold text-lg font-mono"
-                style={{ color: '#2962ff' }}
-              >
+              <div className="font-bold text-lg font-mono" style={{ color: '#2962ff' }}>
                 {user?.loginId || user?.login_id || '—'}
               </div>
               {(user?.firstName || user?.lastName) && (
-                <div className="text-sm mt-0.5" style={{ color: '#d1d4dc' }}>
+                <div className="text-sm mt-0.5" style={{ color: textPrimary }}>
                   {user?.firstName} {user?.lastName}
                 </div>
               )}
@@ -4487,9 +4927,9 @@ const Dashboard = () => {
             <button
               onClick={logout}
               className="p-2.5 rounded-lg"
-              style={{ background: '#2a2e39' }}
+              style={{ background: bgAlt }}
             >
-              <LogOut size={18} color="#787b86" />
+              <LogOut size={18} color={textMuted} />
             </button>
           </div>
 
@@ -4498,13 +4938,9 @@ const Dashboard = () => {
               onClick={switchToDemo}
               className="flex-1 py-3 rounded-lg text-base font-semibold"
               style={{
-                background: selectedAccount?.is_demo
-                  ? '#2962ff'
-                  : '#2a2e39',
-                color: selectedAccount?.is_demo
-                  ? '#fff'
-                  : '#787b86',
-                border: '1px solid #363a45',
+                background: selectedAccount?.is_demo ? '#2962ff' : bgAlt,
+                color: selectedAccount?.is_demo ? '#fff' : textMuted,
+                border: `1px solid ${border}`,
               }}
             >
               DEMO
@@ -4514,13 +4950,9 @@ const Dashboard = () => {
               onClick={switchToLive}
               className="flex-1 py-3 rounded-lg text-base font-semibold"
               style={{
-                background: !selectedAccount?.is_demo
-                  ? '#26a69a'
-                  : '#2a2e39',
-                color: !selectedAccount?.is_demo
-                  ? '#fff'
-                  : '#787b86',
-                border: '1px solid #363a45',
+                background: !selectedAccount?.is_demo ? '#26a69a' : bgAlt,
+                color: !selectedAccount?.is_demo ? '#fff' : textMuted,
+                border: `1px solid ${border}`,
               }}
             >
               LIVE
@@ -4529,41 +4961,23 @@ const Dashboard = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div
-            className="p-4 rounded-xl"
-            style={{ background: '#2a2e39' }}
-          >
+          <div className="p-4 rounded-xl" style={{ background: bgAlt }}>
             <div className="flex items-center justify-between mb-2">
-              <span
-                className="text-sm"
-                style={{ color: '#787b86' }}
-              >
-                Credit
-              </span>
-              <button
-                onClick={() => setShowBalance((v) => !v)}
-              >
+              <span className="text-sm" style={{ color: textMuted }}>Credit</span>
+              <button onClick={() => setShowBalance((v) => !v)}>
                 {showBalance ? (
-                  <Eye size={18} color="#787b86" />
+                  <Eye size={18} color={textMuted} />
                 ) : (
-                  <EyeOff size={18} color="#787b86" />
+                  <EyeOff size={18} color={textMuted} />
                 )}
               </button>
             </div>
 
-            <div
-              className="text-3xl font-bold"
-              style={{ color: '#d1d4dc' }}
-            >
-              {showBalance
-                ? formatINR(accountStats.balance)
-                : '••••••'}
+            <div className="text-3xl font-bold" style={{ color: textPrimary }}>
+              {showBalance ? formatINR(accountStats.credit) : '••••••'}
             </div>
 
-            <div
-              className="text-sm mt-2"
-              style={{ color: '#787b86' }}
-            >
+            <div className="text-sm mt-2" style={{ color: textMuted }}>
               Account: {selectedAccount?.account_number || '-'} •
               Leverage: 1:{accountStats.leverage}
             </div>
@@ -4571,10 +4985,7 @@ const Dashboard = () => {
 
           <div className="grid grid-cols-2 gap-3">
             <button
-              onClick={() => {
-                setWalletIntent('deposit');
-                setActiveTab('wallet');
-              }}
+              onClick={() => { setWalletIntent('deposit'); setActiveTab('wallet'); }}
               className="py-3.5 rounded-xl font-medium text-base flex items-center justify-center gap-2"
               style={{ background: '#26a69a', color: '#fff' }}
             >
@@ -4583,35 +4994,21 @@ const Dashboard = () => {
             </button>
 
             <button
-              onClick={() => {
-                setWalletIntent('withdraw');
-                setActiveTab('wallet');
-              }}
+              onClick={() => { setWalletIntent('withdraw'); setActiveTab('wallet'); }}
               className="py-3.5 rounded-xl font-medium text-base flex items-center justify-center gap-2"
-              style={{
-                background: '#2a2e39',
-                color: '#d1d4dc',
-                border: '1px solid #363a45',
-              }}
+              style={{ background: bgAlt, color: textPrimary, border: `1px solid ${border}` }}
             >
               <RefreshCw size={20} />
               Withdraw
             </button>
           </div>
 
-                    {/* Change Password */}
-          <div
-            className="p-4 rounded-xl"
-            style={{ background: '#2a2e39' }}
-          >
+          {/* Change Password */}
+          <div className="p-4 rounded-xl" style={{ background: bgAlt }}>
             <div className="flex items-center justify-between">
               <div>
-                <div className="font-medium" style={{ color: '#d1d4dc' }}>
-                  Password
-                </div>
-                <div className="text-xs" style={{ color: '#787b86' }}>
-                  Change your login password
-                </div>
+                <div className="font-medium" style={{ color: textPrimary }}>Password</div>
+                <div className="text-xs" style={{ color: textMuted }}>Change your login password</div>
               </div>
               <button
                 onClick={() => {
@@ -4629,36 +5026,21 @@ const Dashboard = () => {
             </div>
           </div>
 
-          <div
-            className="p-4 rounded-xl"
-            style={{ background: '#2a2e39' }}
-          >
+          {/* Theme Toggle */}
+          <div className="p-4 rounded-xl" style={{ background: bgAlt }}>
             <div className="flex items-center justify-between">
               <div>
-                <div
-                  className="font-medium"
-                  style={{ color: '#d1d4dc' }}
-                >
-                  Theme
-                </div>
-                <div
-                  className="text-xs"
-                  style={{ color: '#787b86' }}
-                >
-                  Currently:{' '}
-                  {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
+                <div className="font-medium" style={{ color: textPrimary }}>Theme</div>
+                <div className="text-xs" style={{ color: textMuted }}>
+                  Currently: {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
                 </div>
               </div>
               <button
                 onClick={toggleTheme}
                 className="px-4 py-2 rounded-lg font-medium text-sm"
                 style={{
-                  background:
-                    theme === 'dark'
-                      ? '#f5c54220'
-                      : '#2962ff20',
-                  color:
-                    theme === 'dark' ? '#f5c542' : '#2962ff',
+                  background: theme === 'dark' ? '#f5c54220' : '#2962ff20',
+                  color: theme === 'dark' ? '#f5c542' : '#2962ff',
                   border: `1px solid ${theme === 'dark' ? '#f5c54250' : '#2962ff50'}`,
                 }}
               >
@@ -4667,60 +5049,34 @@ const Dashboard = () => {
             </div>
             <div
               className="text-xs mt-2 p-2 rounded"
-              style={{ background: '#252832', color: '#787b86' }}
+              style={{ background: bgAlt2, color: textMuted }}
             >
-              Mode applied!.
+              Mode applied!
             </div>
           </div>
 
-          <div
-            className="rounded-xl overflow-hidden"
-            style={{
-              background: '#2a2e39',
-              border: '1px solid #363a45',
-            }}
-          >
-            <div
-              className="p-4 border-b"
-              style={{ borderColor: '#363a45' }}
-            >
+          {/* Saved Accounts */}
+          <div className="rounded-xl overflow-hidden" style={{ background: bgAlt, border: `1px solid ${border}` }}>
+            <div className="p-4 border-b" style={{ borderColor: border }}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Users size={18} color="#2962ff" />
-                  <span
-                    className="font-semibold text-base"
-                    style={{ color: '#d1d4dc' }}
-                  >
+                  <span className="font-semibold text-base" style={{ color: textPrimary }}>
                     Saved Accounts
                   </span>
                 </div>
-                <span
-                  className="text-xs px-2 py-1 rounded"
-                  style={{
-                    background: '#2962ff20',
-                    color: '#2962ff',
-                  }}
-                >
+                <span className="text-xs px-2 py-1 rounded" style={{ background: '#2962ff20', color: '#2962ff' }}>
                   {savedAccounts.length} saved
                 </span>
               </div>
-              <div
-                className="text-xs mt-1"
-                style={{ color: '#787b86' }}
-              >
-                Switch between accounts quickly without re-entering
-                password
+              <div className="text-xs mt-1" style={{ color: textMuted }}>
+                Switch between accounts quickly without re-entering password
               </div>
             </div>
 
-            <div
-              className="divide-y"
-              style={{ borderColor: '#363a45' }}
-            >
+            <div className="divide-y" style={{ borderColor: border }}>
               {savedAccounts.map((acc, idx) => {
-                const isActive =
-                  user?.loginId === acc.loginId ||
-                  user?.email === acc.email;
+                const isActive = user?.loginId === acc.loginId || user?.email === acc.email;
 
                 return (
                   <div
@@ -4728,7 +5084,7 @@ const Dashboard = () => {
                     className="p-3 flex items-center justify-between"
                     style={{
                       background: isActive
-                        ? '#2962ff10'
+                        ? (theme === 'light' ? 'rgba(41, 98, 255, 0.05)' : '#2962ff10')
                         : 'transparent',
                     }}
                   >
@@ -4736,64 +5092,38 @@ const Dashboard = () => {
                       <div
                         className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold"
                         style={{
-                          background: isActive
-                            ? '#2962ff'
-                            : '#363a45',
+                          background: isActive ? '#2962ff' : (theme === 'light' ? '#cbd5e1' : '#363a45'),
                           color: '#fff',
                         }}
                       >
-                        {acc.firstName?.[0]}
-                        {acc.lastName?.[0]}
+                        {acc.firstName?.[0]}{acc.lastName?.[0]}
                       </div>
                       <div>
-                        <div
-                          className="text-sm font-medium"
-                          style={{ color: '#d1d4dc' }}
-                        >
+                        <div className="text-sm font-medium" style={{ color: textPrimary }}>
                           {acc.firstName} {acc.lastName}
                           {isActive && (
-                            <span
-                              className="ml-2 text-xs px-1.5 py-0.5 rounded"
-                              style={{
-                                background: '#26a69a20',
-                                color: '#26a69a',
-                              }}
-                            >
+                            <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: '#26a69a20', color: '#26a69a' }}>
                               Active
                             </span>
                           )}
                         </div>
-                        <div
-                          className="text-xs"
-                          style={{ color: '#787b86' }}
-                        >
-                          {acc.email}
-                        </div>
+                        <div className="text-xs" style={{ color: textMuted }}>{acc.email}</div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2">
                       {!isActive && (
                         <button
-                          onClick={() =>
-                            handleSwitchToSavedAccount(acc)
-                          }
+                          onClick={() => handleSwitchToSavedAccount(acc)}
                           className="px-3 py-1.5 rounded-lg text-xs font-medium"
-                          style={{
-                            background: '#2962ff',
-                            color: '#fff',
-                          }}
+                          style={{ background: '#2962ff', color: '#fff' }}
                         >
                           Switch
                         </button>
                       )}
                       {!isActive && (
                         <button
-                          onClick={() =>
-                            handleRemoveSavedAccount(
-                              acc.loginId || acc.email
-                            )
-                          }
+                          onClick={() => handleRemoveSavedAccount(acc.loginId || acc.email)}
                           className="p-1.5 rounded hover:bg-red-500/20"
                         >
                           <Trash2 size={16} color="#ef5350" />
@@ -4805,49 +5135,31 @@ const Dashboard = () => {
               })}
 
               {savedAccounts.length === 0 && (
-                <div
-                  className="p-4 text-center text-sm"
-                  style={{ color: '#787b86' }}
-                >
+                <div className="p-4 text-center text-sm" style={{ color: textMuted }}>
                   No saved accounts yet
                 </div>
               )}
             </div>
 
-            {(
-              <div
-                className="p-3 border-t"
-                style={{ borderColor: '#363a45' }}
+            <div className="p-3 border-t" style={{ borderColor: border }}>
+              <button
+                onClick={() => setShowAddAccountModal(true)}
+                className="w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                style={{
+                  background: theme === 'light' ? '#f8fafc' : '#1e222d',
+                  color: '#2962ff',
+                  border: '1px dashed #2962ff50',
+                }}
               >
-                <button
-                  onClick={() => setShowAddAccountModal(true)}
-                  className="w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
-                  style={{
-                    background: '#1e222d',
-                    color: '#2962ff',
-                    border: '1px dashed #2962ff50',
-                  }}
-                >
-                  <UserPlus size={18} />
-                  Add Another Account
-                </button>
-              </div>
-            )}
+                <UserPlus size={18} />
+                Add Another Account
+              </button>
+            </div>
           </div>
 
-          <div
-            className="p-4 rounded-xl flex items-start gap-3"
-            style={{ background: '#2a2e39' }}
-          >
-            <Info
-              size={18}
-              color="#787b86"
-              className="shrink-0 mt-0.5"
-            />
-            <div
-              className="text-sm"
-              style={{ color: '#787b86' }}
-            >
+          <div className="p-4 rounded-xl flex items-start gap-3" style={{ background: bgAlt }}>
+            <Info size={18} color={textMuted} className="shrink-0 mt-0.5" />
+            <div className="text-sm" style={{ color: textMuted }}>
               You can log in from multiple devices simultaneously.
               Each device maintains its own session.
             </div>

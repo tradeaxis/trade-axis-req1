@@ -5,6 +5,7 @@ import api from '../services/api';
 const useTradingStore = create((set, get) => ({
   openTrades: [],
   pendingOrders: [],
+  pendingOrderHistory: [],
   tradeHistory: [],
   deals: [],
   dealsSummary: null,
@@ -69,6 +70,18 @@ const useTradingStore = create((set, get) => ({
     } catch (error) {
       console.error('Fetch deals error:', error);
       set({ error: error.response?.data?.message || 'Failed to fetch deals', loading: false, deals: [], dealsSummary: null });
+    }
+  },
+
+  fetchPendingOrderHistory: async (accountId) => {
+    if (!accountId) return;
+    try {
+      const response = await api.get(`/trading/pending-order-history/${accountId}`);
+      if (response.data.success) {
+        set({ pendingOrderHistory: response.data.data || [] });
+      }
+    } catch (error) {
+      console.error('Fetch pending order history error:', error);
     }
   },
 
@@ -449,7 +462,7 @@ const useTradingStore = create((set, get) => ({
   clearError: () => set({ error: null }),
 
   reset: () =>
-    set({ openTrades: [], pendingOrders: [], tradeHistory: [], deals: [], dealsSummary: null, loading: false, error: null }),
+    set({ openTrades: [], pendingOrders: [], pendingOrderHistory: [], tradeHistory: [], deals: [], dealsSummary: null, loading: false, error: null }),
 }));
 
 export default useTradingStore;

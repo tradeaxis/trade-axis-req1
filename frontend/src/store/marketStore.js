@@ -40,6 +40,7 @@ const useMarketStore = create((set, get) => ({
             tick_size: s.tick_size,
             underlying: s.underlying,
             expiry_date: s.expiry_date,
+            timestamp: Date.now(),
             source: s.last_update ? 'db' : 'init',
           };
         });
@@ -63,11 +64,9 @@ const useMarketStore = create((set, get) => ({
     return store.fetchSymbols();
   },
 
-  // ✅ Optimized — skips state update when price hasn't changed (reduces re-renders)
   updatePrice: (data) => {
     if (!data) return;
 
-    // Handle array of updates (batch — single state update)
     if (Array.isArray(data)) {
       if (data.length === 0) return;
 
@@ -84,7 +83,6 @@ const useMarketStore = create((set, get) => ({
           const newBid = Number(item.bid ?? existing.bid ?? 0);
           const newAsk = Number(item.ask ?? existing.ask ?? 0);
 
-          // Skip if nothing changed (reduces re-renders)
           if (
             existing.last === newLast &&
             existing.bid === newBid &&
@@ -116,7 +114,6 @@ const useMarketStore = create((set, get) => ({
       return;
     }
 
-    // Handle single update object
     if (typeof data === 'object' && data.symbol) {
       const sym = String(data.symbol).toUpperCase();
 
@@ -127,7 +124,6 @@ const useMarketStore = create((set, get) => ({
         const newBid = Number(data.bid ?? existing.bid ?? 0);
         const newAsk = Number(data.ask ?? existing.ask ?? 0);
 
-        // Skip if nothing changed
         if (
           existing.last === newLast &&
           existing.bid === newBid &&
@@ -165,7 +161,6 @@ const useMarketStore = create((set, get) => ({
     const sym = String(symbol).toUpperCase();
     const existing = get().quotes[sym];
 
-    // Use cached quote if fresh (< 3s)
     if (existing?.timestamp && Date.now() - existing.timestamp < 3000) {
       return existing;
     }
