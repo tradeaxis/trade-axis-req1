@@ -40,8 +40,9 @@ const useMarketStore = create((set, get) => ({
             tick_size: s.tick_size,
             underlying: s.underlying,
             expiry_date: s.expiry_date,
-            timestamp: Date.now(),
-            source: s.last_update ? 'db' : 'init',
+            timestamp: s.last_update ? new Date(s.last_update).getTime() : 0,
+            source: 'db',
+            last_update: s.last_update || null,
           };
         });
 
@@ -181,8 +182,13 @@ const useMarketStore = create((set, get) => ({
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume: Number(q.volume || 0),
           display_name: q.displayName || q.display_name,
-          timestamp: Date.now(),
+          timestamp: q.timestamp
+            ? Number(q.timestamp)
+            : q.last_update
+              ? new Date(q.last_update).getTime()
+              : 0,
           source: q.source || 'api',
+          off_quotes: !!q.off_quotes,
         };
 
         set((state) => ({

@@ -141,6 +141,12 @@ class KiteStreamService {
 
       const ohlc = t.ohlc || {};
       const prevClose = Number(ohlc.close || 0);
+      
+      // Kite tick OHLC: open/high/low are TODAY's values, close is PREVIOUS DAY's close
+      const dayOpen = Number(ohlc.open || 0);
+      const dayHigh = Number(ohlc.high || 0);
+      const dayLow = Number(ohlc.low || 0);
+
       const chgVal = prevClose ? last - prevClose : 0;
       const chgPct = prevClose ? (chgVal / prevClose) * 100 : 0;
 
@@ -157,9 +163,9 @@ class KiteStreamService {
         last,
         bid,
         ask,
-        open: Number(ohlc.open || last),
-        high: Number(ohlc.high || last),
-        low: Number(ohlc.low || last),
+        open: dayOpen > 0 ? dayOpen : last,
+        high: dayHigh > 0 ? dayHigh : last,
+        low: dayLow > 0 ? dayLow : (last > 0 ? last : 0),
         prevClose: prevClose || last,
         change: parseFloat(chgVal.toFixed(2)),
         changePct: parseFloat(chgPct.toFixed(2)),

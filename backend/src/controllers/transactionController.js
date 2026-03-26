@@ -219,7 +219,11 @@ const getDeals = async (req, res) => {
       // Exit row only if closed
       if (trade.status === 'closed' && trade.close_time) {
         const exitCommission = Number(trade.sell_brokerage || 0);
+        // For partial closes, original_quantity holds the original position size
+        const originalQty = Number(trade.original_quantity || trade.quantity || 0);
+        const closedQty = Number(trade.quantity || 0);
 
+        const entryQty = Number(trade.original_quantity || trade.quantity || 0);
         allDeals.push({
           id: `exit-${trade.id}`,
           source: 'trade',
@@ -227,7 +231,9 @@ const getDeals = async (req, res) => {
           type: trade.trade_type === 'buy' ? 'sell' : 'buy',
           dealLabel: trade.trade_type === 'buy' ? 'Sell Out' : 'Buy Out',
           symbol: trade.symbol,
-          quantity: qty,
+          quantity: entryQty,
+          closed_quantity: trade.status === 'closed' ? qty : 0,
+          original_quantity: originalQty,
           price: Number(trade.close_price || 0),
           amount: Number(trade.profit || 0),
           profit: Number(trade.profit || 0),
@@ -294,6 +300,39 @@ const getDeals = async (req, res) => {
         });
       }
     });
+
+        // 3) Weekly settlements (if table exists)
+    try {
+      const { data: settlements } = await supabase
+        .from('weekly_settlements')
+        .select('*')
+        .eq('account_id', accountId)
+        .order('settlement_date', { ascending: false })
+        .limit(100);
+
+      (settlements || []).forEach((s) => {
+        if (startDate && new Date(s.settlement_date) < startDate) return;
+        allDeals.push({
+          id: `settlement-${s.id}`,
+          source: 'settlement',
+          side: 'settlement',
+          type: 'settlement',
+          dealLabel: 'Weekly Settlement',
+          symbol: s.symbol,
+          quantity: s.quantity,
+          price: s.close_price,
+          amount: Number(s.profit_loss || 0),
+          profit: Number(s.profit_loss || 0),
+          commission: Number(s.commission || 0),
+          time: s.settlement_date,
+          status: 'completed',
+          balance_before: s.balance_before,
+          balance_after: s.balance_after,
+        });
+      });
+    } catch (e) {
+      // weekly_settlements table may not exist — skip silently
+    }
 
     // Sort latest first
     allDeals.sort((a, b) => new Date(b.time) - new Date(a.time));

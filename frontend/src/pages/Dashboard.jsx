@@ -239,8 +239,8 @@ const filterByExpiry = (symbolsList) => {
     ? (lastNearExpiry - now) / (1000 * 60 * 60 * 24)
     : Infinity;
 
-  // Show next month only if within 2 days of current month's last expiry
-  const showNextMonth = daysToExpiry <= 2;
+  // Show next month only if within 5 days of current month's last expiry
+  const showNextMonth = daysToExpiry <= 5;
   const nextMonth = (nearMonth + 1) % 12;
   const nextYear = nearMonth === 11 ? nearYear + 1 : nearYear;
 
@@ -651,6 +651,7 @@ const Dashboard = () => {
         setSelectedAccount((prev) => ({
           ...prev,
           balance: payload.balance,
+          credit: payload.credit,
           equity: payload.equity,
           profit: payload.profit,
           free_margin: payload.freeMargin,
@@ -750,17 +751,31 @@ const Dashboard = () => {
   );
 
   const accountStats = useMemo(() => {
-    const balance = Number(selectedAccount?.balance || 0);
-    const credit = Number(selectedAccount?.credit || 0);
+    const balance = Number(selectedAccount?.balance || 0); // ✅ constant/manual/admin controlled
+    const credit = Number(selectedAccount?.credit || 0);   // ✅ realized closed P&L
     const margin = Number(selectedAccount?.margin || 0);
-    // Equity = balance + grossPnL - commission (commission deducted from equity)
-    const equity = balance + totalPnL - totalCommission;
-    const freeMargin = Math.max(0, equity - margin);
-    const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
     const leverage = selectedAccount?.leverage || 5;
 
-    return { balance, credit, equity, margin, freeMargin, marginLevel, leverage, totalPnL, totalCommission };
-  }, [selectedAccount, totalPnL, totalCommission]);
+    // ✅ floating pnl only from open trades
+    const pnl = (openTrades || []).reduce((sum, t) => sum + Number(t.profit || 0), 0);
+
+    // ✅ equity = balance + credit + floating pnl
+    const equity = balance + credit + pnl;
+    const freeMargin = Math.max(0, equity - margin);
+    const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
+
+    return {
+      balance,
+      credit,
+      pnl,
+      equity,
+      margin,
+      freeMargin,
+      marginLevel,
+      leverage,
+      totalCommission,
+    };
+  }, [selectedAccount, openTrades, totalCommission]);
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -1047,9 +1062,10 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
     // ── 1. Off-Quotes check: reject if price is stale > 10s ──
     const currentQ = quotes?.[selectedSymbol];
-    const hasLiveData = currentQ?.source === 'socket';
-    const quoteAge = currentQ?.timestamp ? Date.now() - currentQ.timestamp : 0;
-    if (hasLiveData && quoteAge > 10000) {
+    const quoteTs = Number(currentQ?.timestamp || 0);
+    const isOffQuotes = !quoteTs || (Date.now() - quoteTs > 10000);
+
+    if (isOffQuotes) {
       setOrderConfirmation({
         phase: 'offquotes',
         symbol: selectedSymbol,
@@ -1170,13 +1186,33 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     }
   };
   const handleCloseTrade = async (tradeId) => {
+    // Show executing overlay
+    const trade = openTrades.find(t => t.id === tradeId);
+    setOrderConfirmation({
+      phase: 'executing',
+      type: 'CLOSE',
+      symbol: trade?.symbol || '',
+    });
+
     const result = await closeTrade(tradeId, selectedAccount?.id);
     if (result.success) {
-      toast.success('Position closed');
+      setOrderConfirmation({
+        phase: 'success',
+        type: 'CLOSE',
+        symbol: trade?.symbol || '',
+        message: result.message || 'Position closed successfully',
+      });
       setExpandedTradeId(null);
       setCloseConfirmTrade(null);
+      setTimeout(() => setOrderConfirmation(null), 3000);
     } else {
-      toast.error(result.message || 'Close failed');
+      setOrderConfirmation({
+        phase: 'rejected',
+        type: 'CLOSE',
+        symbol: trade?.symbol || '',
+        message: result.message || 'Close failed',
+      });
+      setTimeout(() => setOrderConfirmation(null), 4000);
     }
   };
 
@@ -2142,7 +2178,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         <div
           className="grid px-3 py-2 text-xs font-semibold border-b shrink-0"
           style={{
-            gridTemplateColumns: '2.5fr 1fr 1fr',
+            gridTemplateColumns: '2fr 1.2fr 1.2fr',
             background: bgAlt2,
             borderColor: border,
             color: textMuted,
@@ -2203,13 +2239,17 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
               const marketOpen = isMarketOpenNow(sym.symbol);
 
-              const hasLiveData = quote?.source === 'socket';
-              const isStale = hasLiveData && quote?.timestamp && (Date.now() - quote.timestamp > 10000);
+              const quoteTs = Number(
+                quote?.timestamp ||
+                (sym?.last_update ? new Date(sym.last_update).getTime() : 0)
+              );
+              const isStale = !quoteTs || (Date.now() - quoteTs > 10000);
               void staleTick;
 
-              const bidColor = isStale ? textMuted : (marketOpen ? '#ef5350' : textMuted);
-              const askColor = isStale ? textMuted : (marketOpen ? '#26a69a' : textMuted);
-              const nameColor = isStale ? textMuted : textPrimary;
+              const staleColor = '#9aa0a6';
+              const bidColor = isStale ? staleColor : (marketOpen ? '#ef5350' : textMuted);
+              const askColor = isStale ? staleColor : (marketOpen ? '#26a69a' : textMuted);
+              const nameColor = isStale ? staleColor : textPrimary;
 
               const getMonthAbbr = (dateStr) => {
                 if (!dateStr) return '';
@@ -2272,7 +2312,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                           ({symChangePercent >= 0 ? '+' : ''}{symChangePercent.toFixed(2)}%)
                         </span>
                       </div>
-                      <div className="flex items-center gap-2" style={{ marginTop: '2px' }}>
+                      <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: '2px' }}>
                         {isStale && (
                           <span style={{ color: '#ff9800', fontSize: '10px', fontWeight: 700 }}>Off Quotes</span>
                         )}
@@ -2283,26 +2323,29 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                           <span style={{ color: '#f5c542', fontSize: '10px' }}>Lot:{sym.lot_size}</span>
                         )}
                       </div>
+                      {/* L & H on same line */}
+                      <div className="flex items-center gap-3" style={{ marginTop: '1px' }}>
+                        <span className="font-mono" style={{ fontSize: '10px', color: textMuted }}>
+                          L: <span style={{ color: '#ef5350', fontWeight: 600 }}>{symLow > 0 ? symLow.toFixed(2) : '—'}</span>
+                        </span>
+                        <span className="font-mono" style={{ fontSize: '10px', color: textMuted }}>
+                          H: <span style={{ color: '#26a69a', fontWeight: 600 }}>{symHigh > 0 ? symHigh.toFixed(2) : '—'}</span>
+                        </span>
+                      </div>
                     </div>
                   </div>
 
                   {/* Bid */}
                   <div className="text-right">
-                    <div className="font-bold font-mono" style={{ fontSize: '18px', lineHeight: '22px', color: bidColor }}>
+                    <div className="font-bold font-mono" style={{ fontSize: '15px', lineHeight: '20px', color: bidColor }}>
                       {symBid > 0 ? symBid.toFixed(2) : '—'}
-                    </div>
-                    <div className="font-mono" style={{ fontSize: '10px', lineHeight: '14px', color: textMuted, marginTop: '2px' }}>
-                      L: {symLow > 0 ? symLow.toFixed(2) : '—'}
                     </div>
                   </div>
 
                   {/* Ask */}
                   <div className="text-right">
-                    <div className="font-bold font-mono" style={{ fontSize: '18px', lineHeight: '22px', color: askColor }}>
+                    <div className="font-bold font-mono" style={{ fontSize: '15px', lineHeight: '20px', color: askColor }}>
                       {symAsk > 0 ? symAsk.toFixed(2) : '—'}
-                    </div>
-                    <div className="font-mono" style={{ fontSize: '10px', lineHeight: '14px', color: textMuted, marginTop: '2px' }}>
-                      H: {symHigh > 0 ? symHigh.toFixed(2) : '—'}
                     </div>
                   </div>
                 </div>
@@ -3588,13 +3631,13 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Credit
+              Balance
             </div>
             <div
               className="font-bold text-base"
               style={{ color: '#d1d4dc' }}
             >
-              {formatINR(accountStats.credit)}
+              {formatINR(accountStats.balance)}
             </div>
           </div>
           <div
@@ -3622,13 +3665,13 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Balance
+              Floating P&L
             </div>
             <div
               className="font-bold text-base"
-              style={{ color: '#d1d4dc' }}
+              style={{ color: accountStats.floatingPnL >= 0 ? '#26a69a' : '#ef5350' }}
             >
-              {formatINR(accountStats.equity - accountStats.credit)}
+              {accountStats.floatingPnL >= 0 ? '+' : ''}{formatINR(accountStats.floatingPnL)}
             </div>
           </div>
         </div>
@@ -3676,20 +3719,16 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Margin Lvl
+              P&L
             </div>
             <div
               className="font-semibold text-sm"
               style={{
-                color:
-                  accountStats.marginLevel > 100
-                    ? '#26a69a'
-                    : '#ef5350',
+                color: accountStats.pnl >= 0 ? '#26a69a' : '#ef5350',
               }}
             >
-              {accountStats.margin > 0
-                ? `${accountStats.marginLevel.toFixed(0)}%`
-                : '∞'}
+              {accountStats.pnl >= 0 ? '+' : ''}
+              {formatINR(accountStats.pnl)}
             </div>
           </div>
         </div>
@@ -4418,21 +4457,34 @@ const renderOrderConfirmation = () => {
                 netMap[sym] = {
                   symbol: sym, buyQty: 0, sellQty: 0, totalPnL: 0, trades: 0, lastClose: null,
                   totalBuyValue: 0, totalSellValue: 0, totalCommission: 0,
+                  buyPrice: 0, sellPrice: 0,
                 };
               }
               const q = Number(t.quantity || 0);
+              const origQty = Number(t.original_quantity || t.quantity || 0);
               const openP = Number(t.open_price || 0);
               const closeP = Number(t.close_price || 0);
               const commission = Number(t.brokerage || 0);
 
+              // For a closed trade: the trade_type tells us what was OPENED
+              // The close is the OPPOSITE action
+              // e.g., trade_type='buy' means: bought at open_price, sold at close_price
               if (t.trade_type === 'buy') {
-                netMap[sym].buyQty += q;
+                // Opened as buy → closed as sell
+                netMap[sym].buyQty += q;        // bought this many
+                netMap[sym].sellQty += q;        // sold this many (because it's closed)
                 netMap[sym].totalBuyValue += openP * q;
                 netMap[sym].totalSellValue += closeP * q;
+                netMap[sym].buyPrice = openP;    // track for display
+                netMap[sym].sellPrice = closeP;
               } else {
-                netMap[sym].sellQty += q;
+                // Opened as sell → closed as buy  
+                netMap[sym].sellQty += q;        // sold this many
+                netMap[sym].buyQty += q;          // bought back (because it's closed)
                 netMap[sym].totalSellValue += openP * q;
                 netMap[sym].totalBuyValue += closeP * q;
+                netMap[sym].sellPrice = openP;
+                netMap[sym].buyPrice = closeP;
               }
               netMap[sym].totalPnL += Number(t.profit || 0) + Number(t.brokerage || 0);
               netMap[sym].totalCommission += commission;
@@ -4476,11 +4528,11 @@ const renderOrderConfirmation = () => {
                             <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1 text-xs" style={{ color: textMuted }}>
                               <span>Buy Qty: <span style={{ color: '#26a69a', fontWeight: 600 }}>{np.buyQty}</span></span>
                               <span>Sell Qty: <span style={{ color: '#ef5350', fontWeight: 600 }}>{np.sellQty}</span></span>
-                              {avgBuyPrice > 0 && <span>Buy Avg: <span style={{ color: textPrimary }}>{formatINR(avgBuyPrice)}</span></span>}
-                              {avgSellPrice > 0 && <span>Sell Avg: <span style={{ color: textPrimary }}>{formatINR(avgSellPrice)}</span></span>}
+                              {avgBuyPrice > 0 && <span>Buy Price: <span style={{ color: textPrimary }}>{formatINR(avgBuyPrice)}</span></span>}
+                              {avgSellPrice > 0 && <span>Sell Price: <span style={{ color: textPrimary }}>{formatINR(avgSellPrice)}</span></span>}
                             </div>
                             <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: textMuted }}>
-                              <span>Net: <span style={{ color: textPrimary, fontWeight: 700 }}>{netQty}</span></span>
+                              <span>Net Qty: <span style={{ color: textPrimary, fontWeight: 700 }}>{Math.abs(np.buyQty - np.sellQty)}</span></span>
                               <span>Comm: <span style={{ color: '#f5c542' }}>{formatINR(np.totalCommission)}</span></span>
                             </div>
                             <div className="text-[11px] mt-0.5" style={{ color: textMuted }}>

@@ -150,6 +150,14 @@ exports.placeOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Symbol not found' });
     }
 
+    // Check if symbol is banned
+    if (symbolData.is_banned) {
+      return res.status(403).json({ 
+        success: false, 
+        message: `Trading is disabled for ${symbolData.symbol}. ${symbolData.ban_reason || 'Contact admin.'}` 
+      });
+    }
+
     // ════════════════════════════════════════
     //  PENDING ORDER TYPES (Buy Limit, Sell Limit, Buy Stop, Sell Stop)
     // ════════════════════════════════════════
@@ -235,18 +243,28 @@ exports.placeOrder = async (req, res) => {
     // Use live price from memory cache
     const kiteStreamService = require('../services/kiteStreamService');
     const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
+    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
+    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
 
-    let openPrice;
-    if (livePrice) {
-      openPrice = type === 'buy' ? livePrice.ask : livePrice.bid;
-    } else {
-      openPrice = type === 'buy'
-        ? parseFloat(symbolData.ask || symbolData.last_price)
-        : parseFloat(symbolData.bid || symbolData.last_price);
+    // ✅ No DB fallback for execution — only fresh Kite tick allowed
+    if (!isFreshLive) {
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: `${symbolData.symbol} is off quotes. No fresh live tick received from Kite in last 10 seconds.`,
+      });
     }
 
+    const openPrice =
+      type === 'buy'
+        ? Number(livePrice.ask || livePrice.last || 0)
+        : Number(livePrice.bid || livePrice.last || 0);
+
     if (!openPrice || openPrice <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid price. Market may be closed.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid live price from Kite.',
+      });
     }
 
     const lotSize = 1;
@@ -267,8 +285,193 @@ exports.placeOrder = async (req, res) => {
     const buyBrokerage = entryBrokerage; // "buy_brokerage" column stores entry-side brokerage regardless of direction
 
     // ════════════════════════════════════════
-    //  POSITION MERGING — Same symbol + same direction → merge
+    //  POSITION NETTING — Check for OPPOSITE direction first, then same direction
     // ════════════════════════════════════════
+    const oppositeType = type === 'buy' ? 'sell' : 'buy';
+
+    // 1) Check for OPPOSITE position (e.g., selling against existing buy = reduce/close)
+    const { data: oppositeTrades } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('account_id', accountId)
+      .eq('symbol', symbolData.symbol)
+      .eq('trade_type', oppositeType)
+      .eq('status', 'open');
+
+    if (oppositeTrades && oppositeTrades.length > 0) {
+      const existing = oppositeTrades[0];
+      const existingQty = parseFloat(existing.quantity);
+      const incomingQty = parseFloat(quantity);
+
+      // Get user brokerage for exit commission
+      const exitBrokerage = openPrice * Math.min(incomingQty, existingQty) * lotSize * brokerageRate;
+      const now = new Date().toISOString();
+
+      if (incomingQty >= existingQty) {
+        // ── FULL CLOSE (or flip) of existing opposite position ──
+        const direction = existing.trade_type === 'buy' ? 1 : -1;
+        const priceDiff = (openPrice - parseFloat(existing.open_price)) * direction;
+        const grossProfit = priceDiff * existingQty * lotSize;
+        const buyBrok = parseFloat(existing.buy_brokerage || existing.brokerage || 0);
+        const totalBrokerage = buyBrok + exitBrokerage;
+        const netProfit = grossProfit - totalBrokerage;
+
+        // Close the existing position
+        await supabase
+          .from('trades')
+          .update({
+            close_price: openPrice,
+            profit: netProfit,
+            sell_brokerage: exitBrokerage,
+            brokerage: totalBrokerage,
+            status: 'closed',
+            close_time: now,
+            updated_at: now,
+          })
+          .eq('id', existing.id);
+
+        // Update account
+        const newBalance = parseFloat(account.balance) + netProfit;
+        const freedMargin = parseFloat(existing.margin || 0);
+        const newMargin = Math.max(0, parseFloat(account.margin || 0) - freedMargin);
+        const newFreeMargin = newBalance - newMargin;
+
+        await supabase
+          .from('accounts')
+          .update({ balance: newBalance, margin: newMargin, free_margin: newFreeMargin, updated_at: now })
+          .eq('id', accountId);
+
+        const remainingQty = incomingQty - existingQty;
+
+        if (remainingQty > 0) {
+          // ── FLIP: open new position in the incoming direction with leftover qty ──
+          const flipMargin = (openPrice * remainingQty * lotSize) / leverage;
+          const flipBrokerage = openPrice * remainingQty * lotSize * brokerageRate;
+
+          const flipData = {
+            user_id: userId,
+            account_id: accountId,
+            symbol: symbolData.symbol,
+            exchange: symbolData.exchange || 'NSE',
+            trade_type: type,
+            quantity: remainingQty,
+            open_price: openPrice,
+            current_price: openPrice,
+            stop_loss: parseFloat(stopLoss) || 0,
+            take_profit: parseFloat(takeProfit) || 0,
+            margin: flipMargin,
+            brokerage: flipBrokerage,
+            buy_brokerage: flipBrokerage,
+            sell_brokerage: 0,
+            profit: -flipBrokerage,
+            status: 'open',
+            comment: `Flip from closing ${existing.id}`,
+            open_time: now,
+          };
+
+          const { data: flipTrade, error: flipErr } = await supabase
+            .from('trades')
+            .insert(flipData)
+            .select()
+            .single();
+
+          if (flipErr) throw flipErr;
+
+          // Update account margin for flip
+          const flipAccountMargin = newMargin + flipMargin;
+          await supabase
+            .from('accounts')
+            .update({ margin: flipAccountMargin, free_margin: newBalance - flipAccountMargin, updated_at: now })
+            .eq('id', accountId);
+
+          return res.json({
+            success: true,
+            data: flipTrade,
+            message: `Closed ${existingQty} ${oppositeType} and opened ${remainingQty} ${type} @ ${openPrice}`,
+          });
+        }
+
+        // Exact close — no leftover
+        return res.json({
+          success: true,
+          data: { closedTradeId: existing.id, profit: netProfit },
+          message: `Position closed. ${existingQty} ${oppositeType} closed @ ${openPrice}. P&L: ₹${netProfit.toFixed(2)}`,
+        });
+
+      } else {
+        // ── PARTIAL REDUCE of existing opposite position ──
+        const remainingQty = existingQty - incomingQty;
+
+        const direction = existing.trade_type === 'buy' ? 1 : -1;
+        const priceDiff = (openPrice - parseFloat(existing.open_price)) * direction;
+        const grossProfit = priceDiff * incomingQty * lotSize;
+        const closedBuyBrok = (parseFloat(existing.buy_brokerage || existing.brokerage || 0) / existingQty) * incomingQty;
+        const totalBrokerage = closedBuyBrok + exitBrokerage;
+        const netProfit = grossProfit - totalBrokerage;
+
+        const remainingBuyBrok = parseFloat(existing.buy_brokerage || existing.brokerage || 0) - closedBuyBrok;
+        const remainingMargin = (parseFloat(existing.margin || 0) / existingQty) * remainingQty;
+        const closedMargin = parseFloat(existing.margin || 0) - remainingMargin;
+
+        // Update existing trade (reduce quantity)
+        await supabase
+          .from('trades')
+          .update({
+            quantity: remainingQty,
+            margin: remainingMargin,
+            buy_brokerage: remainingBuyBrok,
+            brokerage: remainingBuyBrok,
+            updated_at: now,
+          })
+          .eq('id', existing.id);
+
+        // Create closed record for the partial
+        await supabase
+          .from('trades')
+          .insert({
+            user_id: userId,
+            account_id: accountId,
+            symbol: existing.symbol,
+            exchange: existing.exchange,
+            trade_type: existing.trade_type,
+            quantity: incomingQty,
+            original_quantity: existingQty,
+            open_price: parseFloat(existing.open_price),
+            close_price: openPrice,
+            current_price: openPrice,
+            stop_loss: 0,
+            take_profit: 0,
+            margin: closedMargin,
+            buy_brokerage: closedBuyBrok,
+            sell_brokerage: exitBrokerage,
+            brokerage: totalBrokerage,
+            profit: netProfit,
+            status: 'closed',
+            open_time: existing.open_time,
+            close_time: now,
+            updated_at: now,
+            comment: `Reduced by ${type} ${incomingQty}. Remaining: ${remainingQty}`,
+          });
+
+        // Update account
+        const newBalance = parseFloat(account.balance) + netProfit;
+        const newMargin = Math.max(0, parseFloat(account.margin || 0) - closedMargin);
+        const newFreeMargin = newBalance - newMargin;
+
+        await supabase
+          .from('accounts')
+          .update({ balance: newBalance, margin: newMargin, free_margin: newFreeMargin, updated_at: now })
+          .eq('id', accountId);
+
+        return res.json({
+          success: true,
+          data: { reducedFrom: existingQty, remaining: remainingQty, profit: netProfit },
+          message: `Reduced ${oppositeType} position by ${incomingQty}. Remaining: ${remainingQty}. P&L: ₹${netProfit.toFixed(2)}`,
+        });
+      }
+    }
+
+    // 2) Check for SAME direction position → merge (existing logic)
     const { data: existingTrades } = await supabase
       .from('trades')
       .select('*')
@@ -442,7 +645,7 @@ exports.closePosition = async (req, res) => {
     // Verify trade ownership
     const { data: trade, error: tradeError } = await supabase
       .from('trades')
-      .select('*, accounts!inner(user_id, balance, margin)')
+      .select('*, accounts!inner(user_id, balance, credit, margin)')
       .eq('id', tradeId)
       .eq('status', 'open')
       .single();
@@ -479,16 +682,23 @@ exports.closePosition = async (req, res) => {
     const kiteStreamService = require('../services/kiteStreamService');
     const livePrice = kiteStreamService.getPrice(trade.symbol);
 
+    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
+    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
+
+    if (!isFreshLive && !isAdminClose) {
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: `${trade.symbol} is off quotes. Cannot close without fresh live price.`,
+      });
+    }
+
     let closePrice;
-    if (livePrice) {
-      closePrice = trade.trade_type === 'buy' ? livePrice.bid : livePrice.ask;
-    } else if (symbolError || !symbolData) {
-      console.warn(`Symbol "${trade.symbol}" not found, using trade current_price`);
-      closePrice = parseFloat(trade.current_price || trade.open_price);
+    if (isFreshLive) {
+      closePrice = trade.trade_type === 'buy' ? Number(livePrice.bid || livePrice.last || 0) : Number(livePrice.ask || livePrice.last || 0);
     } else {
-      closePrice = trade.trade_type === 'buy' 
-        ? parseFloat(symbolData.bid || symbolData.ask || trade.current_price || trade.open_price) 
-        : parseFloat(symbolData.ask || symbolData.bid || trade.current_price || trade.open_price);
+      // only admin manual close can fallback
+      closePrice = parseFloat(trade.current_price || trade.open_price);
     }
     // ✅ Validate close price
     if (!closePrice || isNaN(closePrice) || closePrice <= 0) {
@@ -534,13 +744,22 @@ exports.closePosition = async (req, res) => {
 
       if (updateError) throw updateError;
 
-      const newBalance = parseFloat(trade.accounts.balance) + netProfit;
-      const newMargin = Math.max(0, parseFloat(trade.accounts.margin) - parseFloat(trade.margin || 0));
-      const newFreeMargin = newBalance - newMargin;
+      const currentBalance = parseFloat(trade.accounts.balance || 0);
+      const currentCredit = parseFloat(trade.accounts.credit || 0);
+      const newCredit = currentCredit + netProfit;
+      const newMargin = Math.max(0, parseFloat(trade.accounts.margin || 0) - parseFloat(trade.margin || 0));
+      const newEquity = currentBalance + newCredit;
+      const newFreeMargin = newEquity - newMargin;
 
       await supabase
         .from('accounts')
-        .update({ balance: newBalance, margin: newMargin, free_margin: newFreeMargin, updated_at: closeTime })
+        .update({
+          credit: newCredit,
+          equity: newEquity,
+          margin: newMargin,
+          free_margin: newFreeMargin,
+          updated_at: closeTime,
+        })
         .eq('id', accountId);
 
       res.json({
@@ -597,14 +816,23 @@ exports.closePosition = async (req, res) => {
             console.warn('Could not insert partial close record:', insertErr.message);
           }
 
-          const newBalance = parseFloat(trade.accounts.balance) + netProfit;
+          const currentBalance = parseFloat(trade.accounts.balance || 0);
+          const currentCredit = parseFloat(trade.accounts.credit || 0);
+          const newCredit = currentCredit + netProfit;
           const closedMargin = (parseFloat(trade.margin || 0) / tradeQuantity) * quantityToClose;
-          const newMargin = Math.max(0, parseFloat(trade.accounts.margin) - closedMargin);
-          const newFreeMargin = newBalance - newMargin;
+          const newMargin = Math.max(0, parseFloat(trade.accounts.margin || 0) - closedMargin);
+          const newEquity = currentBalance + newCredit;
+          const newFreeMargin = newEquity - newMargin;
 
           await supabase
             .from('accounts')
-            .update({ balance: newBalance, margin: newMargin, free_margin: newFreeMargin, updated_at: closeTime })
+            .update({
+              credit: newCredit,
+              equity: newEquity,
+              margin: newMargin,
+              free_margin: newFreeMargin,
+              updated_at: closeTime,
+            })
             .eq('id', accountId);
 
           res.json({
@@ -797,11 +1025,21 @@ exports.closeAllPositions = async (req, res) => {
         .eq('id', trade.id);
     }
 
-    const newBalance = parseFloat(account.balance) + totalProfit;
-    const newMargin = Math.max(0, parseFloat(account.margin) - totalMarginFreed);
+    const currentBalance = parseFloat(account.balance || 0);
+    const currentCredit = parseFloat(account.credit || 0);
+    const newCredit = currentCredit + totalProfit;
+    const newMargin = Math.max(0, parseFloat(account.margin || 0) - totalMarginFreed);
+    const newEquity = currentBalance + newCredit;
+
     await supabase
       .from('accounts')
-      .update({ balance: newBalance, margin: newMargin, free_margin: newBalance - newMargin, updated_at: closeTime })
+      .update({
+        credit: newCredit,
+        equity: newEquity,
+        margin: newMargin,
+        free_margin: newEquity - newMargin,
+        updated_at: closeTime,
+      })
       .eq('id', accountId);
 
     res.json({
@@ -1155,24 +1393,21 @@ exports.addQuantity = async (req, res) => {
     }
 
     // Get current market price
-    const { data: symbolRows } = await supabase
-      .from('symbols')
-      .select('bid, ask, last_price')
-      .eq('symbol', trade.symbol)
-      .limit(1);
+    const livePrice = kiteStreamService.getPrice(trade.symbol);
+    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
+    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
 
-    const symbolData = symbolRows?.[0];
-    if (!symbolData) {
-      return res.status(400).json({
+    if (!isFreshLive) {
+      return res.status(409).json({
         success: false,
-        message: `Market data unavailable for ${trade.symbol}`,
+        code: 'OFF_QUOTES',
+        message: `${trade.symbol} is off quotes. Cannot add quantity without fresh live tick.`,
       });
     }
 
-    // New fill price (same logic as opening — buy at ask, sell at bid)
     const addPrice = trade.trade_type === 'buy'
-      ? parseFloat(symbolData.ask || symbolData.last_price)
-      : parseFloat(symbolData.bid || symbolData.last_price);
+      ? Number(livePrice.ask || livePrice.last || 0)
+      : Number(livePrice.bid || livePrice.last || 0);
 
     if (!addPrice || addPrice <= 0) {
       return res.status(400).json({

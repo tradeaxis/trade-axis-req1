@@ -255,14 +255,18 @@ class TradingService {
         .single();
 
       if (account) {
-        const newBalance = parseFloat(account.balance) + netProfit;
-        const newMargin = Math.max(0, parseFloat(account.margin) - parseFloat(trade.margin || 0));
-        const newFreeMargin = newBalance - newMargin;
+        const currentBalance = parseFloat(account.balance || 0);
+        const currentCredit = parseFloat(account.credit || 0);
+        const newCredit = currentCredit + netProfit;
+        const newMargin = Math.max(0, parseFloat(account.margin || 0) - parseFloat(trade.margin || 0));
+        const newEquity = currentBalance + newCredit;
+        const newFreeMargin = newEquity - newMargin;
 
         await supabase
           .from('accounts')
           .update({
-            balance: newBalance,
+            credit: newCredit,
+            equity: newEquity,
             margin: newMargin,
             free_margin: newFreeMargin,
             updated_at: closeTime,
@@ -369,14 +373,18 @@ class TradingService {
         .single();
 
       if (account) {
-        const newBalance = parseFloat(account.balance) + netClosedProfit;
-        const newMargin = Math.max(0, parseFloat(account.margin) - closedMargin);
-        const newFreeMargin = newBalance - newMargin;
+        const currentBalance = parseFloat(account.balance || 0);
+        const currentCredit = parseFloat(account.credit || 0);
+        const newCredit = currentCredit + netClosedProfit;
+        const newMargin = Math.max(0, parseFloat(account.margin || 0) - closedMargin);
+        const newEquity = currentBalance + newCredit;
+        const newFreeMargin = newEquity - newMargin;
 
         await supabase
           .from('accounts')
           .update({
-            balance: newBalance,
+            credit: newCredit,
+            equity: newEquity,
             margin: newMargin,
             free_margin: newFreeMargin,
             updated_at: closeTime,

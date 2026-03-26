@@ -456,8 +456,10 @@ exports.addBalanceToAccount = async (req, res) => {
       });
     }
 
-    const newBalance = currentBalance + parseFloat(amount); // amount is negative for reductions
-    const newEquity = parseFloat(account.equity || 0) + parseFloat(amount);
+    const currentCredit = parseFloat(account.credit || 0);
+    const currentProfit = parseFloat(account.profit || 0);
+    const newBalance = currentBalance + parseFloat(amount); // admin-controlled only
+    const newEquity = newBalance + currentCredit + currentProfit;
     const newFreeMargin = newEquity - parseFloat(account.margin || 0);
 
     const { error: updateError } = await supabase
@@ -882,17 +884,20 @@ exports.kiteStatus = async (req, res) => {
 // ============ MARKET HOLIDAY TOGGLE ============
 exports.setMarketHoliday = async (req, res) => {
   try {
-    const { isHoliday, message } = req.body;
+    const { isHoliday, message, date } = req.body;
     const marketStatus = require('../services/marketStatus');
 
-    if (typeof marketStatus.setHoliday !== 'function' || typeof marketStatus.getHolidayStatus !== 'function') {
+    if (
+      typeof marketStatus.setHoliday !== 'function' ||
+      typeof marketStatus.getHolidayStatus !== 'function'
+    ) {
       return res.status(500).json({
         success: false,
         message: 'marketStatus service is misconfigured',
       });
     }
 
-    marketStatus.setHoliday(!!isHoliday, message || '');
+    marketStatus.setHoliday(!!isHoliday, message || '', date || null);
 
     const status = marketStatus.getHolidayStatus();
     res.json({
@@ -1015,15 +1020,32 @@ exports.adminClosePosition = async (req, res) => {
     if (updateError) throw updateError;
 
     // Update account
-    const newBalance = parseFloat(trade.accounts.balance) + netProfit;
-    const newMargin = Math.max(0, parseFloat(trade.accounts.margin) - parseFloat(trade.margin || 0));
+    const currentBalance = parseFloat(trade.accounts.balance || 0);
+    const newMargin = Math.max(
+      0,
+      parseFloat(trade.accounts.margin || 0) - parseFloat(trade.margin || 0)
+    );
+
+    const { data: remainingTrades } = await supabase
+      .from('trades')
+      .select('profit')
+      .eq('account_id', trade.account_id)
+      .eq('status', 'open')
+      .neq('id', tradeId);
+
+    const remainingPnL = (remainingTrades || []).reduce(
+      (sum, t) => sum + Number(t.profit || 0),
+      0
+    );
+
+    const newEquity = currentBalance + remainingPnL;
 
     await supabase
       .from('accounts')
       .update({
-        balance: newBalance,
+        equity: newEquity,
         margin: newMargin,
-        free_margin: newBalance - newMargin,
+        free_margin: newEquity - newMargin,
         updated_at: closeTime,
       })
       .eq('id', trade.account_id);
@@ -1073,6 +1095,210 @@ exports.getAllOpenPositions = async (req, res) => {
     res.json({ success: true, data: enriched });
   } catch (error) {
     console.error('getAllOpenPositions error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ GET OPEN POSITIONS OF SPECIFIC USER ============
+exports.getUserOpenPositions = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('id, login_id, first_name, last_name')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const { data: trades, error } = await supabase
+      .from('trades')
+      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time')
+      .eq('status', 'open')
+      .eq('user_id', userId)
+      .order('open_time', { ascending: false });
+
+    if (error) throw error;
+
+    const enriched = (trades || []).map((t) => ({
+      ...t,
+      user_login_id: user.login_id || '—',
+      user_name: `${user.first_name || ''} ${user.last_name || ''}`.trim(),
+    }));
+
+    res.json({ success: true, user, data: enriched });
+  } catch (error) {
+    console.error('getUserOpenPositions error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ CLOSE ALL OPEN POSITIONS OF SPECIFIC USER ============
+exports.adminCloseAllUserPositions = async (req, res) => {
+  try {
+    const { userId, closePrice: manualPrice, reason } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('id, login_id')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const { data: trades, error: tradesErr } = await supabase
+      .from('trades')
+      .select('*, accounts!inner(user_id, balance, margin)')
+      .eq('status', 'open')
+      .eq('user_id', userId);
+
+    if (tradesErr) throw tradesErr;
+
+    if (!trades || trades.length === 0) {
+      return res.status(400).json({ success: false, message: 'No open positions for selected user' });
+    }
+
+    let closedCount = 0;
+
+    for (const trade of trades) {
+      try {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('brokerage_rate')
+          .eq('id', trade.user_id)
+          .single();
+
+        const brokerageRate = userData?.brokerage_rate || 0.0003;
+
+        let closePrice;
+        if (manualPrice && Number(manualPrice) > 0) {
+          closePrice = Number(manualPrice);
+        } else {
+          const livePrice = kiteStreamService.getPrice(trade.symbol);
+          if (livePrice?.timestamp && Date.now() - livePrice.timestamp <= 10000) {
+            closePrice =
+              trade.trade_type === 'buy'
+                ? Number(livePrice.bid || livePrice.last || 0)
+                : Number(livePrice.ask || livePrice.last || 0);
+          } else {
+            closePrice = Number(trade.current_price || trade.open_price || 0);
+          }
+        }
+
+        if (!closePrice || closePrice <= 0) continue;
+
+        const tradeQuantity = Number(trade.quantity || 0);
+        const direction = trade.trade_type === 'buy' ? 1 : -1;
+        const priceDiff = (closePrice - Number(trade.open_price || 0)) * direction;
+        const grossProfit = priceDiff * tradeQuantity;
+
+        const sellBrokerage = closePrice * tradeQuantity * brokerageRate;
+        const buyBrokerage = Number(trade.buy_brokerage || trade.brokerage || 0);
+        const totalBrokerage = buyBrokerage + sellBrokerage;
+        const netProfit = grossProfit - totalBrokerage;
+
+        const closeTime = new Date().toISOString();
+
+        await supabase
+          .from('trades')
+          .update({
+            close_price: closePrice,
+            profit: netProfit,
+            sell_brokerage: sellBrokerage,
+            brokerage: totalBrokerage,
+            status: 'closed',
+            close_time: closeTime,
+            updated_at: closeTime,
+            comment: `Admin close all: ${reason || 'Manual close by admin'}`,
+          })
+          .eq('id', trade.id);
+
+        const currentBalance = Number(trade.accounts.balance || 0);
+        const newMargin = Math.max(
+          0,
+          Number(trade.accounts.margin || 0) - Number(trade.margin || 0)
+        );
+
+        const { data: remainingTrades } = await supabase
+          .from('trades')
+          .select('profit')
+          .eq('account_id', trade.account_id)
+          .eq('status', 'open')
+          .neq('id', trade.id);
+
+        const remainingPnL = (remainingTrades || []).reduce(
+          (sum, t) => sum + Number(t.profit || 0),
+          0
+        );
+
+        const newEquity = currentBalance + remainingPnL;
+
+        await supabase
+          .from('accounts')
+          .update({
+            equity: newEquity,
+            margin: newMargin,
+            free_margin: newEquity - newMargin,
+            updated_at: closeTime,
+          })
+          .eq('id', trade.account_id);
+
+        closedCount++;
+      } catch (innerErr) {
+        console.error('adminCloseAllUserPositions trade close error:', innerErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      closedCount,
+      message: `Closed ${closedCount} position(s) for ${user.login_id}`,
+    });
+  } catch (error) {
+    console.error('adminCloseAllUserPositions error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ ADMIN SCRIPT BAN ============
+exports.toggleSymbolBan = async (req, res) => {
+  try {
+    const { symbol, isBanned, reason } = req.body;
+    
+    if (!symbol) {
+      return res.status(400).json({ success: false, message: 'Symbol is required' });
+    }
+
+    const { error } = await supabase
+      .from('symbols')
+      .update({ 
+        is_banned: !!isBanned, 
+        ban_reason: reason || '',
+        updated_at: new Date().toISOString() 
+      })
+      .eq('symbol', symbol.toUpperCase());
+
+    if (error) throw error;
+
+    res.json({ 
+      success: true, 
+      message: `${symbol} ${isBanned ? 'BANNED' : 'UNBANNED'} for trading` 
+    });
+  } catch (error) {
+    console.error('toggleSymbolBan error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

@@ -19,7 +19,10 @@ router.post('/users/:id/add-balance', adminAuth, adminController.addBalanceToAcc
 router.delete('/users/:id', adminAuth, adminController.deleteUser);
 
 // ✅ Open positions for admin manual close
+// ✅ Open positions for admin manual close
 router.get('/open-positions', adminAuth, adminController.getAllOpenPositions);
+router.get('/users/:userId/open-positions', adminAuth, adminController.getUserOpenPositions);
+router.post('/users/close-all-positions', adminAuth, adminController.adminCloseAllUserPositions);
 
 // ================= WITHDRAWAL ROUTES =================
 router.get('/withdrawals', adminAuth, adminController.listWithdrawals);
@@ -38,5 +41,6 @@ router.get('/kite/status', adminAuth, adminController.kiteStatus);
 router.get('/market-holiday', adminAuth, adminController.getMarketHoliday);
 router.post('/market-holiday', adminAuth, adminController.setMarketHoliday);
 router.post('/close-position', adminAuth, adminController.adminClosePosition);
+router.post('/symbol-ban', adminAuth, adminController.toggleSymbolBan);
 
 module.exports = router;

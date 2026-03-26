@@ -183,7 +183,7 @@ class SocketHandler {
         // 1. Single query for all open trades
         const { data: openTrades, error } = await supabase
           .from('trades')
-          .select('*, accounts!inner(user_id, balance, margin)')
+          .select('*, accounts!inner(user_id, balance, credit, margin)')
           .eq('status', 'open');
 
         if (error || !openTrades || openTrades.length === 0) return;
@@ -258,6 +258,7 @@ class SocketHandler {
             accountPnL[trade.account_id] = {
               userId: trade.accounts.user_id,
               balance: parseFloat(trade.accounts.balance || 0),
+              credit: parseFloat(trade.accounts.credit || 0),
               margin: parseFloat(trade.accounts.margin || 0),
               totalPnL: 0,
               trades: [],
@@ -331,12 +332,13 @@ class SocketHandler {
 
         // 7. Emit account updates
         for (const [accountId, d] of Object.entries(accountPnL)) {
-          const equity = d.balance + d.totalPnL;
+          const equity = d.balance + d.credit + d.totalPnL;
           const freeMargin = equity - d.margin;
           const marginLevel = d.margin > 0 ? (equity / d.margin) * 100 : 0;
           const payload = {
             accountId,
             balance: d.balance,
+            credit: d.credit,
             equity,
             profit: d.totalPnL,
             freeMargin,
@@ -365,7 +367,11 @@ class SocketHandler {
               const eq = d.balance + d.totalPnL;
               return supabase
                 .from('accounts')
-                .update({ profit: d.totalPnL, equity: eq, free_margin: eq - d.margin })
+                .update({
+                  profit: d.totalPnL,
+                  equity: eq,
+                  free_margin: eq - d.margin,
+                })
                 .eq('id', id);
             })
           ).catch((e) => console.error('P&L account DB err:', e.message));
@@ -446,7 +452,7 @@ class SocketHandler {
       });
 
       for (const [accountId, d] of Object.entries(accountPnL)) {
-        const equity = d.balance + d.totalPnL;
+        const equity = d.balance + d.credit + d.totalPnL;
         const margin = d.margin;
 
         // No margin used — no stop-out possible
