@@ -72,7 +72,7 @@ export default function AdminKiteSetup() {
 
     setLoading((prev) => ({ ...prev, setToken: true }));
     try {
-      const res = await api.post('/admin/kite/session', {
+      const res = await api.post('/admin/kite/create-session', {
         requestToken: requestToken.trim(),
       });
 
@@ -433,7 +433,7 @@ export default function AdminKiteSetup() {
             </p>
             <ul className="list-disc list-inside space-y-1">
               <li>Kite stream provides real-time bid/ask prices</li>
-              <li>When stream is not running, simulated prices are used</li>
+              <li>When stream is not running, prices will not update live and symbols may go off quotes</li>
               <li>P&L calculations use the latest prices from the database</li>
               <li>Sync symbols weekly to get new futures contracts</li>
             </ul>
