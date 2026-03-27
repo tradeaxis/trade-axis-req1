@@ -240,30 +240,40 @@ exports.placeOrder = async (req, res) => {
     //  MARKET ORDER EXECUTION
     // ════════════════════════════════════════
 
-    // Use live price from memory cache
-    const kiteStreamService = require('../services/kiteStreamService');
+    // Use live price from memory cache, with DB fallback
     const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
     const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
+    const isFreshLive = !!livePrice && livePrice.last > 0 && liveAgeMs <= 120000; // 2 minutes
 
-    // ✅ No DB fallback for execution — only fresh Kite tick allowed
-    if (!isFreshLive) {
-      return res.status(409).json({
-        success: false,
-        code: 'OFF_QUOTES',
-        message: `${symbolData.symbol} is off quotes. No fresh live tick received from Kite in last 10 seconds.`,
-      });
-    }
+    let openPrice;
 
-    const openPrice =
-      type === 'buy'
+    if (isFreshLive) {
+      // Use live Kite price
+      openPrice = type === 'buy'
         ? Number(livePrice.ask || livePrice.last || 0)
         : Number(livePrice.bid || livePrice.last || 0);
+    } else {
+      // Fallback to DB price (flushed every 5s from Kite stream)
+      const dbBid = Number(symbolData.bid || symbolData.last_price || 0);
+      const dbAsk = Number(symbolData.ask || symbolData.last_price || 0);
+      openPrice = type === 'buy' ? dbAsk : dbBid;
+
+      // If DB price is also zero/missing, reject
+      if (!openPrice || openPrice <= 0) {
+        return res.status(409).json({
+          success: false,
+          code: 'OFF_QUOTES',
+          message: `${symbolData.symbol} is off quotes. No price available. Please try again.`,
+        });
+      }
+
+      console.log(`⚠️ Using DB price for ${symbolData.symbol}: ${openPrice} (live tick age: ${Math.round(liveAgeMs / 1000)}s)`);
+    }
 
     if (!openPrice || openPrice <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid live price from Kite.',
+        message: 'Invalid price. Market may be closed.',
       });
     }
 
@@ -683,22 +693,29 @@ exports.closePosition = async (req, res) => {
     const livePrice = kiteStreamService.getPrice(trade.symbol);
 
     const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
-
-    if (!isFreshLive && !isAdminClose) {
-      return res.status(409).json({
-        success: false,
-        code: 'OFF_QUOTES',
-        message: `${trade.symbol} is off quotes. Cannot close without fresh live price.`,
-      });
-    }
+    const isFreshLive = !!livePrice && livePrice.last > 0 && liveAgeMs <= 120000;
 
     let closePrice;
     if (isFreshLive) {
-      closePrice = trade.trade_type === 'buy' ? Number(livePrice.bid || livePrice.last || 0) : Number(livePrice.ask || livePrice.last || 0);
+      closePrice = trade.trade_type === 'buy'
+        ? Number(livePrice.bid || livePrice.last || 0)
+        : Number(livePrice.ask || livePrice.last || 0);
+    } else if (symbolData) {
+      // Fallback to DB price
+      closePrice = trade.trade_type === 'buy'
+        ? parseFloat(symbolData.bid || symbolData.ask || trade.current_price || trade.open_price)
+        : parseFloat(symbolData.ask || symbolData.bid || trade.current_price || trade.open_price);
+      console.log(`⚠️ Close using DB price for ${trade.symbol}: ${closePrice}`);
     } else {
-      // only admin manual close can fallback
       closePrice = parseFloat(trade.current_price || trade.open_price);
+    }
+
+    if ((!closePrice || isNaN(closePrice) || closePrice <= 0) && !isAdminClose) {
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: `${trade.symbol} is off quotes. Cannot close without valid price.`,
+      });
     }
     // ✅ Validate close price
     if (!closePrice || isNaN(closePrice) || closePrice <= 0) {
@@ -1392,27 +1409,36 @@ exports.addQuantity = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
-    // Get current market price
+    // Get current market price — live first, DB fallback
     const livePrice = kiteStreamService.getPrice(trade.symbol);
     const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-    const isFreshLive = !!livePrice && liveAgeMs <= 10000;
+    const isFreshLive = !!livePrice && livePrice.last > 0 && liveAgeMs <= 120000;
 
-    if (!isFreshLive) {
+    let addPrice;
+    if (isFreshLive) {
+      addPrice = trade.trade_type === 'buy'
+        ? Number(livePrice.ask || livePrice.last || 0)
+        : Number(livePrice.bid || livePrice.last || 0);
+    } else {
+      // Fallback to DB
+      const { data: symRows } = await supabase
+        .from('symbols')
+        .select('bid, ask, last_price')
+        .eq('symbol', trade.symbol)
+        .limit(1);
+      const symData = symRows?.[0];
+      if (symData) {
+        addPrice = trade.trade_type === 'buy'
+          ? Number(symData.ask || symData.last_price || 0)
+          : Number(symData.bid || symData.last_price || 0);
+      }
+    }
+
+    if (!addPrice || addPrice <= 0) {
       return res.status(409).json({
         success: false,
         code: 'OFF_QUOTES',
-        message: `${trade.symbol} is off quotes. Cannot add quantity without fresh live tick.`,
-      });
-    }
-
-    const addPrice = trade.trade_type === 'buy'
-      ? Number(livePrice.ask || livePrice.last || 0)
-      : Number(livePrice.bid || livePrice.last || 0);
-
-    if (!addPrice || addPrice <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid price. Market may be closed.',
+        message: `${trade.symbol} is off quotes. Cannot add quantity without valid price.`,
       });
     }
 

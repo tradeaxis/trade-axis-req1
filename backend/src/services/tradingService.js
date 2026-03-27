@@ -207,21 +207,33 @@ class TradingService {
   // Close position
   async closePosition(trade) {
     try {
-      // Get current price
-      const { data: symbolData, error: symbolError } = await supabase
-        .from('symbols')
-        .select('bid, ask, lot_size')
-        .eq('symbol', trade.symbol)
-        .single();
+      // ✅ Use live price from memory cache first, DB fallback
+      const kiteStreamService = require('./kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(trade.symbol);
 
-      if (symbolError || !symbolData) {
-        return { success: false, message: 'Failed to get current price' };
+      let closePrice;
+
+      if (livePrice && livePrice.last > 0) {
+        // Use live Kite price
+        closePrice = trade.trade_type === 'buy'
+          ? Number(livePrice.bid || livePrice.last || 0)
+          : Number(livePrice.ask || livePrice.last || 0);
+      } else {
+        // Fallback to DB
+        const { data: symbolData, error: symbolError } = await supabase
+          .from('symbols')
+          .select('bid, ask, lot_size')
+          .eq('symbol', trade.symbol)
+          .single();
+
+        if (symbolError || !symbolData) {
+          return { success: false, message: 'Failed to get current price' };
+        }
+
+        closePrice = trade.trade_type === 'buy'
+          ? parseFloat(symbolData.bid || symbolData.ask || 0)
+          : parseFloat(symbolData.ask || symbolData.bid || 0);
       }
-
-      // Close price is bid for buy, ask for sell
-      const closePrice = trade.trade_type === 'buy' 
-        ? parseFloat(symbolData.bid) 
-        : parseFloat(symbolData.ask);
 
       // Calculate P&L
       const direction = trade.trade_type === 'buy' ? 1 : -1;

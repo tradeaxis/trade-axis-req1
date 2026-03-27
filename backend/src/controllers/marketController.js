@@ -120,26 +120,26 @@ exports.getQuote = async (req, res) => {
     }
 
     const live = kiteStreamService.getPrice(sym);
-    const isFreshLive = !!live && live.timestamp && (Date.now() - live.timestamp <= 10000);
+    const hasLive = !!live && live.last > 0;
 
     const quote = {
       ...dbSym,
-      last_price: isFreshLive ? live.last : dbSym.last_price,
-      bid: isFreshLive ? live.bid : dbSym.bid || dbSym.last_price,
-      ask: isFreshLive ? live.ask : dbSym.ask || dbSym.last_price,
-      open_price: isFreshLive ? live.open : dbSym.open_price,
-      high_price: isFreshLive ? live.high : dbSym.high_price,
-      low_price: isFreshLive ? live.low : dbSym.low_price,
-      change_value: isFreshLive ? live.change : dbSym.change_value,
-      change_percent: isFreshLive ? live.changePct : dbSym.change_percent,
-      timestamp: isFreshLive ? live.timestamp : (dbSym.last_update ? new Date(dbSym.last_update).getTime() : 0),
-      off_quotes: !isFreshLive,
+      last_price: hasLive ? live.last : Number(dbSym.last_price || 0),
+      bid: hasLive ? live.bid : Number(dbSym.bid || dbSym.last_price || 0),
+      ask: hasLive ? live.ask : Number(dbSym.ask || dbSym.last_price || 0),
+      open_price: hasLive ? live.open : Number(dbSym.open_price || 0),
+      high_price: hasLive ? live.high : Number(dbSym.high_price || 0),
+      low_price: hasLive ? live.low : Number(dbSym.low_price || 0),
+      change_value: hasLive ? live.change : Number(dbSym.change_value || 0),
+      change_percent: hasLive ? live.changePct : Number(dbSym.change_percent || 0),
+      timestamp: Date.now(),
+      off_quotes: false,
     };
 
     res.json({
       success: true,
       quote,
-      source: isFreshLive ? 'kite_live' : 'database',
+      source: hasLive ? 'kite_live' : 'database',
     });
   } catch (error) {
     console.error('getQuote error:', error);

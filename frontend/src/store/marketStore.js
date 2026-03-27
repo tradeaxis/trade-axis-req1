@@ -19,6 +19,7 @@ const useMarketStore = create((set, get) => ({
 
       if (res.data.success) {
         const symbols = res.data.symbols || [];
+        const now = Date.now();
 
         const quotes = {};
         symbols.forEach((s) => {
@@ -40,7 +41,7 @@ const useMarketStore = create((set, get) => ({
             tick_size: s.tick_size,
             underlying: s.underlying,
             expiry_date: s.expiry_date,
-            timestamp: s.last_update ? new Date(s.last_update).getTime() : 0,
+            timestamp: now,
             source: 'db',
             last_update: s.last_update || null,
           };
@@ -68,6 +69,8 @@ const useMarketStore = create((set, get) => ({
   updatePrice: (data) => {
     if (!data) return;
 
+    const now = Date.now();
+
     if (Array.isArray(data)) {
       if (data.length === 0) return;
 
@@ -84,10 +87,13 @@ const useMarketStore = create((set, get) => ({
           const newBid = Number(item.bid ?? existing.bid ?? 0);
           const newAsk = Number(item.ask ?? existing.ask ?? 0);
 
+          // Skip if nothing changed AND we already have a recent timestamp
           if (
             existing.last === newLast &&
             existing.bid === newBid &&
-            existing.ask === newAsk
+            existing.ask === newAsk &&
+            existing.timestamp &&
+            (now - existing.timestamp < 60000)
           ) {
             continue;
           }
@@ -105,7 +111,7 @@ const useMarketStore = create((set, get) => ({
             change: Number(item.change ?? item.change_value ?? existing.change ?? 0),
             change_percent: Number(item.changePercent ?? item.change_percent ?? existing.change_percent ?? 0),
             volume: Number(item.volume ?? existing.volume ?? 0),
-            timestamp: item.timestamp || Date.now(),
+            timestamp: now,
             source: item.source || 'socket',
           };
         }
@@ -128,7 +134,9 @@ const useMarketStore = create((set, get) => ({
         if (
           existing.last === newLast &&
           existing.bid === newBid &&
-          existing.ask === newAsk
+          existing.ask === newAsk &&
+          existing.timestamp &&
+          (now - existing.timestamp < 60000)
         ) {
           return {};
         }
@@ -145,7 +153,7 @@ const useMarketStore = create((set, get) => ({
           change: Number(data.change ?? data.change_value ?? existing.change ?? 0),
           change_percent: Number(data.changePercent ?? data.change_percent ?? existing.change_percent ?? 0),
           volume: Number(data.volume ?? existing.volume ?? 0),
-          timestamp: data.timestamp || Date.now(),
+          timestamp: now,
           source: data.source || 'socket',
         };
 
@@ -162,7 +170,7 @@ const useMarketStore = create((set, get) => ({
     const sym = String(symbol).toUpperCase();
     const existing = get().quotes[sym];
 
-    if (existing?.timestamp && Date.now() - existing.timestamp < 3000) {
+    if (existing?.timestamp && Date.now() - existing.timestamp < 5000) {
       return existing;
     }
 
@@ -182,13 +190,9 @@ const useMarketStore = create((set, get) => ({
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume: Number(q.volume || 0),
           display_name: q.displayName || q.display_name,
-          timestamp: q.timestamp
-            ? Number(q.timestamp)
-            : q.last_update
-              ? new Date(q.last_update).getTime()
-              : 0,
+          timestamp: Date.now(),
           source: q.source || 'api',
-          off_quotes: !!q.off_quotes,
+          off_quotes: false,
         };
 
         set((state) => ({

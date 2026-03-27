@@ -517,9 +517,10 @@ const Dashboard = () => {
     try {
       const res = await api.get('/market/symbols', { params: { limit: 5000 } });
       if (res.data.success && res.data.symbols) {
-        setAllFuturesSymbols(res.data.symbols);
+        const syms = res.data.symbols;
+        setAllFuturesSymbols(syms);
         setSymbolsLoaded(true);
-        console.log(`📊 Loaded ${res.data.symbols.length} symbols`);
+        console.log(`📊 Loaded ${syms.length} symbols`);
       }
     } catch (error) {
       console.error('Failed to fetch symbols:', error);
@@ -621,7 +622,12 @@ const Dashboard = () => {
       setUnreadCount((c) => c + 1);
     };
 
-    const onPrice = (data) => updatePrice(data);
+    const onPrice = (data) => {
+      if (data?.symbol) {
+        console.log('📡 Price tick:', data.symbol, 'bid:', data.bid, 'ask:', data.ask, 'last:', data.last);
+      }
+      updatePrice(data);
+    };
 
     const onConnected = (payload) => {
       pushMessage({
@@ -689,10 +695,15 @@ const Dashboard = () => {
     socketService.subscribe('account:update', onAccountUpdate);
     socketService.subscribe('trade:closed', onTradeClosed);
 
+    // ✅ Subscribe watchlist symbols + selected symbol + all open trade symbols
+    const tradeSymbols = (openTrades || []).map(t => t.symbol).filter(Boolean);
     const subs = Array.from(
-      new Set([...(activeSymbols || []), selectedSymbol].filter(Boolean))
+      new Set([...(activeSymbols || []), selectedSymbol, ...tradeSymbols].filter(Boolean))
     );
-    if (subs.length) socketService.subscribeSymbols(subs);
+    if (subs.length) {
+      console.log('📡 Subscribing to', subs.length, 'symbols:', subs.slice(0, 10).join(', '), subs.length > 10 ? '...' : '');
+      socketService.subscribeSymbols(subs);
+    }
     if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
 
     return () => {
@@ -704,7 +715,7 @@ const Dashboard = () => {
       socketService.unsubscribe('account:update');
       socketService.unsubscribe('trade:closed');
     };
-  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory]);
+  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory, openTrades, selectedSymbol]);
 
   useEffect(() => {
     return () => {
@@ -1060,10 +1071,21 @@ const Dashboard = () => {
 const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
     if (!selectedAccount?.id || !selectedSymbol) return;
 
-    // ── 1. Off-Quotes check: reject if price is stale > 10s ──
-    const currentQ = quotes?.[selectedSymbol];
+    // ── 1. Off-Quotes check ──
+    // Try to get a fresh quote first
+    let currentQ = quotes?.[selectedSymbol];
+    if (!currentQ || !currentQ.timestamp || (Date.now() - currentQ.timestamp > 30000)) {
+      // Fetch fresh quote from server
+      try {
+        await getQuote(selectedSymbol);
+        currentQ = useMarketStore.getState().quotes?.[selectedSymbol];
+      } catch (e) {
+        // ignore, use what we have
+      }
+    }
     const quoteTs = Number(currentQ?.timestamp || 0);
-    const isOffQuotes = !quoteTs || (Date.now() - quoteTs > 10000);
+    const hasPriceData = currentQ && (Number(currentQ.bid) > 0 || Number(currentQ.ask) > 0 || Number(currentQ.last) > 0);
+    const isOffQuotes = !hasPriceData;
 
     if (isOffQuotes) {
       setOrderConfirmation({
@@ -2239,11 +2261,13 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
               const marketOpen = isMarketOpenNow(sym.symbol);
 
-              const quoteTs = Number(
-                quote?.timestamp ||
-                (sym?.last_update ? new Date(sym.last_update).getTime() : 0)
-              );
-              const isStale = !quoteTs || (Date.now() - quoteTs > 10000);
+              const quoteTs = Number(quote?.timestamp || 0);
+              // Show "Off Quotes" only if:
+              // 1. Market is open
+              // 2. Symbol is in the active watchlist (user expects live data)
+              // 3. Quote timestamp is older than 60 seconds
+              const isSubscribed = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
+              const isStale = marketOpen && isSubscribed && quoteTs > 0 && (Date.now() - quoteTs > 60000);
               void staleTick;
 
               const staleColor = '#9aa0a6';
