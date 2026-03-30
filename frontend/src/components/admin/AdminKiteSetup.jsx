@@ -80,16 +80,20 @@ export default function AdminKiteSetup() {
         toast.success('Kite session created successfully!');
         setRequestToken('');
         setLoginUrl('');
-        fetchStatus();
 
-        // Auto-start stream
-        try {
-          await api.post('/admin/kite/start-stream');
-          toast.success('Kite stream started!');
-          fetchStatus();
-        } catch (streamError) {
-          toast.error('Session created but stream failed to start');
+        // Show stream status from the response (backend already restarted it)
+        if (res.data.stream?.started) {
+          toast.success(`Stream started with ${res.data.stream.tokens} symbols`);
+        } else if (res.data.stream) {
+          toast.error(`Stream issue: ${res.data.stream.reason || 'unknown'}`);
         }
+
+        if (res.data.sync?.success && res.data.sync?.upserted > 0) {
+          toast.success(`Synced ${res.data.sync.upserted} instruments`);
+        }
+
+        // DON'T call start-stream separately — backend already did it in create-session
+        fetchStatus();
       } else {
         toast.error(res.data.message);
       }

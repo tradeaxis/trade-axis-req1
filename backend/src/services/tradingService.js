@@ -430,17 +430,21 @@ class TradingService {
       if (error || !orders || orders.length === 0) return;
 
       for (const order of orders) {
-        // ── AUTO-CANCEL when market is closed for this symbol ──
-        if (!isMarketOpen(order.symbol)) {
+        // ── AUTO-EXPIRE when market is closed for this symbol/segment ──
+        if (!isMarketOpen(order.symbol, order.exchange)) {
+          const now = new Date().toISOString();
+
           await supabase
             .from('pending_orders')
             .update({
-              status: 'cancelled',
-              comment: (order.comment || '') + ' [Auto-cancelled: market closed]',
-              updated_at: new Date().toISOString(),
+              status: 'expired',
+              expired_at: now,
+              updated_at: now,
+              comment: `${order.comment || ''} [Auto-expired: market closed]`.trim(),
             })
             .eq('id', order.id);
-          console.log(`❌ Auto-cancelled pending order #${order.id} (${order.symbol}) — market closed`);
+
+          console.log(`⌛ Auto-expired pending order #${order.id} (${order.symbol}) — market closed`);
           continue;
         }
 

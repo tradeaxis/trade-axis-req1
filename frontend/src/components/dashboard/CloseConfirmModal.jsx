@@ -1,103 +1,197 @@
-import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
-import { toast } from 'react-hot-toast';
+// frontend/src/components/dashboard/CloseConfirmModal.jsx  ── FIXED VERSION
+//
+// This component now serves TWO purposes:
+//   1. Confirm-before-close dialog (original use)
+//   2. Full-screen error popup when a close is REJECTED (replaces tiny toast)
+//
+// Usage from parent:
+//   <CloseConfirmModal
+//     isOpen={modal.open}
+//     trade={modal.trade}
+//     onConfirm={handleConfirmClose}
+//     onCancel={() => setModal({ open: false })}
+//     partialQty={modal.partialQty}      // optional
+//   />
+//
+//   // For showing a rejection error:
+//   <CloseConfirmModal
+//     isOpen={errorModal.open}
+//     errorMode
+//     errorTitle="Order Rejected"
+//     errorMessage={errorModal.message}
+//     onCancel={() => setErrorModal({ open: false })}
+//   />
 
-export default function CloseConfirmModal({
-  trade,
-  onCancel,
-  onConfirmClose, // (qty) => Promise
-  formatINR,
-  allowPartialClose = true,
-}) {
-  const maxQty = Number(trade?.quantity || 0);
+import { useState } from 'react';
+import { AlertTriangle, CheckCircle, X, XCircle } from 'lucide-react';
 
-  const [isPartial, setIsPartial] = useState(false);
-  const [qty, setQty] = useState(maxQty);
-
-  useEffect(() => {
-    setIsPartial(false);
-    setQty(maxQty);
-  }, [trade?.id, maxQty]);
-
-  if (!trade) return null;
+// ── Rejection / Error popup ────────────────────────────────────────────────────
+export function ErrorModal({ isOpen, title = 'Order Rejected', message = '', onClose }) {
+  if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 px-4">
       <div
-        className="w-full max-w-sm rounded-xl"
-        style={{ background: '#1e222d', border: '1px solid #363a45' }}
-        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl"
+        style={{ background: '#1e222d', border: '1px solid #ef535060' }}
       >
-        <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
-          <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Close Position</h3>
-          <button onClick={onCancel}><X size={22} color="#787b86" /></button>
+        {/* Header */}
+        <div
+          className="flex items-center gap-3 px-5 py-4"
+          style={{ background: '#ef535020', borderBottom: '1px solid #ef535040' }}
+        >
+          <XCircle size={28} color="#ef5350" />
+          <div className="flex-1">
+            <div className="font-bold text-lg" style={{ color: '#ef5350' }}>{title}</div>
+          </div>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10">
+            <X size={20} color="#787b86" />
+          </button>
         </div>
 
-        <div className="p-4">
-          <div className="p-3 rounded-lg mb-4" style={{ background: '#2a2e39' }}>
-            <div className="font-bold" style={{ color: '#d1d4dc' }}>{trade.symbol}</div>
-            <div className="text-sm mt-1" style={{ color: '#787b86' }}>
-              Qty: {maxQty} • {String(trade.trade_type || '').toUpperCase()}
-            </div>
-          </div>
+        {/* Body */}
+        <div className="px-5 py-5">
+          <p className="text-base text-center leading-relaxed" style={{ color: '#d1d4dc' }}>
+            {message}
+          </p>
+        </div>
 
-          {allowPartialClose && maxQty > 1 && (
-            <div className="mb-4">
-              <label className="flex items-center gap-2 cursor-pointer p-3 rounded-lg" style={{ background: '#2a2e39' }}>
-                <input
-                  type="checkbox"
-                  checked={isPartial}
-                  onChange={(e) => {
-                    setIsPartial(e.target.checked);
-                    if (!e.target.checked) setQty(maxQty);
-                  }}
-                />
-                <span className="text-sm" style={{ color: '#d1d4dc' }}>Partial close</span>
-              </label>
+        {/* Footer */}
+        <div className="px-5 pb-5">
+          <button
+            onClick={onClose}
+            className="w-full py-3 rounded-xl font-bold text-white"
+            style={{ background: '#ef5350' }}
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main close-confirm modal ───────────────────────────────────────────────────
+export default function CloseConfirmModal({
+  isOpen,
+  trade,
+  onConfirm,
+  onCancel,
+  partialQty,
+  currentPrice,
+  estimatedPnL,
+}) {
+  const [isClosing, setIsClosing] = useState(false);
+
+  if (!isOpen || !trade) return null;
+
+  const handleConfirm = async () => {
+    setIsClosing(true);
+    try {
+      await onConfirm();
+    } finally {
+      setIsClosing(false);
+    }
+  };
+
+  const qty    = partialQty || trade.quantity;
+  const pnl    = estimatedPnL ?? parseFloat(trade.profit || 0);
+  const isGain = pnl >= 0;
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 px-4">
+      <div
+        className="w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl"
+        style={{ background: '#1e222d', border: '1px solid #363a45' }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between px-5 py-4"
+          style={{ background: '#252832', borderBottom: '1px solid #363a45' }}
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={22} color="#f5c542" />
+            <span className="font-bold text-base" style={{ color: '#d1d4dc' }}>
+              Close {partialQty ? 'Partial' : ''} Position
+            </span>
+          </div>
+          <button onClick={onCancel} className="p-1 rounded-lg hover:bg-white/10">
+            <X size={20} color="#787b86" />
+          </button>
+        </div>
+
+        {/* Trade info */}
+        <div className="px-5 py-4 space-y-3">
+          <div className="flex justify-between text-sm">
+            <span style={{ color: '#787b86' }}>Symbol</span>
+            <span className="font-bold" style={{ color: '#d1d4dc' }}>{trade.symbol}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: '#787b86' }}>Direction</span>
+            <span
+              className="font-bold uppercase"
+              style={{ color: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350' }}
+            >
+              {trade.trade_type}
+            </span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: '#787b86' }}>Quantity to Close</span>
+            <span className="font-bold" style={{ color: '#d1d4dc' }}>{qty}</span>
+          </div>
+          {trade.quantity && partialQty && (
+            <div className="flex justify-between text-sm">
+              <span style={{ color: '#787b86' }}>Remaining</span>
+              <span className="font-bold" style={{ color: '#d1d4dc' }}>
+                {parseFloat(trade.quantity) - parseFloat(partialQty)}
+              </span>
+            </div>
+          )}
+          <div className="flex justify-between text-sm">
+            <span style={{ color: '#787b86' }}>Open Price</span>
+            <span style={{ color: '#d1d4dc' }}>₹{parseFloat(trade.open_price || 0).toFixed(2)}</span>
+          </div>
+          {currentPrice && (
+            <div className="flex justify-between text-sm">
+              <span style={{ color: '#787b86' }}>Current Price</span>
+              <span style={{ color: '#d1d4dc' }}>₹{parseFloat(currentPrice).toFixed(2)}</span>
             </div>
           )}
 
-          {allowPartialClose && isPartial && (
-            <div className="mb-4">
-              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
-                Quantity to close (1 - {maxQty})
-              </label>
-              <input
-                type="number"
-                value={qty}
-                min={1}
-                max={maxQty}
-                onChange={(e) => setQty(Math.max(1, Math.min(maxQty, Number(e.target.value || 1))))}
-                className="w-full px-4 py-3 rounded-lg text-xl font-bold text-center"
-                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
-              />
-            </div>
-          )}
-
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              onClick={onCancel}
-              className="py-3 rounded-lg font-medium"
-              style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
-            >
-              Cancel
-            </button>
-
-            <button
-              onClick={async () => {
-                if (isPartial && (qty <= 0 || qty > maxQty)) return toast.error('Invalid quantity');
-                await onConfirmClose(isPartial ? qty : maxQty);
-              }}
-              className="py-3 rounded-lg font-semibold text-white"
-              style={{ background: '#ef5350' }}
-            >
-              Close
-            </button>
+          {/* P&L estimate */}
+          <div
+            className="flex justify-between items-center rounded-xl px-4 py-3"
+            style={{ background: isGain ? '#26a69a20' : '#ef535020', border: `1px solid ${isGain ? '#26a69a40' : '#ef535040'}` }}
+          >
+            <span className="text-sm" style={{ color: '#787b86' }}>Est. P&amp;L</span>
+            <span className="font-bold text-lg" style={{ color: isGain ? '#26a69a' : '#ef5350' }}>
+              {isGain ? '+' : ''}₹{pnl.toFixed(2)}
+            </span>
           </div>
+        </div>
 
-          <div className="text-xs mt-3" style={{ color: '#787b86' }}>
-            Note: Partial close requires backend/tradingStore support.
-          </div>
+        {/* Actions */}
+        <div className="grid grid-cols-2 gap-3 px-5 pb-5">
+          <button
+            onClick={onCancel}
+            className="py-3 rounded-xl font-semibold"
+            style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={isClosing}
+            className="py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2 disabled:opacity-50"
+            style={{ background: '#ef5350' }}
+          >
+            {isClosing ? (
+              <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <CheckCircle size={18} />
+            )}
+            {isClosing ? 'Closing...' : 'Close Now'}
+          </button>
         </div>
       </div>
     </div>

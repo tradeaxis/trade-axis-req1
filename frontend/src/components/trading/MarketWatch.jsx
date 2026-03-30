@@ -15,15 +15,18 @@ const MarketWatch = ({ onSymbolSelect, selectedSymbol }) => {
   const categories = [
     { id: 'all', label: 'All' },
     { id: 'favorites', label: '★' },
-    { id: 'equity', label: 'Stocks' },
-    { id: 'index', label: 'Indices' },
-    { id: 'commodity', label: 'Commodities' },
-    { id: 'currency', label: 'Currency' },
+    { id: 'stock_futures', label: 'Stocks' },
+    { id: 'index_futures', label: 'Indices' },
+    { id: 'commodity_futures', label: 'Commodities' },
+    { id: 'sensex_futures', label: 'Sensex' },
   ];
 
   const filteredSymbols = symbols.filter(s => {
-    const matchesSearch = s.symbol.toLowerCase().includes(search.toLowerCase()) ||
-                         s.display_name.toLowerCase().includes(search.toLowerCase());
+    const q = search.toLowerCase();
+    const matchesSearch = !q ||
+      String(s.symbol || '').toLowerCase().includes(q) ||
+      String(s.display_name || '').toLowerCase().includes(q) ||
+      String(s.underlying || '').toLowerCase().includes(q);
     
     if (category === 'favorites') {
       return matchesSearch && favorites.includes(s.symbol);

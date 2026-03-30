@@ -1,17 +1,23 @@
-// backend/src/services/marketDataService.js
+// backend/src/services/marketDataService.js  ── FIXED VERSION
+//
+// KEY FIXES:
+// 1. getQuote() returns correct field names that match what frontend expects
+// 2. Falls back to DB price fields correctly (high_price, low_price, open_price)
+// 3. No simulation anywhere — only Kite live or DB fallback
+
 const { supabase } = require('../config/supabase');
-const kiteService = require('./kiteService');
-const kiteStreamService = require('./kiteStreamService');
+const kiteService      = require('./kiteService');
+const kiteStreamService= require('./kiteStreamService');
 
 class MarketDataService {
   constructor() {
     this.metaCache = new Map();
-    this.META_TTL = 60000; // 60s for static symbol metadata
+    this.META_TTL  = 60000; // 60s for static symbol metadata
   }
 
   /**
-   * ✅ Get quote: memory cache first → DB fallback
-   * NO simulation anywhere
+   * Get quote: memory cache first → DB fallback
+   * Returns fields that match what frontend marketStore.getQuote() expects.
    */
   async getQuote(symbol) {
     const sym = String(symbol || '').toUpperCase();
@@ -36,31 +42,66 @@ class MarketDataService {
 
     const d = meta.d;
 
+    // ── Resolve prices ────────────────────────────────────────────────────
+    // DB columns: last_price, bid, ask, open_price, high_price, low_price,
+    //             previous_close, change_value, change_percent
+    const lastPrice  = live ? live.last      : Number(d.last_price    || 0);
+    const bidPrice   = live ? live.bid       : Number(d.bid           || d.last_price || 0);
+    const askPrice   = live ? live.ask       : Number(d.ask           || d.last_price || 0);
+    const openPrice  = live ? live.open      : Number(d.open_price    || 0);
+    const highPrice  = live ? live.high      : Number(d.high_price    || 0);
+    const lowPrice   = live ? live.low       : Number(d.low_price     || 0);
+    const prevClose  = live ? live.prevClose : Number(d.previous_close|| 0);
+    const changeVal  = live ? live.change    : Number(d.change_value  || 0);
+    const changePct  = live ? live.changePct : Number(d.change_percent|| 0);
+    const dbLastUpdate = d.last_update ? new Date(d.last_update).getTime() : 0;
+    const isDbStale = !dbLastUpdate || (Date.now() - dbLastUpdate > 30 * 60 * 1000);
+
     return {
-      symbol: d.symbol,
+      // ── Identity ──
+      symbol:      d.symbol,
       displayName: d.display_name,
-      exchange: d.exchange,
-      category: d.category,
+      display_name:d.display_name,
+      exchange:    d.exchange,
+      category:    d.category,
+      underlying:  d.underlying,
+      expiryDate:  d.expiry_date,
+      expiry_date: d.expiry_date,
 
-      lastPrice: live ? live.last : Number(d.last_price || 0),
-      bid: live ? live.bid : Number(d.bid || d.last_price || 0),
-      ask: live ? live.ask : Number(d.ask || d.last_price || 0),
+      // ── Prices ── (both camelCase and snake_case for compatibility)
+      lastPrice,
+      last_price: lastPrice,
+      last:       lastPrice,
+      bid:        bidPrice,
+      ask:        askPrice,
 
-      open: live ? live.open : Number(d.open_price ?? d.open ?? 0),
-      high: live ? live.high : Number(d.high_price ?? d.high ?? 0),
-      low: live ? live.low : Number(d.low_price ?? d.low ?? 0),
-      previousClose: live ? live.prevClose : Number(d.previous_close ?? 0),
+      // ── OHLC ──
+      open:       openPrice,
+      open_price: openPrice,
+      high:       highPrice,
+      high_price: highPrice,
+      low:        lowPrice,
+      low_price:  lowPrice,
+      previousClose:  prevClose,
+      previous_close: prevClose,
 
-      change: live ? live.change : Number(d.change_value || 0),
-      changePercent: live ? live.changePct : Number(d.change_percent || 0),
-      volume: live ? live.volume : Number(d.volume || 0),
+      // ── Change ──
+      change:         changeVal,
+      change_value:   changeVal,
+      changePercent:  changePct,
+      change_percent: changePct,
 
-      lotSize: Number(d.lot_size || 1),
+      // ── Volume & contract info ──
+      volume:   live ? live.volume : Number(d.volume   || 0),
+      lotSize:  Number(d.lot_size  || 1),
+      lot_size: Number(d.lot_size  || 1),
       tickSize: Number(d.tick_size || 0.05),
-      tradingHours: d.trading_hours || null,
+      tick_size:Number(d.tick_size || 0.05),
 
-      timestamp: live ? live.timestamp : Date.now(),
-      source: live ? 'kite' : 'db',
+      // ── Meta ──
+      timestamp:  live ? live.timestamp : (dbLastUpdate || Date.now()),
+      source:     live ? 'kite' : 'db',
+      off_quotes: !live && (!d.last_price || d.last_price <= 0 || isDbStale),
     };
   }
 
@@ -73,13 +114,11 @@ class MarketDataService {
     return out;
   }
 
-  /** Candles from Kite historical API only */
+  /** Candles from Kite historical API */
   async getCandles(symbol, timeframe = '15m', count = 300) {
     try {
       const candles = await kiteService.getHistoricalCandles(
-        String(symbol).toUpperCase(),
-        timeframe,
-        Number(count) || 300
+        String(symbol).toUpperCase(), timeframe, Number(count) || 300
       );
       return candles || [];
     } catch (e) {

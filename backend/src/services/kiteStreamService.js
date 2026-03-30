@@ -1,26 +1,46 @@
-// backend/src/services/kiteStreamService.js
+// backend/src/services/kiteStreamService.js  ── FIXED VERSION
+//
+// KEY FIXES:
+// 1. bid/ask: when mode != 'full', depth is empty → use last ± tick_size spread
+// 2. Symbol room emission: emit to BOTH the raw kite symbol AND all alias symbols
+// 3. Correct OHLC field mapping (dayHigh/dayLow from t.ohlc, NOT confused with prevClose)
+// 4. Added tick_size per symbol for spread calculation fallback
+
 const { KiteTicker } = require('kiteconnect');
 const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
 
+// Default spread per segment when depth is unavailable (mode != 'full')
+// These are conservative estimates; actual spread depends on liquidity
+const DEFAULT_TICK_SIZES = {
+  NFO:  0.05,   // Equity futures
+  MCX:  1.00,   // Commodity futures (varies by contract)
+  BFO:  0.05,   // BSE futures
+  NSE:  0.05,
+  BSE:  0.05,
+  MCX_SX: 0.25,
+};
+
 class KiteStreamService {
   constructor() {
-    this.ticker = null;
-    this.io = null;
-    this.running = false;
-    this.tokenToSymbols = new Map();
-    this.lastTickAt = null;
+    this.ticker      = null;
+    this.io          = null;
+    this.running     = false;
+    this.lastTickAt  = null;
 
+    // token → { symbols: string[], tickSize: number, exchange: string }
+    this.tokenToSymbols = new Map();
+
+    // Live price cache: symbol (uppercase) → priceData
     this.priceCache = new Map();
 
-    this.dirtySymbols = new Set();
-    this.dbFlushInterval = null;
-    this.DB_FLUSH_MS = 5000;
+    // Dirty symbols for DB flush
+    this.dirtySymbols   = new Set();
+    this.dbFlushInterval= null;
+    this.DB_FLUSH_MS    = 5000;
   }
 
-  isRunning() {
-    return this.running;
-  }
+  isRunning() { return this.running; }
 
   getPrice(symbol) {
     return this.priceCache.get(String(symbol).toUpperCase()) || null;
@@ -36,32 +56,50 @@ class KiteStreamService {
     return out;
   }
 
+  // ── Build token → symbol(s) map ──────────────────────────────────────────
+  // Each instrument_token maps to:
+  //   • The raw Kite tradingsymbol (e.g. "NIFTY26MARFUT")
+  //   • Any series aliases pointing to the same token (e.g. "NIFTY-I")
+  // We need to emit price updates to ALL of them.
   async buildTokenMap() {
     const { data, error } = await supabase
       .from('symbols')
-      .select('symbol, kite_instrument_token')
+      .select('symbol, kite_instrument_token, kite_exchange, tick_size')
       .eq('is_active', true)
       .not('kite_instrument_token', 'is', null);
 
     if (error) throw error;
 
-    const map = new Map();
+    const map = new Map(); // token → { symbols: [], tickSize, exchange }
     for (const row of data || []) {
-      const token = Number(row.kite_instrument_token);
-      if (!map.has(token)) map.set(token, []);
-      map.get(token).push(row.symbol);
+      const token    = Number(row.kite_instrument_token);
+      const tickSize = Number(row.tick_size || 0.05);
+      const exchange = String(row.kite_exchange || 'NFO').toUpperCase();
+
+      if (!map.has(token)) {
+        map.set(token, { symbols: [], tickSize, exchange });
+      }
+      map.get(token).symbols.push(row.symbol.toUpperCase());
     }
+
     this.tokenToSymbols = map;
+    console.log(`🗺️  Token map built: ${map.size} unique tokens → covering ${[...map.values()].reduce((n, v) => n + v.symbols.length, 0)} symbols`);
     return map;
   }
 
   async start(io) {
     this.io = io;
 
-    await kiteService.init();
+    // DON'T call init(true) here — it re-reads from DB which may have stale data
+    // due to async write race condition. Instead, just check if kiteService 
+    // already has a valid in-memory token (set by generateSession).
     if (!kiteService.isSessionReady()) {
-      console.log('ℹ️ Kite session not ready. Stream not started.');
-      return { started: false, reason: 'kite session not ready' };
+      // Only try DB fallback if no in-memory token exists (e.g., server restart)
+      await kiteService.init(true);
+      if (!kiteService.isSessionReady()) {
+        console.log('ℹ️ Kite session not ready. Stream not started.');
+        return { started: false, reason: 'kite session not ready' };
+      }
     }
 
     await this.buildTokenMap();
@@ -72,27 +110,78 @@ class KiteStreamService {
       return { started: false, reason: 'no tokens' };
     }
 
-    const apiKey = process.env.KITE_API_KEY;
+    const apiKey      = process.env.KITE_API_KEY;
     const accessToken = kiteService.accessToken;
 
-    this.ticker = new KiteTicker({ api_key: apiKey, access_token: accessToken });
+    if (!accessToken) {
+      console.log('❌ No access token available for stream.');
+      return { started: false, reason: 'no access token' };
+    }
+    
+    console.log('🔑 Stream using token (first 10):', accessToken.substring(0, 10) + '...');
+
+    this.ticker  = new KiteTicker({ api_key: apiKey, access_token: accessToken });
     this.running = true;
 
+    // ── Tick mode ────────────────────────────────────────────────────────────
+    // 'full'  → LTP + OHLC + depth (best for bid/ask)
+    // 'quote' → LTP + OHLC, no depth (bid = ask = LTP, we add ½ tick spread)
+    // 'ltp'   → only LTP
+    // Recommendation: use 'full' for accurate bid/ask
     const mode = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
 
     this.ticker.on('connect', () => {
-      console.log(`✅ KiteTicker connected. Subscribing ${tokens.length} tokens [${mode}]`);
+      console.log(`✅ KiteTicker connected. Subscribing ${tokens.length} tokens [mode: ${mode}]`);
       this.ticker.subscribe(tokens);
       this.ticker.setMode(mode, tokens);
     });
 
     this.ticker.on('ticks', (ticks) => {
       this.lastTickAt = new Date().toISOString();
-      this.handleTicks(ticks);
+      this.handleTicks(ticks, mode);
     });
 
+    // Track if we've received a 403 — prevents reconnect loop
+    let sessionExpired = false;
+
     this.ticker.on('error', (err) => {
-      console.error('❌ KiteTicker error:', err?.message || err);
+      const msg = err?.message || String(err);
+      console.error('❌ KiteTicker error:', msg);
+      
+      if (msg.includes('403') || msg.includes('Forbidden')) {
+        if (sessionExpired) return; // Already handled, don't spam logs
+        sessionExpired = true;
+        
+        console.error('🔴 ═══════════════════════════════════════════════════');
+        console.error('🔴 KITE SESSION EXPIRED — Prices will NOT update!');
+        console.error('🔴 Go to Admin Panel → Kite Setup → Create new session');
+        console.error('🔴 ═══════════════════════════════════════════════════');
+        this.running = false;
+        
+        // Forcefully stop — set autoReconnect to false before disconnecting
+        try {
+          if (this.ticker) {
+            this.ticker.autoReconnect = false;  // Prevent KiteTicker from auto-reconnecting
+            this.ticker.disconnect();
+            this.ticker = null;
+          }
+        } catch (e) {
+          // ignore disconnect errors
+        }
+
+        // Clear flush interval since no prices will come
+        if (this.dbFlushInterval) {
+          clearInterval(this.dbFlushInterval);
+          this.dbFlushInterval = null;
+        }
+        
+        if (this.io) {
+          this.io.emit('kite:session:expired', {
+            message: 'Kite session expired. Prices are stale. Admin must re-authenticate.',
+            timestamp: Date.now(),
+          });
+        }
+      }
     });
 
     this.ticker.on('close', () => {
@@ -101,6 +190,17 @@ class KiteStreamService {
     });
 
     this.ticker.on('reconnect', () => {
+      if (sessionExpired) {
+        console.log('🚫 Blocking reconnect — session expired. Create new session first.');
+        try {
+          if (this.ticker) {
+            this.ticker.autoReconnect = false;
+            this.ticker.disconnect();
+            this.ticker = null;
+          }
+        } catch (e) {}
+        return;
+      }
       console.log('🔄 KiteTicker reconnecting...');
       this.running = true;
     });
@@ -113,83 +213,120 @@ class KiteStreamService {
 
   async stop() {
     try {
-      if (this.dbFlushInterval) {
-        clearInterval(this.dbFlushInterval);
-        this.dbFlushInterval = null;
-      }
+      if (this.dbFlushInterval) { clearInterval(this.dbFlushInterval); this.dbFlushInterval = null; }
       await this.flushToDB();
       if (this.ticker) {
-        this.ticker.disconnect();
+        try {
+          this.ticker.autoReconnect = false;
+        } catch (e) {}
+        try {
+          this.ticker.disconnect();
+        } catch (e) {}
         this.ticker = null;
       }
     } finally {
       this.running = false;
+      // Clear all cached prices — they're stale now
+      this.priceCache.clear();
+      this.dirtySymbols.clear();
+      this.tokenToSymbols.clear();
     }
+    console.log('🛑 KiteStreamService fully stopped. Price cache cleared.');
     return { stopped: true };
   }
 
-  handleTicks(ticks) {
+  // ── Main tick handler ─────────────────────────────────────────────────────
+  handleTicks(ticks, mode = 'full') {
     if (!ticks || ticks.length === 0) return;
 
     for (const t of ticks) {
-      const token = Number(t.instrument_token);
-      const symbols = this.tokenToSymbols.get(token);
-      if (!symbols || symbols.length === 0) continue;
+      const token    = Number(t.instrument_token);
+      const entry    = this.tokenToSymbols.get(token);
+      if (!entry || entry.symbols.length === 0) continue;
 
       const last = Number(t.last_price || 0);
       if (last <= 0) continue;
 
-      const ohlc = t.ohlc || {};
-      const prevClose = Number(ohlc.close || 0);
-      
-      // Kite tick OHLC: open/high/low are TODAY's values, close is PREVIOUS DAY's close
-      const dayOpen = Number(ohlc.open || 0);
-      const dayHigh = Number(ohlc.high || 0);
-      const dayLow = Number(ohlc.low || 0);
+      // ── OHLC ─────────────────────────────────────────────────────────────
+      // Kite tick OHLC structure (confirmed from Kite docs):
+      //   t.ohlc.open  = today's open
+      //   t.ohlc.high  = today's high
+      //   t.ohlc.low   = today's low
+      //   t.ohlc.close = PREVIOUS DAY's close (not today's close)
+      const ohlc      = t.ohlc || {};
+      const dayOpen   = Number(ohlc.open  || 0);
+      const dayHigh   = Number(ohlc.high  || 0);
+      const dayLow    = Number(ohlc.low   || 0);
+      const prevClose = Number(ohlc.close || 0);   // previous day close
 
-      const chgVal = prevClose ? last - prevClose : 0;
-      const chgPct = prevClose ? (chgVal / prevClose) * 100 : 0;
+      const chgVal    = prevClose > 0 ? last - prevClose : 0;
+      const chgPct    = prevClose > 0 ? (chgVal / prevClose) * 100 : 0;
 
-      let bid = last;
-      let ask = last;
-      if (t.depth?.buy?.length && t.depth.buy[0].price > 0) {
-        bid = Number(t.depth.buy[0].price);
-      }
-      if (t.depth?.sell?.length && t.depth.sell[0].price > 0) {
-        ask = Number(t.depth.sell[0].price);
+      // ── Bid / Ask resolution ─────────────────────────────────────────────
+      // 'full' mode: use market depth (most accurate)
+      // 'quote'/'ltp' mode: no depth available → simulate spread using tick_size
+      //
+      // For Indian futures (NFO/MCX):
+      //   Bid = last - (tickSize * 1)   (conservative 1-tick spread)
+      //   Ask = last + (tickSize * 1)
+      //
+      // This is approximate but far better than bid=ask=last which causes
+      // wrong P&L calculations (a buy opened at ask=last and closed at bid=last
+      // would show 0 P&L instead of negative spread).
+      let bid, ask;
+
+      const hasDepth = mode === 'full' && t.depth?.buy?.length && t.depth?.sell?.length;
+
+      if (hasDepth) {
+        const depthBid = Number(t.depth.buy[0].price  || 0);
+        const depthAsk = Number(t.depth.sell[0].price || 0);
+        // Use depth only if valid and within 1% of last (guards against stale depth)
+        const bidValid = depthBid > 0 && Math.abs(depthBid - last) / last < 0.01;
+        const askValid = depthAsk > 0 && Math.abs(depthAsk - last) / last < 0.01;
+        bid = bidValid ? depthBid : last;
+        ask = askValid ? depthAsk : last;
+      } else {
+        // Spread simulation: 1 tick on each side
+        const tickSize = entry.tickSize > 0 ? entry.tickSize
+          : (DEFAULT_TICK_SIZES[entry.exchange] || 0.05);
+        bid = parseFloat((last - tickSize).toFixed(2));
+        ask = parseFloat((last + tickSize).toFixed(2));
+        if (bid <= 0) bid = last;
       }
 
       const priceData = {
         last,
         bid,
         ask,
-        open: dayOpen > 0 ? dayOpen : last,
-        high: dayHigh > 0 ? dayHigh : last,
-        low: dayLow > 0 ? dayLow : (last > 0 ? last : 0),
+        open:     dayOpen   > 0 ? dayOpen   : last,
+        high:     dayHigh   > 0 ? dayHigh   : last,
+        low:      dayLow    > 0 ? dayLow    : last,
         prevClose: prevClose || last,
-        change: parseFloat(chgVal.toFixed(2)),
+        change:   parseFloat(chgVal.toFixed(2)),
         changePct: parseFloat(chgPct.toFixed(2)),
-        volume: Number(t.volume_traded || t.volume || 0),
+        volume:   Number(t.volume_traded || t.volume || 0),
         timestamp: Date.now(),
       };
 
-      for (const s of symbols) {
-        this.priceCache.set(s, priceData);
-        this.dirtySymbols.add(s);
+      // ── Emit to all alias symbols for this token ─────────────────────────
+      for (const sym of entry.symbols) {
+        this.priceCache.set(sym, priceData);
+        this.dirtySymbols.add(sym);
 
-        this.io?.to(`symbol:${s}`).emit('price:update', {
-          symbol: s,
+        // Emit to socket room for this symbol (frontend subscribes to symbol name)
+        this.io?.to(`symbol:${sym}`).emit('price:update', {
+          symbol:        sym,
           bid,
           ask,
           last,
-          open: priceData.open,
-          high: priceData.high,
-          low: priceData.low,
-          change: priceData.change,
+          open:          priceData.open,
+          high:          priceData.high,
+          low:           priceData.low,
+          change:        priceData.change,
           changePercent: priceData.changePct,
-          volume: priceData.volume,
-          timestamp: priceData.timestamp,
-          source: 'kite',
+          volume:        priceData.volume,
+          timestamp:     priceData.timestamp,
+          source:        'kite',
         });
       }
     }
@@ -197,13 +334,9 @@ class KiteStreamService {
 
   startDBFlush() {
     if (this.dbFlushInterval) clearInterval(this.dbFlushInterval);
-
     this.dbFlushInterval = setInterval(() => {
-      this.flushToDB().catch((err) =>
-        console.error('DB flush error:', err.message)
-      );
+      this.flushToDB().catch(err => console.error('DB flush error:', err.message));
     }, this.DB_FLUSH_MS);
-
     console.log(`💾 DB price flush every ${this.DB_FLUSH_MS / 1000}s`);
   }
 
@@ -214,6 +347,7 @@ class KiteStreamService {
     this.dirtySymbols.clear();
     const now = new Date().toISOString();
 
+    // Batch by identical price data to minimise DB round-trips
     const groups = new Map();
     for (const sym of toFlush) {
       const p = this.priceCache.get(sym);
@@ -226,22 +360,19 @@ class KiteStreamService {
     const promises = [];
     for (const [, { price, symbols }] of groups) {
       promises.push(
-        supabase
-          .from('symbols')
-          .update({
-            last_price: price.last,
-            bid: price.bid,
-            ask: price.ask,
-            open_price: price.open,
-            high_price: price.high,
-            low_price: price.low,
-            previous_close: price.prevClose,
-            change_value: price.change,
-            change_percent: price.changePct,
-            volume: price.volume,
-            last_update: now,
-          })
-          .in('symbol', symbols)
+        supabase.from('symbols').update({
+          last_price:     price.last,
+          bid:            price.bid,
+          ask:            price.ask,
+          open_price:     price.open,
+          high_price:     price.high,
+          low_price:      price.low,
+          previous_close: price.prevClose,
+          change_value:   price.change,
+          change_percent: price.changePct,
+          volume:         price.volume,
+          last_update:    now,
+        }).in('symbol', symbols)
       );
     }
 
@@ -249,18 +380,24 @@ class KiteStreamService {
   }
 
   status() {
+    const now = Date.now();
+    const lastTick = this.lastTickAt ? new Date(this.lastTickAt).getTime() : 0;
+    const tickAge = lastTick > 0 ? Math.round((now - lastTick) / 1000) : null;
+    
     return {
-      running: this.running,
-      lastTickAt: this.lastTickAt,
-      tokenCount: this.tokenToSymbols?.size || 0,
-      cachedPrices: this.priceCache.size,
-      pendingDBWrites: this.dirtySymbols.size,
+      running:           this.running,
+      lastTickAt:        this.lastTickAt,
+      tickAgeSeconds:    tickAge,
+      sessionExpired:    this.lastTickAt === null && !this.running,
+      tokenCount:        this.tokenToSymbols?.size || 0,
+      cachedPrices:      this.priceCache.size,
+      pendingDBWrites:   this.dirtySymbols.size,
+      warning:           this.lastTickAt === null 
+        ? '⚠️ No ticks received — Kite session may be expired. Re-authenticate in Admin Panel.'
+        : (tickAge && tickAge > 60 ? `⚠️ Last tick was ${tickAge}s ago — stream may be stalled` : null),
     };
   }
 
-  /**
-   * Rebuild token map and resubscribe — call after syncing new instruments
-   */
   async refreshSubscriptions() {
     if (!this.ticker || !this.running) {
       console.log('ℹ️ Ticker not running, skip refresh');
@@ -272,7 +409,7 @@ class KiteStreamService {
     const newCount = this.tokenToSymbols.size;
 
     const tokens = Array.from(this.tokenToSymbols.keys());
-    const mode = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
+    const mode   = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
 
     this.ticker.subscribe(tokens);
     this.ticker.setMode(mode, tokens);

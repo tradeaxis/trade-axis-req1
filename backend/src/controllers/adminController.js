@@ -766,11 +766,56 @@ exports.createKiteSession = async (req, res) => {
 
     const session = await kiteService.generateSession(requestToken.trim());
 
+    // Log the token that's now in memory
+    console.log('🔑 New token in memory (first 10):', kiteService.accessToken?.substring(0, 10) + '...');
+
+    // Wait for DB write to complete (generateSession already called saveAccessTokenToDB 
+    // but it's fire-and-forget inside generateSession — let's ensure it's done)
+    await kiteService.saveAccessTokenToDB(kiteService.accessToken);
+    console.log('💾 Token confirmed saved to DB');
+
+    // ── AUTO-RESTART STREAM with new token ──────────────────────────
+    let streamResult = null;
+    try {
+      // Stop existing stream (uses old expired token)
+      console.log('🔄 Stopping old stream...');
+      await kiteStreamService.stop();
+      
+      // Small delay to ensure clean disconnect
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Start fresh stream with new access token
+      const io = req.app.get('io');
+      if (io) {
+        console.log('🔄 Starting stream with new token...');
+        console.log('   In-memory token (first 10):', kiteService.accessToken?.substring(0, 10) + '...');
+        streamResult = await kiteStreamService.start(io);
+        console.log('✅ Stream restarted:', streamResult);
+      }
+    } catch (streamErr) {
+      console.warn('⚠️ Stream restart failed:', streamErr.message);
+    }
+
+    // ── AUTO-SYNC instruments ───────────────────────────────────────
+    let syncResult = null;
+    try {
+      const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
+      syncResult = await syncKiteInstruments();
+      if (syncResult.success && syncResult.upserted > 0) {
+        console.log(`📊 Auto-synced ${syncResult.upserted} instruments`);
+        await kiteStreamService.refreshSubscriptions();
+      }
+    } catch (syncErr) {
+      console.warn('⚠️ Auto-sync failed:', syncErr.message);
+    }
+
     res.json({
       success: true,
-      message: 'Kite session created successfully! Token valid until tomorrow 6 AM IST.',
+      message: 'Kite session created successfully! Stream restarted. Token valid until tomorrow 6 AM IST.',
       userId: session.userId,
       createdAt: session.createdAt,
+      stream: streamResult,
+      sync: syncResult,
     });
   } catch (error) {
     console.error('createKiteSession error:', error);
@@ -1299,6 +1344,87 @@ exports.toggleSymbolBan = async (req, res) => {
     });
   } catch (error) {
     console.error('toggleSymbolBan error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ DATA CLEANUP ============
+exports.cleanupOldData = async (req, res) => {
+  try {
+    const { months = 3 } = req.body;
+    const cutoffDate = new Date();
+    cutoffDate.setMonth(cutoffDate.getMonth() - Number(months));
+    const cutoff = cutoffDate.toISOString();
+
+    const results = {};
+
+    // Delete closed trades
+    const { data: trades, error: tradeErr } = await supabase
+      .from('trades')
+      .delete()
+      .eq('status', 'closed')
+      .lt('close_time', cutoff)
+      .select('id');
+
+    results.deletedTrades = trades?.length || 0;
+    if (tradeErr) results.tradeError = tradeErr.message;
+
+    // Delete completed/rejected transactions
+    const { data: txns, error: txnErr } = await supabase
+      .from('transactions')
+      .delete()
+      .in('status', ['completed', 'rejected'])
+      .lt('created_at', cutoff)
+      .select('id');
+
+    results.deletedTransactions = txns?.length || 0;
+    if (txnErr) results.txnError = txnErr.message;
+
+    // Delete old settlements
+    try {
+      const { data: settlements } = await supabase
+        .from('weekly_settlements')
+        .delete()
+        .lt('created_at', cutoff)
+        .select('id');
+      results.deletedSettlements = settlements?.length || 0;
+    } catch (e) {
+      results.deletedSettlements = 0;
+    }
+
+    console.log(`🧹 Cleanup: ${results.deletedTrades} trades, ${results.deletedTransactions} txns, ${results.deletedSettlements} settlements (cutoff: ${cutoff})`);
+
+    res.json({
+      success: true,
+      message: `Cleaned up data older than ${months} months`,
+      cutoff,
+      ...results,
+    });
+  } catch (error) {
+    console.error('cleanupOldData error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ FORCE DELETE EXPIRED TOKEN ============
+exports.deleteExpiredToken = async (req, res) => {
+  try {
+    await supabase
+      .from('app_settings')
+      .update({ value: '', updated_at: new Date().toISOString() })
+      .eq('key', 'kite_access_token');
+
+    kiteService.accessToken = null;
+    kiteService.initialized = false;
+
+    await kiteStreamService.stop();
+
+    res.json({
+      success: true,
+      message: 'Token deleted and stream stopped. Create new session to resume.',
+    });
+  } catch (error) {
+    console.error('deleteExpiredToken error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

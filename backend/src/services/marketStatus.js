@@ -111,7 +111,8 @@ const COMMODITY_KEYWORDS =
 /**
  * Check if a symbol belongs to the commodity/MCX segment
  */
-const isCommoditySymbol = (symbol) => {
+const isCommoditySymbol = (symbol, exchange = null) => {
+  if (exchange && String(exchange).toUpperCase() === 'MCX') return true;
   if (!symbol) return false;
   return COMMODITY_KEYWORDS.test(String(symbol).toUpperCase());
 };
@@ -120,7 +121,7 @@ const isCommoditySymbol = (symbol) => {
  * Check if market is open.
  * @param {string|null} symbol — if provided, uses commodity hours for MCX symbols
  */
-const isMarketOpen = (symbol = null) => {
+const isMarketOpen = (symbol = null, exchange = null) => {
   if (isHolidayActiveToday()) return false;
 
   const now = new Date();
@@ -133,7 +134,7 @@ const isMarketOpen = (symbol = null) => {
   const mins = ist.getHours() * 60 + ist.getMinutes();
 
   // Commodity (MCX) market: 9:00 AM to 11:30 PM IST
-  if (symbol && isCommoditySymbol(symbol)) {
+  if (isCommoditySymbol(symbol, exchange)) {
     return mins >= 9 * 60 && mins <= 23 * 60 + 30;
   }
 

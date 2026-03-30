@@ -16,8 +16,8 @@ class KiteService {
     return !!(this.apiKey && this.apiSecret);
   }
 
-  async init() {
-    if (this.initialized) return;
+  async init(forceRefresh = false) {
+    if (this.initialized && !forceRefresh) return;
     
     if (!this.isConfigured()) {
       console.log('ℹ️ Kite not configured. Using simulated prices.');
@@ -26,12 +26,18 @@ class KiteService {
     }
 
     try {
-      this.kc = new KiteConnect({ api_key: this.apiKey });
-      this.accessToken = await this.getAccessTokenFromDB();
-
-      if (this.accessToken) {
+      // Always create a fresh KiteConnect instance on force refresh
+      if (!this.kc || forceRefresh) {
+        this.kc = new KiteConnect({ api_key: this.apiKey });
+      }
+      
+      // Re-read token from DB (in case it was updated by another process)
+      const dbToken = await this.getAccessTokenFromDB();
+      
+      if (dbToken) {
+        this.accessToken = dbToken;
         this.kc.setAccessToken(this.accessToken);
-        console.log('✅ Kite access token loaded from DB.');
+        console.log(`✅ Kite access token loaded from DB (forceRefresh=${forceRefresh}).`);
       } else {
         console.log('ℹ️ Kite access token not set yet.');
       }
@@ -62,24 +68,37 @@ class KiteService {
     try {
       const now = new Date().toISOString();
       
-      const { data: existing } = await supabase
+      const { error } = await supabase
         .from('app_settings')
-        .select('id')
-        .eq('key', 'kite_access_token')
-        .single();
+        .upsert(
+          { key: 'kite_access_token', value: token, updated_at: now },
+          { onConflict: 'key' }
+        );
 
-      if (existing) {
-        await supabase
+      if (error) {
+        console.error('❌ Upsert failed, trying update:', error.message);
+        // Fallback to explicit update
+        const { error: updateErr } = await supabase
           .from('app_settings')
           .update({ value: token, updated_at: now })
           .eq('key', 'kite_access_token');
-      } else {
-        await supabase
-          .from('app_settings')
-          .insert({ key: 'kite_access_token', value: token, updated_at: now });
+        
+        if (updateErr) throw updateErr;
       }
       
-      console.log('✅ Kite access token saved to DB');
+      // Verify the write
+      const { data: verify } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'kite_access_token')
+        .single();
+      
+      const savedToken = verify?.value || '';
+      if (savedToken === token) {
+        console.log('✅ Kite access token saved & verified in DB (first 10):', token.substring(0, 10) + '...');
+      } else {
+        console.error('❌ Token verification FAILED! DB has:', savedToken.substring(0, 10), 'Expected:', token.substring(0, 10));
+      }
     } catch (err) {
       console.error('❌ Failed to save Kite token:', err.message);
     }
@@ -138,10 +157,32 @@ class KiteService {
       this.kc.setAccessToken(this.accessToken);
       this.initialized = true;
 
+      // Save to DB and WAIT for completion
       await this.saveAccessTokenToDB(this.accessToken);
 
       console.log('✅ Kite session created successfully');
-      console.log('   User ID:', session.user_id);
+      console.log('   In-memory token (first 10):', this.accessToken.substring(0, 10) + '...');
+
+      // ── Clear stale prices from DB on new session ─────────────────
+      // When admin creates fresh session, old prices may be from yesterday.
+      // Reset them so frontend doesn't show stale data before live ticks arrive.
+      try {
+        await supabase
+          .from('symbols')
+          .update({
+            last_price: 0,
+            bid: 0,
+            ask: 0,
+            change_value: 0,
+            change_percent: 0,
+            last_update: new Date().toISOString(),
+          })
+          .eq('is_active', true)
+          .eq('instrument_type', 'FUT');
+        console.log('🧹 Cleared stale DB prices (will refresh from live stream)');
+      } catch (clearErr) {
+        console.warn('⚠️ Could not clear stale prices:', clearErr.message);
+      }
 
       return {
         accessToken: this.accessToken,
@@ -202,7 +243,20 @@ class KiteService {
 
     const all = [...nfo, ...mcx, ...bfo];
 
-    return all.filter((i) => String(i.instrument_type).toUpperCase() === 'FUT');
+    // Filter: FUT only, not expired, has a valid underlying name
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return all.filter((i) => {
+      if (String(i.instrument_type).toUpperCase() !== 'FUT') return false;
+      if (!String(i.name || '').trim()) return false;          // skip if no underlying
+      if (i.expiry) {
+        const exp = new Date(i.expiry);
+        exp.setHours(0, 0, 0, 0);
+        if (exp < today) return false;                         // skip expired
+      }
+      return true;
+    });
   }
 
   async syncSymbolsToDB() {
@@ -252,6 +306,7 @@ class KiteService {
         underlying,
         series: null,
         is_active: true,
+        trading_hours: exchange === 'MCX' ? '09:00-23:30' : '09:15-15:30',
         last_update: new Date().toISOString(),
         original_lot_size: Number(inst.lot_size || 1),
       });
@@ -299,6 +354,7 @@ class KiteService {
           underlying,
           series,
           is_active: true,
+          trading_hours: exchange === 'MCX' ? '09:00-23:30' : '09:15-15:30',
           last_update: new Date().toISOString(),
           original_lot_size: Number(inst.lot_size || 1),
         });
@@ -307,10 +363,16 @@ class KiteService {
 
     console.log(`📝 Upserting ${rows.length} symbols (${byUnderlying.size} underlyings)...`);
 
-    await supabase
-      .from('symbols')
-      .update({ is_active: false })
-      .eq('instrument_type', 'FUT');
+    // Only deactivate exchanges we successfully fetched
+    const fetchedExchanges = new Set(rows.map(r => r.exchange));
+    if (fetchedExchanges.size > 0) {
+      console.log(`🔄 Deactivating FUT symbols for: ${[...fetchedExchanges].join(', ')}`);
+      await supabase
+        .from('symbols')
+        .update({ is_active: false })
+        .eq('instrument_type', 'FUT')
+        .in('exchange', [...fetchedExchanges]);
+    }
 
     const chunkSize = 500;
     let upsertedCount = 0;
@@ -322,8 +384,8 @@ class KiteService {
         .upsert(chunk, { onConflict: 'symbol' });
 
       if (error) {
-        console.error('❌ syncSymbolsToDB chunk error:', error.message);
-        throw error;
+        console.error('⚠️ syncSymbolsToDB chunk error (continuing):', error.message);
+        // Don't throw — continue with remaining chunks
       }
       upsertedCount += chunk.length;
     }

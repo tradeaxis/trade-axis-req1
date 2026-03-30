@@ -11,6 +11,7 @@ const ALLOWED_CATEGORIES = [
 ];
 
 /** Get all futures symbols */
+/** Get all futures symbols */
 exports.getSymbols = async (req, res) => {
   try {
     const { category, search, limit = 5000 } = req.query;
@@ -36,20 +37,12 @@ exports.getSymbols = async (req, res) => {
         query = query.in('category', ALLOWED_CATEGORIES);
       }
 
+      // ── FIX: chain .or() on existing query (preserves category filter) ──
       if (search && search.trim()) {
         const term = search.trim();
-        query = supabase
-          .from('symbols')
-          .select('*')
-          .eq('is_active', true)
-          .eq('instrument_type', 'FUT')
-          .in('category', ALLOWED_CATEGORIES)
-          .or(
-            `symbol.ilike.%${term}%,display_name.ilike.%${term}%,underlying.ilike.%${term}%`
-          )
-          .order('underlying', { ascending: true })
-          .order('expiry_date', { ascending: true })
-          .range(offset, offset + batchSize - 1);
+        query = query.or(
+          `symbol.ilike.%${term}%,display_name.ilike.%${term}%,underlying.ilike.%${term}%`
+        );
       }
 
       const { data: batch, error } = await query;

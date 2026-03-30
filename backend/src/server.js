@@ -193,9 +193,10 @@ const startServer = async () => {
     console.log(`   ⚡ WS : ws://0.0.0.0:${PORT}`);
     console.log(`   🌍 ENV: ${process.env.NODE_ENV}`);
     console.log('   ✅ CORS: open (origin: true)');
-    console.log('═══��══════════════════════════════════════════════════════════');
+    console.log('══════════════════════════════════════════════════════════════');
     console.log('');
 
+    // Weekly settlement cron (Saturday 01:00 IST)
     // Weekly settlement cron (Saturday 01:00 IST)
     const cronExpr = process.env.SETTLEMENT_CRON || '0 1 * * 6';
     const tz = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
@@ -210,6 +211,107 @@ const startServer = async () => {
     );
 
     console.log(`⏰ Weekly settlement scheduled: "${cronExpr}" (${tz})`);
+
+    // ── AUTO-DELETE expired Kite token at 6:05 AM IST daily ─────────
+    // Kite tokens expire at 6:00 AM IST. Delete at 6:05 to prevent
+    // stale token usage on server restart.
+    nodeCron.schedule(
+      '5 6 * * *',
+      async () => {
+        console.log('🗑️ Auto-deleting expired Kite access token...');
+        try {
+          const { supabase } = require('./config/supabase');
+
+          // Delete token from DB
+          await supabase
+            .from('app_settings')
+            .update({ value: '', updated_at: new Date().toISOString() })
+            .eq('key', 'kite_access_token');
+
+          // Clear in-memory token
+          kiteService.accessToken = null;
+          kiteService.initialized = false;
+
+          // Stop stream
+          await kiteStreamService.stop();
+
+          console.log('✅ Expired token deleted. Admin must create new session before market opens.');
+
+          // Notify connected clients
+          io.emit('kite:session:expired', {
+            message: 'Daily token expired. Admin must re-authenticate before market opens.',
+            timestamp: Date.now(),
+          });
+        } catch (err) {
+          console.error('❌ Token cleanup error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+
+    console.log('🗑️ Daily token cleanup scheduled: 6:05 AM IST');
+
+    // ── AUTO-DELETE old trades/transactions older than 3 months ──────
+    // Runs every Sunday at 2:00 AM IST
+    nodeCron.schedule(
+      '0 2 * * 0',
+      async () => {
+        console.log('🧹 Running 3-month data cleanup...');
+        try {
+          const { supabase } = require('./config/supabase');
+          const threeMonthsAgo = new Date();
+          threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+          const cutoff = threeMonthsAgo.toISOString();
+
+          // Delete closed trades older than 3 months
+          const { data: deletedTrades, error: tradeErr } = await supabase
+            .from('trades')
+            .delete()
+            .eq('status', 'closed')
+            .lt('close_time', cutoff)
+            .select('id');
+
+          if (tradeErr) {
+            console.error('❌ Trade cleanup error:', tradeErr.message);
+          } else {
+            console.log(`🧹 Deleted ${deletedTrades?.length || 0} closed trades older than 3 months`);
+          }
+
+          // Delete completed/rejected transactions older than 3 months
+          const { data: deletedTxns, error: txnErr } = await supabase
+            .from('transactions')
+            .delete()
+            .in('status', ['completed', 'rejected'])
+            .lt('created_at', cutoff)
+            .select('id');
+
+          if (txnErr) {
+            console.error('❌ Transaction cleanup error:', txnErr.message);
+          } else {
+            console.log(`🧹 Deleted ${deletedTxns?.length || 0} old transactions`);
+          }
+
+          // Delete old settlement records
+          try {
+            const { data: deletedSettlements } = await supabase
+              .from('weekly_settlements')
+              .delete()
+              .lt('created_at', cutoff)
+              .select('id');
+            console.log(`🧹 Deleted ${deletedSettlements?.length || 0} old settlement records`);
+          } catch (e) {
+            // table may not exist
+          }
+
+          console.log('✅ 3-month data cleanup complete');
+        } catch (err) {
+          console.error('❌ Data cleanup error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+
+    console.log('🧹 3-month data cleanup scheduled: Sunday 2:00 AM IST');
 
     // Self-ping for platforms that sleep
     const selfUrl =
@@ -230,25 +332,58 @@ const startServer = async () => {
     // Kite auto-start
     if (String(process.env.KITE_AUTO_START || 'true') === 'true') {
       try {
-        await kiteService.init();
+        await kiteService.init(true); // Force read fresh token from DB
 
         if (kiteService.isSessionReady()) {
-          const result = await kiteStreamService.start(io);
-          console.log('✅ Kite stream auto-start result:', result);
+          // ✅ Validate token before starting stream
+          let sessionValid = false;
 
-          // ── Auto-sync missing instruments after stream starts ──
           try {
-            const { syncKiteInstruments } = require('./utils/syncKiteInstruments');
-            const syncResult = await syncKiteInstruments();
-            if (syncResult.success && syncResult.upserted > 0) {
-              console.log(`📊 Auto-synced ${syncResult.upserted} new instruments`);
-              await kiteStreamService.refreshSubscriptions();
-              console.log('🔄 Stream refreshed with new tokens');
-            } else {
-              console.log('📊 All instruments already in sync');
+            const kc = kiteService.getKiteInstance();
+            if (kc) {
+              await kc.getProfile(); // throws if token expired/invalid
+              sessionValid = true;
+              console.log('✅ Kite session validated — token is active');
             }
-          } catch (syncErr) {
-            console.warn('⚠️ Auto instrument sync failed:', syncErr.message);
+          } catch (profileErr) {
+            console.warn('⚠️ Kite session expired/invalid:', profileErr.message);
+            console.warn('⚠️ Stream NOT started. Admin must create new session from Admin Panel.');
+
+            // ── DELETE the expired token from DB so it's not reused ──
+            try {
+              const { supabase: sb } = require('./config/supabase');
+              await sb
+                .from('app_settings')
+                .update({ value: '', updated_at: new Date().toISOString() })
+                .eq('key', 'kite_access_token');
+
+              kiteService.accessToken = null;
+              kiteService.initialized = false;
+              console.log('🗑️ Expired token deleted from DB');
+            } catch (delErr) {
+              console.warn('Could not delete expired token:', delErr.message);
+            }
+          }
+
+          if (sessionValid) {
+            const result = await kiteStreamService.start(io);
+            console.log('✅ Kite stream auto-start result:', result);
+
+            // ── Auto-sync missing instruments after stream starts ──
+            try {
+              const { syncKiteInstruments } = require('./utils/syncKiteInstruments');
+              const syncResult = await syncKiteInstruments();
+
+              if (syncResult.success && syncResult.upserted > 0) {
+                console.log(`📊 Auto-synced ${syncResult.upserted} new instruments`);
+                await kiteStreamService.refreshSubscriptions();
+                console.log('🔄 Stream refreshed with new tokens');
+              } else {
+                console.log('📊 All instruments already in sync');
+              }
+            } catch (syncErr) {
+              console.warn('⚠️ Auto instrument sync failed:', syncErr.message);
+            }
           }
         } else {
           console.log('ℹ️ Kite session not ready. Admin must create session daily.');

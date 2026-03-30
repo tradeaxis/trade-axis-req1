@@ -199,64 +199,49 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
 
 // ============ EXPIRY FILTER HELPER ============
 const filterByExpiry = (symbolsList) => {
+  // When searching, DON'T filter by expiry — show all matches
+  // This function is only for the default watchlist view
   const now = new Date();
-
-  const withExpiry = symbolsList.filter((s) => s.expiry_date);
-  const withoutExpiry = symbolsList.filter((s) => !s.expiry_date);
-
+  // Compare date-only (set time to start of day so "today" is included)
+  const todayStr = now.toISOString().slice(0, 10);
+ 
+  const withExpiry    = symbolsList.filter(s => s.expiry_date);
+  const withoutExpiry = symbolsList.filter(s => !s.expiry_date);
+ 
   if (withExpiry.length === 0) return symbolsList;
-
-  // Find future expiries sorted by date
-  const futureExpiries = withExpiry
-    .filter((s) => new Date(s.expiry_date) >= now)
-    .sort((a, b) => new Date(a.expiry_date) - new Date(b.expiry_date));
-
-  if (futureExpiries.length === 0) return symbolsList;
-
-  // Nearest expiry month
-  const nearestExp = new Date(futureExpiries[0].expiry_date);
-  const nearMonth = nearestExp.getMonth();
-  const nearYear = nearestExp.getFullYear();
-
-  // All expiries in the nearest month — find the LAST one
-  const nearMonthDates = [
+ 
+  // All future expiry dates INCLUDING today, sorted ascending
+  const futureExpiryDates = [
     ...new Set(
-      futureExpiries
-        .filter((s) => {
-          const e = new Date(s.expiry_date);
-          return e.getMonth() === nearMonth && e.getFullYear() === nearYear;
+      withExpiry
+        .filter(s => {
+          const expStr = new Date(s.expiry_date).toISOString().slice(0, 10);
+          return expStr >= todayStr;  // >= today, not > today
         })
-        .map((s) => new Date(s.expiry_date).getTime())
-    ),
-  ].sort((a, b) => a - b);
-
-  const lastNearExpiry =
-    nearMonthDates.length > 0
-      ? new Date(nearMonthDates[nearMonthDates.length - 1])
-      : null;
-
-  const daysToExpiry = lastNearExpiry
-    ? (lastNearExpiry - now) / (1000 * 60 * 60 * 24)
-    : Infinity;
-
-  // Show next month only if within 5 days of current month's last expiry
-  const showNextMonth = daysToExpiry <= 5;
-  const nextMonth = (nearMonth + 1) % 12;
-  const nextYear = nearMonth === 11 ? nearYear + 1 : nearYear;
-
-  const filtered = withExpiry.filter((s) => {
-    const exp = new Date(s.expiry_date);
-    if (exp < now) return false;
-
-    const expMonth = exp.getMonth();
-    const expYear = exp.getFullYear();
-
-    if (expMonth === nearMonth && expYear === nearYear) return true;
-    if (showNextMonth && expMonth === nextMonth && expYear === nextYear) return true;
-
-    return false;
+        .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
+    )
+  ].sort();
+ 
+  if (futureExpiryDates.length === 0) {
+    // All expired — show symbols with the MOST RECENT past expiry (fallback)
+    const latestPast = withExpiry
+      .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
+      .sort()
+      .reverse()[0];
+    return [...withExpiry.filter(s => {
+      const d = new Date(s.expiry_date).toISOString().slice(0, 10);
+      return d === latestPast;
+    }), ...withoutExpiry];
+  }
+ 
+  // Show nearest 3 distinct expiry dates (was 2, now 3 to be safer)
+  const showDates = new Set(futureExpiryDates.slice(0, 3));
+ 
+  const filtered = withExpiry.filter(s => {
+    const d = new Date(s.expiry_date).toISOString().slice(0, 10);
+    return showDates.has(d);
   });
-
+ 
   return [...filtered, ...withoutExpiry];
 };
 
@@ -351,7 +336,7 @@ const Dashboard = () => {
 
   // ── Core state ──
   const [selectedAccount, setSelectedAccount] = useState(null);
-  const [selectedSymbol, setSelectedSymbol] = useState('NIFTY-FUT');
+  const [selectedSymbol, setSelectedSymbol] = useState('');
   const [symbolData, setSymbolData] = useState(null);
 
   // Mobile tabs
@@ -461,12 +446,49 @@ const Dashboard = () => {
   // ──────────────────────────────────────
 
   // ── Debounced search ──
+  // ── Debounced search + backend fallback ──
   useEffect(() => {
     const timer = setTimeout(() => {
       setSearchTerm(quotesLocalSearch);
     }, 300);
     return () => clearTimeout(timer);
   }, [quotesLocalSearch]);
+
+  // ── Backend search when user types a search term ──
+  useEffect(() => {
+    if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+
+    if (!searchTerm || searchTerm.trim().length < 2) {
+      setBackendSearchResults([]);
+      setBackendSearchLoading(false);
+      return;
+    }
+
+    setBackendSearchLoading(true);
+
+    backendSearchTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await api.get('/market/search', {
+          params: { q: searchTerm.trim(), limit: 100 },
+        });
+        if (res.data.success && res.data.symbols) {
+          setBackendSearchResults(res.data.symbols);
+          console.log(`🔍 Backend search "${searchTerm}": ${res.data.symbols.length} results`);
+        } else {
+          setBackendSearchResults([]);
+        }
+      } catch (err) {
+        console.error('Backend search error:', err);
+        setBackendSearchResults([]);
+      } finally {
+        setBackendSearchLoading(false);
+      }
+    }, 400);
+
+    return () => {
+      if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+    };
+  }, [searchTerm]);
 
   // ── History dropdown outside-click ──
   useEffect(() => {
@@ -535,21 +557,73 @@ const Dashboard = () => {
     fetchAllFuturesSymbols();
   }, [fetchAllFuturesSymbols]);
 
+    // ── Backend search fallback for QuotesTab ──
+  const [backendSearchResults, setBackendSearchResults] = useState([]);
+  const [backendSearchLoading, setBackendSearchLoading] = useState(false);
+  const backendSearchTimerRef = useRef(null);
+
+  const searchBackend = useCallback(async (term) => {
+    if (!term || term.trim().length < 2) {
+      setBackendSearchResults([]);
+      return;
+    }
+    setBackendSearchLoading(true);
+    try {
+      const res = await api.get('/market/search', { params: { q: term.trim(), limit: 100 } });
+      if (res.data.success && res.data.symbols) {
+        setBackendSearchResults(res.data.symbols);
+        console.log(`🔍 Backend search "${term}": ${res.data.symbols.length} results`);
+      } else {
+        setBackendSearchResults([]);
+      }
+    } catch (err) {
+      console.error('Backend search error:', err);
+      setBackendSearchResults([]);
+    } finally {
+      setBackendSearchLoading(false);
+    }
+  }, []);
+
+  // Trigger backend search when local search yields no results
+  useEffect(() => {
+    if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+
+    if (!searchTerm || searchTerm.trim().length < 2) {
+      setBackendSearchResults([]);
+      return;
+    }
+
+    backendSearchTimerRef.current = setTimeout(() => {
+      searchBackend(searchTerm);
+    }, 400);
+
+    return () => {
+      if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+    };
+  }, [searchTerm, searchBackend]);
+
   // ── Set initial symbol when symbols become available ──
   const initialSymbolSetRef = useRef(false);
   useEffect(() => {
     if (initialSymbolSetRef.current) return;
     const allSyms = allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
     if (!allSyms.length) return;
-
+ 
     initialSymbolSetRef.current = true;
-    const exists = selectedSymbol && allSyms.some((s) => s.symbol === selectedSymbol);
-    if (!exists) {
-      const nifty = allSyms.find(
-        (s) => s.symbol === 'NIFTY-I' || s.symbol?.includes('NIFTY')
-      );
-      setSelectedSymbol(nifty?.symbol || allSyms[0].symbol);
-    }
+ 
+    // If already have a valid symbol, keep it
+    if (selectedSymbol && allSyms.some(s => s.symbol === selectedSymbol)) return;
+ 
+    // Prefer NIFTY index series alias (series = 'I' = nearest month)
+    const nifty = allSyms.find(s =>
+      (s.underlying === 'NIFTY' || s.symbol.startsWith('NIFTY')) &&
+      s.series === 'I'
+    ) || allSyms.find(s =>
+      s.symbol.startsWith('NIFTY') && !s.symbol.includes('BANK') && !s.symbol.includes('FIN') && !s.symbol.includes('MID')
+    ) || allSyms.find(s => s.underlying === 'NIFTY')
+      || allSyms[0];
+ 
+    if (nifty) setSelectedSymbol(nifty.symbol);
   }, [allFuturesSymbols, symbols]);
 
   // ── Fetch trades when account changes ──
@@ -825,8 +899,19 @@ const Dashboard = () => {
   }, [symbols, searchTerm, selectedCategory, activeSymbols]);
 
   const quotesDisplayedSymbols = useMemo(() => {
-    const sourceList =
-      allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
+    // Merge local symbols + backend search results (deduped)
+    const localList = allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
+    const localSet = new Set(localList.map(s => s.symbol));
+    const merged = [...localList];
+    for (const bs of backendSearchResults) {
+      if (!localSet.has(bs.symbol)) {
+        merged.push(bs);
+        localSet.add(bs.symbol);
+      }
+    }
+    const sourceList = merged;
+
+    // 0) STRICT FUTURES ONLY
 
     // 0) STRICT FUTURES ONLY — exclude equity/cash, include Gift Nifty
     let list = sourceList.filter((s) => {
@@ -847,10 +932,8 @@ const Dashboard = () => {
       if (s.series === 'I' || s.series === 'II' || s.series === 'III') return true;
       if (seg === 'NFO' || seg === 'MCX' || seg === 'CDS' || seg === 'BFO') return true;
       if (exch === 'MCX' || exch === 'CDS') return true;
-      // Commodity keywords
       if (/GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/i.test(sym)) return true;
 
-      // Exclude everything else (stocks, equity, ETF, options, etc.)
       return false;
     });
 
@@ -890,9 +973,11 @@ const Dashboard = () => {
     }
 
     // 2) Expiry filter — only current month (+ next month if within 2 days)
-    list = filterByExpiry(list);
+    if (!searchTerm.trim()) {
+      list = filterByExpiry(list);
+    }
 
-    // 3) If searching → search ALL visible symbols
+    // 3) If searching → search ALL visible symbols (local + backend)
     if (searchTerm.trim()) {
       const rawTerm = searchTerm.trim().toLowerCase();
       const term = rawTerm.replace(/[\s_-]/g, '');
@@ -929,7 +1014,7 @@ const Dashboard = () => {
       // Deduplicate: show only 1 per underlying per expiry month
       const seen = new Set();
       const deduped = results.filter((s) => {
-        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT?$/i,'').toUpperCase();
+        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT?$/i, '').toUpperCase();
         const m = s.expiry_date ? new Date(s.expiry_date).getMonth() : 'x';
         const key = `${u}|${m}`;
         if (seen.has(key)) return false;
@@ -942,17 +1027,15 @@ const Dashboard = () => {
     // 4) Not searching → show watchlist symbols only
     const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
     if (wl.size === 0) {
-      // Show nearest-expiry one per underlying
       const seenD = new Set();
       return list.filter((s) => {
-        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i,'').replace(/FUT$/i,'').replace(/-I+$/,'').toUpperCase();
+        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i, '').replace(/FUT$/i, '').replace(/-I+$/, '').toUpperCase();
         if (seenD.has(u)) return false;
         seenD.add(u);
         return true;
       }).slice(0, 20);
     }
     const wlFiltered = list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
-    // Deduplicate watchlist symbols too
     const seenWl = new Set();
     return wlFiltered.filter((s) => {
       const u = (s.underlying || s.symbol || '').toUpperCase();
@@ -962,7 +1045,7 @@ const Dashboard = () => {
       seenWl.add(key);
       return true;
     });
-  }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols]);
+  }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols, backendSearchResults]);
 
   const filteredHistoryTrades = useMemo(() => {
     const start = getPeriodStart(historyPeriod);
@@ -2221,11 +2304,18 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           ) : quotesDisplayedSymbols.length === 0 ? (
             <div className="p-8 text-center" style={{ color: textMuted }}>
               {searchTerm ? (
-                <>
-                  <Search size={48} className="mx-auto mb-3 opacity-30" />
-                  <div className="text-base mb-1">No symbols found for &quot;{searchTerm}&quot;</div>
-                  <div className="text-sm">Try searching by underlying name (e.g., RELIANCE, TCS, GOLD)</div>
-                </>
+                backendSearchLoading ? (
+                  <>
+                    <RefreshCw size={32} className="animate-spin mx-auto mb-3" />
+                    <div className="text-base">Searching for &quot;{searchTerm}&quot;...</div>
+                  </>
+                ) : (
+                  <>
+                    <Search size={48} className="mx-auto mb-3 opacity-30" />
+                    <div className="text-base mb-1">No symbols found for &quot;{searchTerm}&quot;</div>
+                    <div className="text-sm">Try searching by underlying name (e.g., RELIANCE, TCS, GOLD)</div>
+                  </>
+                )
               ) : (
                 <>
                   <Star size={48} className="mx-auto mb-3 opacity-30" />
@@ -2241,22 +2331,20 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               const quote = quotes?.[sym.symbol] || sym;
               const symBid = Number(quote.bid || sym.bid || sym.last_price || 0);
               const symAsk = Number(quote.ask || sym.ask || sym.last_price || 0);
-              const rawLow = Number(
-                quote?.day_low || quote?.ohlc_low ||
-                sym.day_low || sym.low_price || sym.ohlc_low ||
-                (sym.ohlc && sym.ohlc.low) || 0
+              // Correct field names from marketStore updatePrice():
+              //   quote.high = from item.high (set by kiteStreamService: dayHigh)
+              //   quote.low  = from item.low  (set by kiteStreamService: dayLow)
+              // DB fallback: high_price, low_price columns
+              const symHigh = Number(
+                quote?.high       ||   // live from socket (priceData.high)
+                sym.high_price    ||   // DB column
+                0
               );
-              const rawHigh = Number(
-                quote?.day_high || quote?.ohlc_high ||
-                sym.day_high || sym.high_price || sym.ohlc_high ||
-                (sym.ohlc && sym.ohlc.high) || 0
+              const symLow = Number(
+                quote?.low        ||   // live from socket (priceData.low)
+                sym.low_price     ||   // DB column
+                0
               );
-              const quoteLow = Number(quote?.low || 0);
-              const quoteHigh = Number(quote?.high || 0);
-              const symLow = rawLow > 0 ? rawLow
-                : (quoteLow > 0 && quoteLow !== symBid && quoteLow !== symAsk) ? quoteLow : 0;
-              const symHigh = rawHigh > 0 ? rawHigh
-                : (quoteHigh > 0 && quoteHigh !== symBid && quoteHigh !== symAsk) ? quoteHigh : 0;
               const symChange = Number(quote?.change ?? quote?.change_value ?? sym.change_value ?? 0);
               const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
               const marketOpen = isMarketOpenNow(sym.symbol);
@@ -3693,9 +3781,9 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             </div>
             <div
               className="font-bold text-base"
-              style={{ color: accountStats.floatingPnL >= 0 ? '#26a69a' : '#ef5350' }}
+              style={{ color: accountStats.pnl >= 0 ? '#26a69a' : '#ef5350' }}
             >
-              {accountStats.floatingPnL >= 0 ? '+' : ''}{formatINR(accountStats.floatingPnL)}
+              {accountStats.pnl >= 0 ? '+' : ''}{formatINR(accountStats.pnl)}
             </div>
           </div>
         </div>

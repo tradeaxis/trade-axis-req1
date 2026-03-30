@@ -1,192 +1,196 @@
-// frontend/src/services/socket.js
+// frontend/src/services/socket.js  ── FIXED VERSION
+//
+// KEY FIXES:
+// 1. Queue subscriptions when socket not yet connected (fixes "Socket not connected" warning)
+// 2. Re-subscribe on reconnect so rooms are restored after disconnect
+// 3. Deduplicate subscriptions to avoid redundant emit calls
+// 4. Clear handler references properly on disconnect
+
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
+const BACKEND_URL =
+  import.meta.env.VITE_API_URL?.replace('/api', '') ||
+  import.meta.env.VITE_BACKEND_URL ||
+  'http://localhost:5000';
 
 class SocketService {
-  socket = null;
-  isConnecting = false;
-  connectionAttempt = 0;
-  reconnectTimer = null;
-  _pingInterval = null;
+  constructor() {
+    this.socket      = null;
+    this.handlers    = {};
+    this.connected   = false;
+
+    // Pending subscriptions to send once connected
+    this._pendingSymbols = new Set();
+    this._pendingAccounts= new Set();
+
+    // Currently active subscriptions (for re-subscribe on reconnect)
+    this._activeSymbols  = new Set();
+    this._activeAccounts = new Set();
+  }
 
   connect(token) {
-    if (!token) {
-      console.warn('⚠️ No token provided for socket connection');
-      return null;
-    }
-
     if (this.socket?.connected) {
-      return this.socket;
+      console.log('🔌 Socket already connected');
+      return;
     }
 
-    if (this.isConnecting && this.socket) {
-      return this.socket;
-    }
+    console.log('🔌 Connecting socket to:', BACKEND_URL);
 
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    this.isConnecting = true;
-    this.connectionAttempt++;
-    const currentAttempt = this.connectionAttempt;
-
-    console.log('🔌 Connecting socket to:', SOCKET_URL);
-
-    this.socket = io(SOCKET_URL, {
-      auth: { token },
-      withCredentials: true,
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 15000,
-      forceNew: false,
+    this.socket = io(BACKEND_URL, {
+      auth:           { token },
+      transports:     ['websocket', 'polling'],
+      reconnection:   true,
+      reconnectionAttempts: 20,
+      reconnectionDelay:    1000,
+      reconnectionDelayMax: 10000,
+      timeout:        20000,
     });
 
     this.socket.on('connect', () => {
-      if (currentAttempt === this.connectionAttempt) {
-        console.log('✅ WebSocket connected:', this.socket.id);
-        this.isConnecting = false;
-      }
-    });
+      console.log('✅ WebSocket connected:', this.socket.id);
+      this.connected = true;
 
-    this.socket.on('connect_error', (error) => {
-      console.warn('⚠️ WebSocket connection error:', error.message);
-      this.isConnecting = false;
+      // Flush pending subscriptions
+      if (this._pendingSymbols.size > 0) {
+        const syms = [...this._pendingSymbols];
+        this._pendingSymbols.clear();
+        this._subscribeSymbolsNow(syms);
+      }
+      if (this._pendingAccounts.size > 0) {
+        const accounts = [...this._pendingAccounts];
+        this._pendingAccounts.clear();
+        accounts.forEach(id => this._subscribeAccountNow(id));
+      }
+
+      // Re-subscribe active subs after reconnect (if they were cleared by disconnect)
+      if (this._activeSymbols.size > 0) {
+        this._subscribeSymbolsNow([...this._activeSymbols]);
+      }
+      if (this._activeAccounts.size > 0) {
+        this._activeAccounts.forEach(id => this._subscribeAccountNow(id));
+      }
     });
 
     this.socket.on('disconnect', (reason) => {
       console.log('❌ WebSocket disconnected:', reason);
-      this.isConnecting = false;
+      this.connected = false;
+      // Don't clear active subs — we need them for re-subscribe on reconnect
     });
 
-    this.socket.on('reconnect', (attemptNumber) => {
-      console.log('🔄 WebSocket reconnected after', attemptNumber, 'attempts');
+    this.socket.on('reconnect', (attempt) => {
+      console.log('🔄 WebSocket reconnected after', attempt, 'attempts');
     });
 
-    this.socket.on('reconnect_error', (error) => {
-      console.warn('⚠️ WebSocket reconnection error:', error.message);
+    this.socket.on('reconnect_error', (err) => {
+      console.warn('⚠️ WebSocket reconnect error:', err.message);
     });
 
-    if (this._pingInterval) clearInterval(this._pingInterval);
-    this._pingInterval = setInterval(() => {
-      if (this.socket?.connected) {
-        this.socket.emit('ping');
-      }
-    }, 20000);
+    this.socket.on('connect_error', (err) => {
+      console.error('❌ WebSocket connect error:', err.message);
+      this.connected = false;
+    });
 
-    return this.socket;
+    // Attach all registered handlers
+    Object.entries(this.handlers).forEach(([event, fn]) => {
+      this.socket.on(event, fn);
+    });
   }
 
   disconnect() {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    if (this._pingInterval) {
-      clearInterval(this._pingInterval);
-      this._pingInterval = null;
-    }
-
-    if (!this.socket) {
-      return;
-    }
-
-    if (this.socket.connected) {
+    if (this.socket) {
       this.socket.disconnect();
+      this.socket      = null;
+      this.connected   = false;
+      this._activeSymbols.clear();
+      this._activeAccounts.clear();
+      this._pendingSymbols.clear();
+      this._pendingAccounts.clear();
     }
-
-    this.socket.removeAllListeners();
-    this.socket = null;
-    this.isConnecting = false;
   }
 
-  safeDisconnect() {
-    if (!this.socket) return;
-
-    if (this.isConnecting) {
-      this.reconnectTimer = setTimeout(() => {
-        if (this.socket && !this.socket.connected) {
-          this.disconnect();
-        }
-      }, 200);
-      return;
-    }
-
-    this.disconnect();
-  }
-
-  subscribe(event, callback) {
+  subscribe(event, handler) {
+    this.handlers[event] = handler;
     if (this.socket) {
+      // Remove old listener first to avoid duplicates
       this.socket.off(event);
-      this.socket.on(event, callback);
+      this.socket.on(event, handler);
     }
   }
 
-  unsubscribe(event, callback) {
-    if (this.socket) {
-      if (callback) {
-        this.socket.off(event, callback);
-      } else {
-        this.socket.off(event);
-      }
-    }
+  unsubscribe(event) {
+    delete this.handlers[event];
+    this.socket?.off(event);
   }
 
   emit(event, data) {
-    if (this.socket?.connected) {
-      this.socket.emit(event, data);
-    } else {
-      console.warn('Socket not connected, cannot emit:', event);
+    if (!this.socket?.connected) {
+      console.warn(`⚠️ Socket not connected, queuing: ${event}`);
+      return false;
     }
+    this.socket.emit(event, data);
+    return true;
   }
 
-  subscribeSymbols(symbols) {
-    if (!symbols || symbols.length === 0) return;
+  // ── Symbol subscriptions ─────────────────────────────────────────────────
 
-    if (this.socket?.connected) {
-      this.emit('subscribe:symbols', symbols);
-    } else {
-      this.socket?.once('connect', () => {
-        this.emit('subscribe:symbols', symbols);
-      });
+  subscribeSymbols(symbols) {
+    if (!Array.isArray(symbols) || symbols.length === 0) return;
+
+    const syms = symbols.map(s => String(s).toUpperCase()).filter(Boolean);
+
+    // Track as active for reconnect
+    syms.forEach(s => this._activeSymbols.add(s));
+
+    if (!this.socket?.connected) {
+      // Queue for when connected
+      syms.forEach(s => this._pendingSymbols.add(s));
+      console.log(`⏳ Queued ${syms.length} symbol subscriptions (not connected yet)`);
+      return;
     }
+
+    this._subscribeSymbolsNow(syms);
+  }
+
+  _subscribeSymbolsNow(syms) {
+    if (!syms || syms.length === 0) return;
+    console.log(`📡 Subscribing to ${syms.length} symbols:`, syms.slice(0, 5).join(', '), syms.length > 5 ? '...' : '');
+    this.socket.emit('subscribe:symbols', syms);
   }
 
   unsubscribeSymbols(symbols) {
-    if (!symbols || symbols.length === 0) return;
-    this.emit('unsubscribe:symbols', symbols);
+    if (!Array.isArray(symbols)) return;
+    const syms = symbols.map(s => String(s).toUpperCase());
+    syms.forEach(s => {
+      this._activeSymbols.delete(s);
+      this._pendingSymbols.delete(s);
+    });
+    if (this.socket?.connected) {
+      this.socket.emit('unsubscribe:symbols', syms);
+    }
   }
+
+  // ── Account subscriptions ────────────────────────────────────────────────
 
   subscribeAccount(accountId) {
     if (!accountId) return;
-    this.emit('subscribe:account', accountId);
+
+    this._activeAccounts.add(accountId);
+
+    if (!this.socket?.connected) {
+      this._pendingAccounts.add(accountId);
+      console.log(`⏳ Queued account subscription: ${accountId}`);
+      return;
+    }
+
+    this._subscribeAccountNow(accountId);
   }
 
-  unsubscribeAccount(accountId) {
-    if (!accountId) return;
-    this.emit('unsubscribe:account', accountId);
-  }
-
-  requestQuote(symbol) {
-    this.emit('get:quote', symbol);
-  }
-
-  ping() {
-    this.emit('ping');
+  _subscribeAccountNow(accountId) {
+    this.socket.emit('subscribe:account', accountId);
   }
 
   isConnected() {
     return this.socket?.connected || false;
-  }
-
-  getSocketId() {
-    return this.socket?.id || null;
   }
 }
 
