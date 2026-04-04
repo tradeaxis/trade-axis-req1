@@ -7,10 +7,20 @@ const MarketWatch = ({ onSymbolSelect, selectedSymbol }) => {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [favorites, setFavorites] = useState(['RELIANCE', 'TCS', 'NIFTY50']);
-
   useEffect(() => {
     fetchSymbols();
   }, [fetchSymbols]);
+
+  useEffect(() => {
+    if (!filteredSymbols || filteredSymbols.length === 0) return;
+    
+    const symbolNames = filteredSymbols.map(s => s.symbol).filter(Boolean);
+    if (symbolNames.length > 0) {
+      import('../../services/socket').then(({ default: socketService }) => {
+        socketService.subscribeSymbols(symbolNames);
+      });
+    }
+  }, [filteredSymbols]);
 
   const categories = [
     { id: 'all', label: 'All' },

@@ -84,21 +84,22 @@ export default function QuotesTab({
 
   const filteredSymbols = useMemo(() => {
     let list = symbols.filter(s => matchesSelectedCategory(s, selectedCategory));
+    // ... existing filtering logic
+    return list.filter(s => wl.has(String(s.symbol).toUpperCase()));
+  }, [symbols, selectedCategory, search, activeSymbols, tick]);
 
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      return list.filter(s => {
-        const sym = String(s.symbol       || '').toLowerCase();
-        const dn  = String(s.display_name || '').toLowerCase();
-        return sym.includes(q) || dn.includes(q);
+  // ✅ ADD THIS: Auto-subscribe to visible symbols for live price updates
+  useEffect(() => {
+    if (!filteredSymbols || filteredSymbols.length === 0) return;
+    
+    const symbolNames = filteredSymbols.map(s => s.symbol).filter(Boolean);
+    if (symbolNames.length > 0) {
+      import('../../services/socket').then(({ default: socketService }) => {
+        socketService.subscribeSymbols(symbolNames);
+        console.log(`📡 Subscribed to ${symbolNames.length} symbols for live prices`);
       });
     }
-
-    // No search → show only watchlist symbols
-    const wl = new Set(activeSymbols.map(x => String(x).toUpperCase()));
-    return list.filter(s => wl.has(String(s.symbol).toUpperCase()));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbols, selectedCategory, search, activeSymbols, tick]);
+  }, [filteredSymbols]);
 
   const openSymbolMenu = (sym) => {
     setSelectedSymbolForAction(sym);

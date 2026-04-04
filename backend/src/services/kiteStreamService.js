@@ -239,6 +239,19 @@ class KiteStreamService {
   handleTicks(ticks, mode = 'full') {
     if (!ticks || ticks.length === 0) return;
 
+    // DEBUG: Log tick batches (sample every 50 to avoid spam)
+    if (!this._tickCounter) this._tickCounter = 0;
+    this._tickCounter++;
+    
+    if (this._tickCounter % 50 === 1) {
+      const now = new Date().toISOString().slice(11, 19);
+      const samples = ticks.slice(0, 3).map(t => {
+        const syms = this.tokenToSymbols.get(Number(t.instrument_token))?.symbols || ['?'];
+        return `${syms[0]}:${t.last_price}`;
+      }).join(', ');
+      console.log(`[${now}] 📊 Batch #${this._tickCounter}: ${ticks.length} ticks (${samples}...)`);
+    }
+
     for (const t of ticks) {
       const token    = Number(t.instrument_token);
       const entry    = this.tokenToSymbols.get(token);
@@ -265,14 +278,6 @@ class KiteStreamService {
       // ── Bid / Ask resolution ─────────────────────────────────────────────
       // 'full' mode: use market depth (most accurate)
       // 'quote'/'ltp' mode: no depth available → simulate spread using tick_size
-      //
-      // For Indian futures (NFO/MCX):
-      //   Bid = last - (tickSize * 1)   (conservative 1-tick spread)
-      //   Ask = last + (tickSize * 1)
-      //
-      // This is approximate but far better than bid=ask=last which causes
-      // wrong P&L calculations (a buy opened at ask=last and closed at bid=last
-      // would show 0 P&L instead of negative spread).
       let bid, ask;
 
       const hasDepth = mode === 'full' && t.depth?.buy?.length && t.depth?.sell?.length;
@@ -298,36 +303,49 @@ class KiteStreamService {
         last,
         bid,
         ask,
-        open:     dayOpen   > 0 ? dayOpen   : last,
-        high:     dayHigh   > 0 ? dayHigh   : last,
-        low:      dayLow    > 0 ? dayLow    : last,
+        open:      dayOpen   > 0 ? dayOpen   : last,
+        high:      dayHigh   > 0 ? dayHigh   : last,
+        low:       dayLow    > 0 ? dayLow    : last,
         prevClose: prevClose || last,
-        change:   parseFloat(chgVal.toFixed(2)),
+        change:    parseFloat(chgVal.toFixed(2)),
         changePct: parseFloat(chgPct.toFixed(2)),
-        volume:   Number(t.volume_traded || t.volume || 0),
+        volume:    Number(t.volume_traded || t.volume || 0),
         timestamp: Date.now(),
       };
 
-      // ── Emit to all alias symbols for this token ─────────────────────────
+      // ── Emit to ALL alias symbols for this token ─────────────────────────
       for (const sym of entry.symbols) {
+        // Update cache
         this.priceCache.set(sym, priceData);
         this.dirtySymbols.add(sym);
 
         // Emit to socket room for this symbol (frontend subscribes to symbol name)
-        this.io?.to(`symbol:${sym}`).emit('price:update', {
-          symbol:        sym,
-          bid,
-          ask,
-          last,
-          open:          priceData.open,
-          high:          priceData.high,
-          low:           priceData.low,
-          change:        priceData.change,
-          changePercent: priceData.changePct,
-          volume:        priceData.volume,
-          timestamp:     priceData.timestamp,
-          source:        'kite',
-        });
+        if (this.io) {
+          const room = `symbol:${sym}`;
+          
+          // Sample logging: 1% of emissions when debugging
+          if (this._tickCounter % 100 === 1 && Math.random() < 0.1) {
+            const roomSize = this.io.sockets.adapter.rooms.get(room)?.size || 0;
+            if (roomSize > 0) {
+              console.log(`📤 ${sym}: ${last} → ${roomSize} client(s)`);
+            }
+          }
+          
+          this.io.to(room).emit('price:update', {
+            symbol:        sym,
+            bid,
+            ask,
+            last,
+            open:          priceData.open,
+            high:          priceData.high,
+            low:           priceData.low,
+            change:        priceData.change,
+            changePercent: priceData.changePct,
+            volume:        priceData.volume,
+            timestamp:     priceData.timestamp,
+            source:        'kite',
+          });
+        }
       }
     }
   }

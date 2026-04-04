@@ -164,7 +164,7 @@ class SocketHandler {
 
         // Check pending orders every 10s even after market close
         // so commodity/equity pending orders are auto-expired/removed from pending list
-        if (this.pnlDbCounter % 5 === 0) {
+        if (this.pnlDbCounter % 6 === 0) {
           tradingService.checkPendingOrders().catch((e) =>
             console.error('Pending order check error:', e.message)
           );
@@ -331,8 +331,8 @@ class SocketHandler {
           this.io.to(`account:${accountId}`).emit('account:update', payload);
         }
 
-        // 6. DB writes every 10s
-        if (this.pnlDbCounter % 5 === 0) {
+        // 6. DB writes every 30s (reduced from 10s to ease DB pressure)
+        if (this.pnlDbCounter % 6 === 0) {
           Promise.all(
             tradeUpdates.map(t =>
               supabase.from('trades').update({ current_price: t.currentPrice, profit: t.profit }).eq('id', t.id)
@@ -377,16 +377,16 @@ class SocketHandler {
         //   tradingService.checkPendingOrders().catch(() => {});
         // }
 
-        // 9. Stop-out check every 10s
-        if (this.pnlDbCounter % 5 === 0) {
+        // 9. Stop-out check every 30s
+        if (this.pnlDbCounter % 6 === 0) {
           await this.checkStopOut(accountPnL);
         }
       } catch (err) {
         console.error('P&L loop error:', err.message);
       }
-    }, 2000);
+    }, 5000);
 
-    console.log('💹 P&L loop started (2s emit, 10s DB write, stop-out check every 10s)');
+    console.log('💹 P&L loop started (5s emit, 30s DB write, stop-out check every 30s)');
   }
 
   async checkStopOut(accountPnL) {

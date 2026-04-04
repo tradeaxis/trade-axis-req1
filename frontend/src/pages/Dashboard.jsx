@@ -1,4 +1,5 @@
 // frontend/src/pages/Dashboard.jsx
+// Line 1-10 (approximately):
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { toast } from 'react-hot-toast';
 
@@ -7,6 +8,7 @@ import useTradingStore from '../store/tradingStore';
 import useMarketStore from '../store/marketStore';
 import useWatchlistStore from '../store/watchlistStore';
 import useSettingsStore from '../store/settingsStore';
+import useMarketSocket from '../hooks/useMarketSocket'; // ✅ ADD THIS LINE
 import AdminPanelPage from '../pages/AdminPanel';
 import AdminWithdrawals from '../components/admin/AdminWithdrawals';
 
@@ -198,53 +200,66 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
 };
 
 // ============ EXPIRY FILTER HELPER ============
+// Rules:
+// 1. Show ONLY current month (nearest expiry) contracts
+// 2. Show NEXT month contracts only when current month expiry is within 5 days
+// 3. Expiries are fetched from Kite (stored in symbols table)
 const filterByExpiry = (symbolsList) => {
-  // When searching, DON'T filter by expiry — show all matches
-  // This function is only for the default watchlist view
   const now = new Date();
-  // Compare date-only (set time to start of day so "today" is included)
   const todayStr = now.toISOString().slice(0, 10);
- 
+
   const withExpiry    = symbolsList.filter(s => s.expiry_date);
   const withoutExpiry = symbolsList.filter(s => !s.expiry_date);
- 
+
   if (withExpiry.length === 0) return symbolsList;
- 
-  // All future expiry dates INCLUDING today, sorted ascending
+
+  // Get all future (including today) expiry dates sorted ascending
   const futureExpiryDates = [
     ...new Set(
       withExpiry
         .filter(s => {
           const expStr = new Date(s.expiry_date).toISOString().slice(0, 10);
-          return expStr >= todayStr;  // >= today, not > today
+          return expStr >= todayStr;
         })
         .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
     )
   ].sort();
- 
+
   if (futureExpiryDates.length === 0) {
-    // All expired — show symbols with the MOST RECENT past expiry (fallback)
+    // All expired — show most recent (fallback)
     const latestPast = withExpiry
       .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
       .sort()
       .reverse()[0];
-    return [...withExpiry.filter(s => {
-      const d = new Date(s.expiry_date).toISOString().slice(0, 10);
-      return d === latestPast;
-    }), ...withoutExpiry];
+    return [
+      ...withExpiry.filter(s => new Date(s.expiry_date).toISOString().slice(0, 10) === latestPast),
+      ...withoutExpiry,
+    ];
   }
- 
-  // Show nearest 3 distinct expiry dates (was 2, now 3 to be safer)
-  const showDates = new Set(futureExpiryDates.slice(0, 3));
- 
+
+  // Nearest expiry date (current month contract)
+  const nearestExpiry = futureExpiryDates[0];
+  const nearestExpiryDate = new Date(nearestExpiry);
+
+  // Calculate days until nearest expiry
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysUntilExpiry = Math.ceil((nearestExpiryDate - now) / msPerDay);
+
+  // Determine which expiry dates to show
+  const showDates = new Set([nearestExpiry]); // Always show current month
+
+  // Show next month only if current month expiry is within 5 days
+  if (daysUntilExpiry <= 5 && futureExpiryDates.length > 1) {
+    showDates.add(futureExpiryDates[1]); // Add next month
+  }
+
   const filtered = withExpiry.filter(s => {
     const d = new Date(s.expiry_date).toISOString().slice(0, 10);
     return showDates.has(d);
   });
- 
+
   return [...filtered, ...withoutExpiry];
 };
-
 // ============ MARKET HOURS CHECK (frontend) ============
 const isMarketOpenNow = (symbol = null) => {
   const now = new Date();
@@ -323,12 +338,17 @@ const Dashboard = () => {
     renameWatchlist,
   } = useWatchlistStore();
 
+  // ✅ ADD THESE 2 LINES HERE:
+  // Socket connection for live price updates
+  const isSocketConnected = useMarketSocket();
+
   // ── All-symbols state (lifted from old QuotesTab) ──
   const [allFuturesSymbols, setAllFuturesSymbols] = useState([]);
   const [loadingAllSymbols, setLoadingAllSymbols] = useState(false);
   const [symbolsLoaded, setSymbolsLoaded] = useState(false);
   const symbolsFetchedRef = useRef(false);
   const quotesSearchInputRef = useRef(null);
+  const refreshingRef = useRef(false);
 
   // Theme
   const theme = useSettingsStore((s) => s.interface.theme);
@@ -435,6 +455,9 @@ const Dashboard = () => {
   }, []);
   const [isPartialClose, setIsPartialClose] = useState(false);
 
+  // ── Refresh state ──
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
     // ── Modify Pending Order Modal ──
   const [modifyPendingModal, setModifyPendingModal] = useState(null);
   const [modifyPendingPrice, setModifyPendingPrice] = useState('');
@@ -454,41 +477,41 @@ const Dashboard = () => {
     return () => clearTimeout(timer);
   }, [quotesLocalSearch]);
 
-  // ── Backend search when user types a search term ──
-  useEffect(() => {
-    if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+  // // ── Backend search when user types a search term ──
+  // useEffect(() => {
+  //   if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
 
-    if (!searchTerm || searchTerm.trim().length < 2) {
-      setBackendSearchResults([]);
-      setBackendSearchLoading(false);
-      return;
-    }
+  //   if (!searchTerm || searchTerm.trim().length < 2) {
+  //     setBackendSearchResults([]);
+  //     setBackendSearchLoading(false);
+  //     return;
+  //   }
 
-    setBackendSearchLoading(true);
+  //   setBackendSearchLoading(true);
 
-    backendSearchTimerRef.current = setTimeout(async () => {
-      try {
-        const res = await api.get('/market/search', {
-          params: { q: searchTerm.trim(), limit: 100 },
-        });
-        if (res.data.success && res.data.symbols) {
-          setBackendSearchResults(res.data.symbols);
-          console.log(`🔍 Backend search "${searchTerm}": ${res.data.symbols.length} results`);
-        } else {
-          setBackendSearchResults([]);
-        }
-      } catch (err) {
-        console.error('Backend search error:', err);
-        setBackendSearchResults([]);
-      } finally {
-        setBackendSearchLoading(false);
-      }
-    }, 400);
+  //   backendSearchTimerRef.current = setTimeout(async () => {
+  //     try {
+  //       const res = await api.get('/market/search', {
+  //         params: { q: searchTerm.trim(), limit: 100 },
+  //       });
+  //       if (res.data.success && res.data.symbols) {
+  //         setBackendSearchResults(res.data.symbols);
+  //         console.log(`🔍 Backend search "${searchTerm}": ${res.data.symbols.length} results`);
+  //       } else {
+  //         setBackendSearchResults([]);
+  //       }
+  //     } catch (err) {
+  //       console.error('Backend search error:', err);
+  //       setBackendSearchResults([]);
+  //     } finally {
+  //       setBackendSearchLoading(false);
+  //     }
+  //   }, 400);
 
-    return () => {
-      if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
-    };
-  }, [searchTerm]);
+  //   return () => {
+  //     if (backendSearchTimerRef.current) clearTimeout(backendSearchTimerRef.current);
+  //   };
+  // }, [searchTerm]);
 
   // ── History dropdown outside-click ──
   useEffect(() => {
@@ -823,44 +846,43 @@ const Dashboard = () => {
 
   const bid = Number(currentQuote?.bid || 0);
   const ask = Number(currentQuote?.ask || 0);
-  // Gross P&L for display (without commission)
+  // ✅ Net Floating P&L (already includes brokerage deduction in DB)
   const totalPnL = (openTrades || []).reduce(
-    (sum, t) => sum + Number(t.profit || 0) + Number(t.brokerage || 0),
+    (sum, t) => sum + Number(t.profit || 0),  // ← profit already net of entry brokerage
     0
   );
 
-  // Total commission from open trades
+  // Total commission from open trades (for display purposes only)
   const totalCommission = (openTrades || []).reduce(
     (sum, t) => sum + Number(t.brokerage || 0),
     0
   );
 
-  const accountStats = useMemo(() => {
-    const balance = Number(selectedAccount?.balance || 0); // ✅ constant/manual/admin controlled
-    const credit = Number(selectedAccount?.credit || 0);   // ✅ realized closed P&L
-    const margin = Number(selectedAccount?.margin || 0);
-    const leverage = selectedAccount?.leverage || 5;
+const accountStats = useMemo(() => {
+  const balance = Number(selectedAccount?.balance || 0);
+  const credit = Number(selectedAccount?.credit || 0);
+  const margin = Number(selectedAccount?.margin || 0);
+  const leverage = selectedAccount?.leverage || 5;
 
-    // ✅ floating pnl only from open trades
-    const pnl = (openTrades || []).reduce((sum, t) => sum + Number(t.profit || 0), 0);
+  // ✅ Use the same totalPnL variable (not recalculated)
+  const pnl = totalPnL;  // ← Changed from recalculating
 
-    // ✅ equity = balance + credit + floating pnl
-    const equity = balance + credit + pnl;
-    const freeMargin = Math.max(0, equity - margin);
-    const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
+  const equity = balance + credit + pnl;
+  const freeMargin = Math.max(0, equity - margin);
+  const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
 
-    return {
-      balance,
-      credit,
-      pnl,
-      equity,
-      margin,
-      freeMargin,
-      marginLevel,
-      leverage,
-      totalCommission,
-    };
-  }, [selectedAccount, openTrades, totalCommission]);
+  return {
+    balance,
+    credit,
+    pnl,           // ← Same as totalPnL
+    equity,
+    margin,
+    freeMargin,
+    marginLevel,
+    leverage,
+    totalCommission,
+  };
+}, [selectedAccount, totalPnL, totalCommission]);  // ← Add totalPnL dependency
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -972,10 +994,10 @@ const Dashboard = () => {
       });
     }
 
-    // 2) Expiry filter — only current month (+ next month if within 2 days)
-    if (!searchTerm.trim()) {
-      list = filterByExpiry(list);
-    }
+    // 2) Expiry filter is now applied conditionally below.
+    //    Previously it ran here unconditionally when not searching,
+    //    which removed watchlist symbols whose expiry wasn't in the
+    //    nearest 3 dates — causing "star marked but not in watchlist" bug.
 
     // 3) If searching → search ALL visible symbols (local + backend)
     if (searchTerm.trim()) {
@@ -1013,7 +1035,8 @@ const Dashboard = () => {
 
       // Deduplicate: show only 1 per underlying per expiry month
       const seen = new Set();
-      const deduped = results.filter((s) => {
+      const expiryFiltered = filterByExpiry(results);  // ✅ ADD THIS LINE
+      const deduped = expiryFiltered.filter((s) => {   // ✅ CHANGE results → expiryFiltered
         const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT?$/i, '').toUpperCase();
         const m = s.expiry_date ? new Date(s.expiry_date).getMonth() : 'x';
         const key = `${u}|${m}`;
@@ -1027,6 +1050,8 @@ const Dashboard = () => {
     // 4) Not searching → show watchlist symbols only
     const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
     if (wl.size === 0) {
+      // ✅ FIX: Apply expiry filter ONLY for default view (empty watchlist)
+      list = filterByExpiry(list);
       const seenD = new Set();
       return list.filter((s) => {
         const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i, '').replace(/FUT$/i, '').replace(/-I+$/, '').toUpperCase();
@@ -1035,6 +1060,8 @@ const Dashboard = () => {
         return true;
       }).slice(0, 20);
     }
+    // ✅ FIX: Watchlist has symbols → NO expiry filter.
+    //    User explicitly added these symbols; show them all.
     const wlFiltered = list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
     const seenWl = new Set();
     return wlFiltered.filter((s) => {
@@ -1148,7 +1175,11 @@ const Dashboard = () => {
       ? await removeSymbol(activeWatchlistId, s)
       : await addSymbol(activeWatchlistId, s);
 
-    if (res?.success === false) toast.error(res.message || 'Failed');
+    if (res?.success === false) {
+      toast.error(res.message || 'Failed');
+    } else if (res?.success) {
+      toast.success(exists ? 'Removed from watchlist' : 'Added to watchlist', { duration: 1500 });
+    }
   };
 
 const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
@@ -1526,6 +1557,44 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     setSelectedSymbolForAction(sym);
     setShowSymbolActionMenu(true);
   }, []);
+
+  const handleRefreshData = useCallback(async () => {
+    // Use ref to prevent multiple simultaneous refreshes
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setIsRefreshing(true);
+
+    try {
+      // Refresh account data
+      try {
+        const { data: authRes } = await api.get('/auth/me');
+        if (authRes?.success && authRes?.accounts) {
+          const refreshed = authRes.accounts.find((a) => a.id === selectedAccount?.id);
+          if (refreshed) setSelectedAccount(refreshed);
+        }
+      } catch (_) {}
+
+      // Refresh trades
+      if (selectedAccount?.id) {
+        await fetchOpenTrades(selectedAccount.id);
+        await fetchPendingOrders?.(selectedAccount.id);
+        await fetchTradeHistory(selectedAccount.id);
+      }
+
+      // Refresh watchlist
+      if (activeWatchlistId) {
+        await fetchWatchlistSymbols(activeWatchlistId);
+      }
+
+      toast.success('Refreshed', { duration: 1200, icon: '🔄' });
+    } catch (err) {
+      console.error('Refresh error:', err);
+      toast.error('Failed to refresh');
+    } finally {
+      setIsRefreshing(false);
+      refreshingRef.current = false;
+    }
+  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, activeWatchlistId, fetchWatchlistSymbols]);
 
   // ════════════════════════════════════════
   //  RENDER FUNCTIONS (not components — no hooks, no remount cycles)
@@ -3836,11 +3905,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             <div
               className="font-semibold text-sm"
               style={{
-                color: accountStats.pnl >= 0 ? '#26a69a' : '#ef5350',
+                color: accountStats.credit >= 0 ? '#26a69a' : '#ef5350',
               }}
             >
-              {accountStats.pnl >= 0 ? '+' : ''}
-              {formatINR(accountStats.pnl)}
+              {accountStats.credit >= 0 ? '+' : ''}
+              {formatINR(accountStats.credit)}
             </div>
           </div>
         </div>
@@ -5405,6 +5474,21 @@ const renderOrderConfirmation = () => {
           {formatINR(totalPnL)}
         </div>
 
+        {/* Mobile refresh button */}
+        <button
+          onClick={handleRefreshData}
+          disabled={isRefreshing}
+          className="lg:hidden p-2 rounded-lg disabled:opacity-50"
+          style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
+          title="Refresh"
+        >
+          <RefreshCw
+            size={18}
+            color={theme === 'light' ? '#64748b' : '#787b86'}
+            className={isRefreshing ? 'animate-spin' : ''}
+          />
+        </button>
+
         <div className="hidden lg:flex items-center gap-4">
           <div className="text-sm" style={{ color: '#787b86' }}>
             <span style={{ color: '#d1d4dc' }}>
@@ -5482,9 +5566,20 @@ const renderOrderConfirmation = () => {
 
       {/* Mobile — all render functions, no <Component /> */}
       <div
-        className="lg:hidden flex-1 overflow-hidden"
+        className="lg:hidden flex-1 overflow-hidden relative"
         style={{ paddingBottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))' }}
       >
+        {/* Pull-to-refresh indicator */}
+        {isRefreshing && (
+          <div
+            className="absolute top-0 left-0 right-0 flex items-center justify-center py-3 z-10"
+            style={{ background: theme === 'light' ? '#f1f5f9' : '#2a2e39' }}
+          >
+            <RefreshCw size={16} className="animate-spin mr-2" color="#2962ff" />
+            <span className="text-xs font-medium" style={{ color: '#2962ff' }}>Refreshing...</span>
+          </div>
+        )}
+        
         {activeTab === 'quotes' && renderQuotesTab()}
         {activeTab === 'chart' && renderChartTab()}
         {activeTab === 'trade' && renderTradeTab()}

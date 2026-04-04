@@ -3,7 +3,9 @@ const { supabase } = require('../config/supabase');
 
 let isMarketHoliday = false;
 let holidayMessage = '';
-let holidayDate = null; // YYYY-MM-DD or null for indefinite
+let holidayDate = null;
+let holidaysCache = []; // Array of YYYY-MM-DD strings
+let lastHolidayFetch = null;
 
 // ✅ Get today's date in IST as YYYY-MM-DD
 const getISTDateString = () => {
@@ -13,115 +15,117 @@ const getISTDateString = () => {
   return ist.toISOString().slice(0, 10);
 };
 
-// Load from DB on startup
-const loadHolidayFromDB = async () => {
+// ✅ Fetch holidays from Kite API
+const fetchHolidaysFromKite = async () => {
+  try {
+    const kiteService = require('./kiteService');
+    await kiteService.init();
+    
+    if (!kiteService.isSessionReady()) {
+      console.warn('⚠️ Cannot fetch holidays — Kite session not ready');
+      return [];
+    }
+
+    const kc = kiteService.getKiteInstance();
+    if (!kc) return [];
+
+    // Kite API: kc.getHolidays() returns array of holiday objects
+    const holidays = await kc.getHolidays();
+    
+    // Extract dates (format: YYYY-MM-DD)
+    const dates = (holidays || [])
+      .map(h => {
+        if (h.date) {
+          const d = new Date(h.date);
+          return d.toISOString().slice(0, 10);
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    console.log(`📅 Fetched ${dates.length} market holidays from Kite`);
+    
+    holidaysCache = dates;
+    lastHolidayFetch = Date.now();
+    
+    // Save to DB
+    await supabase
+      .from('app_settings')
+      .upsert({
+        key: 'kite_holidays',
+        value: JSON.stringify({ holidays: dates, fetchedAt: new Date().toISOString() }),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'key' });
+
+    return dates;
+  } catch (err) {
+    console.error('❌ Failed to fetch holidays from Kite:', err.message);
+    return [];
+  }
+};
+
+// ✅ Load holidays from DB (on startup or if cache is stale)
+const loadHolidaysFromDB = async () => {
   try {
     const { data } = await supabase
       .from('app_settings')
       .select('value')
-      .eq('key', 'market_holiday')
+      .eq('key', 'kite_holidays')
       .single();
 
     if (data?.value) {
       const parsed = JSON.parse(data.value);
-      isMarketHoliday = !!parsed.isHoliday;
-      holidayMessage = parsed.message || '';
-      holidayDate = parsed.date || null;
-
-      // Auto-disable if holiday date has passed
-      if (holidayDate) {
-        const today = getISTDateString();
-        if (today > holidayDate) {
-          isMarketHoliday = false;
-          holidayMessage = '';
-          holidayDate = null;
-          await saveHolidayToDB();
-        }
-      }
+      holidaysCache = parsed.holidays || [];
+      console.log(`📅 Loaded ${holidaysCache.length} holidays from DB`);
     }
   } catch (e) {
     // Table/row may not exist
   }
 };
 
-const saveHolidayToDB = async () => {
-  try {
-    const value = JSON.stringify({
-      isHoliday: isMarketHoliday,
-      message: holidayMessage,
-      date: holidayDate,
-    });
-
-    const { data: existing } = await supabase
-      .from('app_settings')
-      .select('id')
-      .eq('key', 'market_holiday')
-      .single();
-
-    if (existing) {
-      await supabase
-        .from('app_settings')
-        .update({ value, updated_at: new Date().toISOString() })
-        .eq('key', 'market_holiday');
-    } else {
-      await supabase
-        .from('app_settings')
-        .insert({ key: 'market_holiday', value, updated_at: new Date().toISOString() });
-    }
-  } catch (e) {
-    console.warn('Failed to save holiday to DB:', e.message);
-  }
+// ✅ Check if today is a holiday (from cache)
+const isHolidayActiveToday = () => {
+  const today = getISTDateString();
+  return holidaysCache.includes(today);
 };
 
-// Initialize on module load
-loadHolidayFromDB();
-
+// ✅ Manual holiday override (for testing or unexpected holidays)
 const setHoliday = (isHoliday, message = '', date = null) => {
   isMarketHoliday = !!isHoliday;
   holidayMessage = message || '';
   holidayDate = date || null;
-  saveHolidayToDB();
 
   console.log(
-    `📅 Market holiday ${isMarketHoliday ? 'ENABLED' : 'DISABLED'}${
+    `📅 Manual holiday ${isMarketHoliday ? 'ENABLED' : 'DISABLED'}${
       holidayMessage ? ': ' + holidayMessage : ''
     }${holidayDate ? ' (date: ' + holidayDate + ')' : ''}`
   );
 };
 
 const getHolidayStatus = () => ({
-  isHoliday: isMarketHoliday,
-  message: holidayMessage,
+  isHoliday: isMarketHoliday || isHolidayActiveToday(),
+  message: holidayMessage || (isHolidayActiveToday() ? 'Market Holiday (Kite)' : ''),
   date: holidayDate,
+  holidays: holidaysCache,
 });
 
-// ✅ Holiday is active only if:
-// 1. holiday mode is enabled
-// 2. no date is set OR today in IST matches holiday date
-const isHolidayActiveToday = () => {
-  if (!isMarketHoliday) return false;
-  if (!holidayDate) return true;
-  return getISTDateString() === holidayDate;
-};
-
-// Commodity keywords used to identify MCX/commodity symbols
+// Commodity keywords
 const COMMODITY_KEYWORDS =
   /^(GOLD|GOLDM|GOLDGUINEA|GOLDPETAL|SILVER|SILVERM|SILVERMIC|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MENTHAOIL)/i;
 
-/**
- * Check if a symbol belongs to the commodity/MCX segment
- */
 const isCommoditySymbol = (symbol, exchange = null) => {
   if (exchange && String(exchange).toUpperCase() === 'MCX') return true;
   if (!symbol) return false;
   return COMMODITY_KEYWORDS.test(String(symbol).toUpperCase());
 };
 
-/**
- * Check if market is open.
- * @param {string|null} symbol — if provided, uses commodity hours for MCX symbols
- */
 const isMarketOpen = (symbol = null, exchange = null) => {
+  // Check manual override first
+  if (isMarketHoliday && (!holidayDate || getISTDateString() === holidayDate)) {
+    return false;
+  }
+  
+  // Check Kite holidays
   if (isHolidayActiveToday()) return false;
 
   const now = new Date();
@@ -133,20 +137,15 @@ const isMarketOpen = (symbol = null, exchange = null) => {
 
   const mins = ist.getHours() * 60 + ist.getMinutes();
 
-  // Commodity (MCX) market: 9:00 AM to 11:30 PM IST
   if (isCommoditySymbol(symbol, exchange)) {
     return mins >= 9 * 60 && mins <= 23 * 60 + 30;
   }
 
-  // Default: Equity/Index market 9:15 AM to 3:30 PM IST
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 };
 
-/**
- * Check if ANY market segment is currently open
- */
 const isAnyMarketOpen = () => {
-  if (isHolidayActiveToday()) return false;
+  if (isMarketHoliday || isHolidayActiveToday()) return false;
 
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
@@ -159,10 +158,34 @@ const isAnyMarketOpen = () => {
   return mins >= 9 * 60 && mins <= 23 * 60 + 30;
 };
 
+// ✅ Auto-refresh holidays every 24 hours
+const startHolidayRefresh = () => {
+  // Fetch on startup (after 10s delay to let Kite init)
+  setTimeout(() => {
+    loadHolidaysFromDB().then(() => {
+      // If cache is empty or older than 7 days, fetch from Kite
+      if (
+        holidaysCache.length === 0 ||
+        !lastHolidayFetch ||
+        Date.now() - lastHolidayFetch > 7 * 24 * 60 * 60 * 1000
+      ) {
+        fetchHolidaysFromKite();
+      }
+    });
+  }, 10000);
+
+  // Refresh every 24 hours
+  setInterval(() => {
+    fetchHolidaysFromKite();
+  }, 24 * 60 * 60 * 1000);
+};
+
 module.exports = {
   setHoliday,
   getHolidayStatus,
   isMarketOpen,
   isCommoditySymbol,
   isAnyMarketOpen,
+  fetchHolidaysFromKite,
+  startHolidayRefresh,
 };
