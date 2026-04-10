@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Trade Axis</string>
+    <string name="title_activity_main">Trade Axis</string>
+    <string name="package_name">com.tradeaxis.app</string>
+    <string name="custom_url_scheme">com.tradeaxis.app</string>
+</resources>

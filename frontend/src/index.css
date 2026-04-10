@@ -1,0 +1,542 @@
+/* frontend/src/index.css */
+@import "tailwindcss";
+
+/* ===== App Theme Variables ===== */
+:root {
+  --app-bg: #131722;
+  --app-panel: #1e222d;
+  --app-input: #2a2e39;
+  --app-card: #252832;
+  --app-border: #363a45;
+  --app-text: #d1d4dc;
+  --app-muted: #787b86;
+}
+
+:root[data-theme="light"] {
+  --app-bg: #f8fafc;
+  --app-panel: #ffffff;
+  --app-input: #f1f5f9;
+  --app-card: #ffffff;
+  --app-border: #e2e8f0;
+  --app-text: #1e293b;
+  --app-muted: #64748b;
+}
+
+/* ===== MT5-inspired Theme ===== */
+:root {
+  --mt5-bg: #1b1f2a;
+  --mt5-panel: #202636;
+  --mt5-panel2: #1f2433;
+  --mt5-border: #2d3446;
+  --mt5-text: #d7dde8;
+  --mt5-muted: #9aa4b2;
+
+  --mt5-blue: #4a90e2;
+  --mt5-green: #00c853;
+  --mt5-red: #ff5252;
+  --mt5-yellow: #ffd54f;
+}
+
+/* ✅ Light theme overrides */
+/* ✅ Light theme overrides */
+:root[data-theme="light"] {
+  --mt5-bg: #f8fafc;
+  --mt5-panel: #ffffff;
+  --mt5-panel2: #f1f5f9;
+  --mt5-border: #e2e8f0;
+  --mt5-text: #1e293b;
+  --mt5-muted: #475569;
+
+  --mt5-blue: #2962ff;
+  --mt5-green: #16a34a;
+  --mt5-red: #dc2626;
+  --mt5-yellow: #ca8a04;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: Segoe UI, Tahoma, Arial, sans-serif;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+}
+
+h1 { font-size: 2rem; }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.5rem; }
+h4 { font-size: 1.25rem; }
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--app-panel);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--app-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a425a;
+}
+
+/* ===== Smooth theme transitions ===== */
+html,
+body,
+#root {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+:root[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+:root[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+:root[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* ===== Theme utility classes ===== */
+.mt5-bg { background: var(--mt5-bg); }
+.mt5-panel { background: var(--mt5-panel); }
+.mt5-panel2 { background: var(--mt5-panel2); }
+.mt5-border { border-color: var(--mt5-border); }
+.mt5-text { color: var(--mt5-text); }
+.mt5-muted { color: var(--mt5-muted); }
+
+.text-profit { color: var(--mt5-green); }
+.text-loss { color: var(--mt5-red); }
+.text-accent { color: var(--mt5-blue); }
+
+.text-green-500 { color: var(--mt5-green); }
+.text-red-500 { color: var(--mt5-red); }
+.bg-green-500\/20 { background-color: rgba(0, 200, 83, 0.18); }
+.bg-red-500\/20 { background-color: rgba(255, 82, 82, 0.18); }
+
+/* ===== Base input/button sizing ===== */
+input, select, textarea, button {
+  font-size: 15px;
+}
+
+/* ===== MOBILE FONT SIZE OVERRIDES ===== */
+@media (max-width: 1024px) {
+  body {
+    font-size: 16px;
+  }
+
+  input, select, textarea, button {
+    font-size: 16px !important;
+  }
+
+  /* ✅ Increase Tailwind text-xs from 12px → 13px on mobile */
+  .text-xs {
+    font-size: 13px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Increase Tailwind text-sm from 14px → 15px on mobile */
+  .text-sm {
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ text-base stays 16px (already fine) */
+  .text-base {
+    font-size: 16px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ Increase text-lg from 18px → 19px */
+  .text-lg {
+    font-size: 19px !important;
+    line-height: 1.5 !important;
+  }
+
+  /* ✅ Increase text-xl from 20px → 22px */
+  .text-xl {
+    font-size: 22px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Make tiny labels (text-[10px], text-[11px]) readable */
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+  }
+
+  /* ✅ Prices in quotes/trade — bigger and bolder */
+  .font-mono {
+    font-size: 15px !important;
+    letter-spacing: 0.02em;
+  }
+
+  /* ✅ Bottom nav labels */
+  .fixed.bottom-0 span {
+    font-size: 11px !important;
+  }
+
+  /* ✅ Bigger tap targets for mobile */
+  button {
+    min-height: 36px;
+  }
+
+  /* ✅ Modal headings */
+  .font-bold.text-lg {
+    font-size: 20px !important;
+  }
+
+  /* ✅ Trade P&L numbers */
+  .font-bold {
+    font-size: inherit;
+  }
+
+  /* ✅ Grid row items need more vertical space */
+  .grid.items-center {
+    min-height: 52px;
+  }
+
+  /* ✅ Search input placeholder */
+  input::placeholder {
+    font-size: 15px;
+  }
+
+  /* ✅ Category filter pills */
+  .overflow-x-auto button {
+    min-height: 36px;
+    font-size: 14px !important;
+  }
+
+  /* ✅ Account stats bar */
+  .text-\[13px\] {
+    font-size: 14px !important;
+  }
+}
+
+/* ===== Very small screens (phones < 380px) ===== */
+@media (max-width: 380px) {
+  .text-xs {
+    font-size: 12px !important;
+  }
+  .text-sm {
+    font-size: 14px !important;
+  }
+}
+
+/* ===== Safe area for notched phones ===== */
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.safe-area-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* ===== Custom utility classes ===== */
+.text-lg-custom {
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+
+.text-xl-custom {
+  font-size: 1.25rem;
+  line-height: 1.6;
+}
+
+/* ===== Logo ===== */
+.logo-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.logo-container img {
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+.app-name-gradient {
+  background: linear-gradient(135deg, #26a69a 0%, #2962ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ===== Smooth price transitions ===== */
+@media (max-width: 1024px) {
+  .price-cell {
+    transition: color 0.15s ease;
+  }
+}
+
+/* ===== Prevent iOS zoom on input focus ===== */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* ===== Capacitor / WebView specific ===== */
+@media (display-mode: standalone),
+       (display-mode: fullscreen) {
+  body {
+    font-size: 16px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Slightly larger for standalone app */
+  .text-xs {
+    font-size: 13px !important;
+  }
+  .text-sm {
+    font-size: 15px !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════ */
+/*  FULL LIGHT MODE OVERRIDES                         */
+/*  These override inline styles via !important        */
+/* ═══════════════════════════════════════════════════ */
+
+:root[data-theme="light"] body {
+  background: #f8fafc !important;
+  color: #1e293b !important;
+}
+
+/* Panel backgrounds */
+:root[data-theme="light"] [style*="background: #1e222d"],
+:root[data-theme="light"] [style*="background:#1e222d"],
+:root[data-theme="light"] [style*="background: rgb(30, 34, 45)"] {
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] [style*="background: #131722"],
+:root[data-theme="light"] [style*="background:#131722"],
+:root[data-theme="light"] [style*="background: rgb(19, 23, 34)"] {
+  background: #f8fafc !important;
+}
+
+:root[data-theme="light"] [style*="background: #2a2e39"],
+:root[data-theme="light"] [style*="background:#2a2e39"],
+:root[data-theme="light"] [style*="background: rgb(42, 46, 57)"] {
+  background: #f1f5f9 !important;
+}
+
+:root[data-theme="light"] [style*="background: #252832"],
+:root[data-theme="light"] [style*="background:#252832"] {
+  background: #e2e8f0 !important;
+}
+
+/* Borders */
+:root[data-theme="light"] [style*="borderColor: #363a45"],
+:root[data-theme="light"] [style*="border-color: #363a45"],
+:root[data-theme="light"] [style*="border: 1px solid #363a45"] {
+  border-color: #e2e8f0 !important;
+}
+
+:root[data-theme="light"] [style*="borderColor: rgb(54, 58, 69)"] {
+  border-color: #e2e8f0 !important;
+}
+
+/* Text colors */
+:root[data-theme="light"] [style*="color: #d1d4dc"],
+:root[data-theme="light"] [style*="color:#d1d4dc"],
+:root[data-theme="light"] [style*="color: rgb(209, 212, 220)"] {
+  color: #1e293b !important;
+}
+
+:root[data-theme="light"] [style*="color: #787b86"],
+:root[data-theme="light"] [style*="color:#787b86"],
+:root[data-theme="light"] [style*="color: rgb(120, 123, 134)"] {
+  color: #64748b !important;
+}
+
+/* Input backgrounds */
+:root[data-theme="light"] input[style*="background: #2a2e39"],
+:root[data-theme="light"] select[style*="background: #2a2e39"],
+:root[data-theme="light"] textarea[style*="background: #2a2e39"] {
+  background: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+  color: #1e293b !important;
+}
+
+:root[data-theme="light"] input[style*="background: #1e222d"],
+:root[data-theme="light"] select[style*="background: #1e222d"] {
+  background: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #1e293b !important;
+}
+
+/* Buttons with dark bg */
+:root[data-theme="light"] button[style*="background: #2a2e39"] {
+  background: #e2e8f0 !important;
+  color: #475569 !important;
+}
+
+:root[data-theme="light"] button[style*="background: #363a45"] {
+  background: #cbd5e1 !important;
+  color: #1e293b !important;
+}
+
+/* Keep accent colors unchanged */
+:root[data-theme="light"] [style*="background: #2962ff"] {
+  background: #2962ff !important;
+}
+:root[data-theme="light"] [style*="background: #26a69a"] {
+  background: #16a34a !important;
+}
+:root[data-theme="light"] [style*="background: #ef5350"] {
+  background: #dc2626 !important;
+}
+
+/* Semi-transparent backgrounds */
+:root[data-theme="light"] [style*="background: #2962ff20"] {
+  background: #2962ff15 !important;
+}
+:root[data-theme="light"] [style*="background: #26a69a20"] {
+  background: #16a34a15 !important;
+}
+:root[data-theme="light"] [style*="background: #ef535020"] {
+  background: #dc262615 !important;
+}
+:root[data-theme="light"] [style*="background: #f5c54220"] {
+  background: #ca8a0415 !important;
+}
+:root[data-theme="light"] [style*="background: #ff980020"] {
+  background: #ea580c15 !important;
+}
+
+/* Chart area stays dark */
+:root[data-theme="light"] .tv-lightweight-charts,
+:root[data-theme="light"] canvas {
+  /* Don't override chart */
+}
+
+/* Modal overlays */
+:root[data-theme="light"] [style*="background: rgba(30, 34, 45"] {
+  background: rgba(255, 255, 255, 0.95) !important;
+}
+
+/* Hover states */
+:root[data-theme="light"] .hover\:bg-white\/5:hover {
+  background: rgba(0, 0, 0, 0.05) !important;
+}
+
+/* ========= LIGHT MODE OVERRIDES ========= */
+[data-theme="light"] {
+  --bg-primary: #f6f7fb;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f0f1f5;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-muted: #8e8ea0;
+  --border-color: #e2e8f0;
+}
+
+[data-theme="light"] .fixed.bottom-0 {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+[data-theme="light"] select,
+[data-theme="light"] input[type="text"],
+[data-theme="light"] input[type="number"],
+[data-theme="light"] input[type="password"],
+[data-theme="light"] input[type="email"] {
+  background: #f0f1f5 !important;
+  border-color: #e2e8f0 !important;
+  color: #1a1a2e !important;
+}
+
+[data-theme="light"] select option {
+  background: #ffffff;
+  color: #1a1a2e;
+}
+
+/* ═══ NUCLEAR LIGHT MODE FIX ═══ */
+/* Override via data-theme on every div/section that uses dark inline backgrounds */
+:root[data-theme="light"] div[style],
+:root[data-theme="light"] header[style],
+:root[data-theme="light"] section[style] {
+  --forced-bg: initial;
+  --forced-color: initial;
+  --forced-border: initial;
+}
+
+/* Force ALL panels white in light mode using a JS-injected class approach */
+/* This class gets toggled by the theme */
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+html[data-theme="light"] .fixed.bottom-0 {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+html[data-theme="light"] .fixed.bottom-0 button {
+  color: inherit;
+}
+
+/* Target common dark bg hex values that React renders */
+html[data-theme="light"] [style*="1e222d"] { background-color: #ffffff !important; }
+html[data-theme="light"] [style*="131722"] { background-color: #f8fafc !important; }
+html[data-theme="light"] [style*="2a2e39"] { background-color: #f1f5f9 !important; }
+html[data-theme="light"] [style*="252832"] { background-color: #e2e8f0 !important; }
+html[data-theme="light"] [style*="363a45"] { border-color: #e2e8f0 !important; }
+
+/* Text overrides - these target the exact hex in any format */
+html[data-theme="light"] [style*="d1d4dc"] { color: #1e293b !important; }
+html[data-theme="light"] [style*="787b86"] { color: #64748b !important; }
+
+/* Expanded position panels (the dark ones when clicking a position) */
+html[data-theme="light"] .border-b[style] {
+  border-color: #e2e8f0 !important;
+}
+
+/* Ensure modals are white */
+html[data-theme="light"] .fixed.inset-0 > div[style] {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Keep colored buttons intact */
+html[data-theme="light"] [style*="2962ff"],
+html[data-theme="light"] [style*="26a69a"],
+html[data-theme="light"] [style*="ef5350"],
+html[data-theme="light"] [style*="f5c542"] {
+  /* Don't override accent backgrounds */
+}
+
+/* Input styling in light mode */
+html[data-theme="light"] input,
+html[data-theme="light"] select,
+html[data-theme="light"] textarea {
+  background: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+  color: #1e293b !important;
+}
+
+html[data-theme="light"] select option {
+  background: #ffffff !important;
+  color: #1e293b !important;
+}

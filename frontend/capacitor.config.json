@@ -1,0 +1,8 @@
+{
+  "appId": "com.tradeaxis.app",
+  "appName": "Trade Axis",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true
+  }
+}
