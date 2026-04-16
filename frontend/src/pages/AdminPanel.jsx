@@ -17,6 +17,11 @@ export default function AdminPanel() {
   const [holidayMessage, setHolidayMessage] = useState('');
   const [holidayDate,    setHolidayDate]    = useState('');
   const [holidayLoading, setHolidayLoading] = useState(false);
+  const [settlementStatus, setSettlementStatus] = useState({
+    lastRun: null, nextScheduled: null, timezone: 'Asia/Kolkata',
+  });
+  const [settlementLoading, setSettlementLoading] = useState(false);
+  const [settlementTriggering, setSettlementTriggering] = useState(false);
 
   const [manualTradeId, setManualTradeId]   = useState('');
   const [manualPrice,   setManualPrice]     = useState('');
@@ -33,6 +38,7 @@ export default function AdminPanel() {
   useEffect(() => {
     fetchHolidayStatus();
     fetchAdminUsers();
+    fetchSettlementStatus();
   }, []);
 
   useEffect(() => {
@@ -56,6 +62,49 @@ export default function AdminPanel() {
       const res = await api.get('/admin/users?limit=500');
       if (res.data?.success) setAdminUsers(res.data.data || []);
     } catch (e) { console.error(e); toast.error('Failed to fetch users'); }
+  };
+
+  const fetchSettlementStatus = async () => {
+    setSettlementLoading(true);
+    try {
+      const res = await api.get('/admin/settlement-status');
+      if (res.data?.success) {
+        setSettlementStatus({
+          lastRun: res.data.lastRun || null,
+          nextScheduled: res.data.nextScheduled || null,
+          timezone: res.data.timezone || 'Asia/Kolkata',
+          cronExpression: res.data.cronExpression || '',
+        });
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error(e.response?.data?.message || 'Failed to load settlement status');
+    } finally {
+      setSettlementLoading(false);
+    }
+  };
+
+  const triggerSettlement = async () => {
+    if (!window.confirm('Run weekly settlement manually right now?')) return;
+
+    setSettlementTriggering(true);
+    try {
+      const res = await api.post('/admin/trigger-settlement');
+      if (res.data?.success) {
+        toast.success(
+          typeof res.data.settled === 'number'
+            ? `Settlement complete: ${res.data.settled} trade(s) settled`
+            : 'Settlement completed successfully'
+        );
+        await fetchSettlementStatus();
+      } else {
+        toast.error(res.data?.message || 'Settlement failed');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Settlement failed');
+    } finally {
+      setSettlementTriggering(false);
+    }
   };
 
   const fetchSelectedUserPositions = async (userId) => {
@@ -139,6 +188,7 @@ export default function AdminPanel() {
   const tabs = [
     { id: 'users',       label: 'Users' },
     { id: 'withdrawals', label: 'Withdrawals' },
+    { id: 'settlement',  label: 'Settlement' },
     { id: 'market',      label: 'Market Holiday' },
     { id: 'manualClose', label: 'Manual Close' },
     { id: 'symbolBan',   label: '🚫 Script Ban' },   // ← NEW
@@ -170,6 +220,68 @@ export default function AdminPanel() {
         {adminView === 'withdrawals' && <AdminWithdrawals />}
         {adminView === 'kite'        && <AdminKiteSetup />}
         {adminView === 'symbolBan'   && <AdminSymbolBan />}   {/* ← NEW */}
+
+        {adminView === 'settlement' && (
+          <div className="p-4 max-w-lg mx-auto">
+            <div className="p-4 rounded-xl" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <Calendar size={20} color="#2962ff" />
+                  <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Weekly Settlement</h3>
+                </div>
+                <button
+                  onClick={fetchSettlementStatus}
+                  disabled={settlementLoading}
+                  className="p-2 rounded-lg disabled:opacity-50"
+                  style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
+                  title="Refresh settlement status"
+                >
+                  <RefreshCw size={16} className={settlementLoading ? 'animate-spin' : ''} />
+                </button>
+              </div>
+
+              <div className="p-3 rounded-lg mb-4" style={{ background: '#1e222d', border: '1px solid #363a45' }}>
+                <div className="text-xs mb-2" style={{ color: '#787b86' }}>Status</div>
+                <div className="grid grid-cols-1 gap-2 text-sm">
+                  <div className="flex justify-between gap-3">
+                    <span style={{ color: '#787b86' }}>Last run</span>
+                    <span style={{ color: '#d1d4dc', textAlign: 'right' }}>
+                      {settlementStatus.lastRun ? new Date(settlementStatus.lastRun).toLocaleString() : 'Never'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span style={{ color: '#787b86' }}>Next scheduled</span>
+                    <span style={{ color: '#d1d4dc', textAlign: 'right' }}>
+                      {settlementStatus.nextScheduled ? new Date(settlementStatus.nextScheduled).toLocaleString() : 'Not available'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span style={{ color: '#787b86' }}>Timezone</span>
+                    <span style={{ color: '#d1d4dc', textAlign: 'right' }}>
+                      {settlementStatus.timezone || 'Asia/Kolkata'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg mb-4" style={{ background: '#2962ff15', border: '1px solid #2962ff40' }}>
+                <div className="text-sm font-medium mb-1" style={{ color: '#d1d4dc' }}>Manual fallback</div>
+                <div className="text-xs" style={{ color: '#9ca3af' }}>
+                  Use this when the automatic weekly settlement does not run on time.
+                </div>
+              </div>
+
+              <button
+                onClick={triggerSettlement}
+                disabled={settlementTriggering}
+                className="w-full py-3 rounded-lg font-semibold text-white disabled:opacity-50"
+                style={{ background: '#2962ff' }}
+              >
+                {settlementTriggering ? 'Running Settlement...' : 'Run Settlement Now'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {adminView === 'market' && (
           <div className="p-4 max-w-lg mx-auto">

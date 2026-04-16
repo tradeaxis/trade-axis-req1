@@ -18,6 +18,7 @@ const authMiddleware =
 
 // Public market routes
 router.get('/symbols', marketController.getSymbols);
+router.get('/status', marketController.getStatus);
 router.get('/quote/:symbol', marketController.getQuote);
 router.get('/candles/:symbol', marketController.getCandles);
 router.get('/search', marketController.searchSymbols);

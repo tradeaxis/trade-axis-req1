@@ -6,6 +6,7 @@ const paymentService = require('../services/paymentService');
 const getRazorpayKey = (req, res) => {
   return res.status(200).json({
     success: true,
+    enabled: paymentService.isRazorpayEnabled(),
     key: paymentService.getRazorpayKey(),
   });
 };
@@ -168,6 +169,8 @@ const getDeals = async (req, res) => {
     }
 
     const allDeals = [];
+    const normalizeTxnType = (txn) =>
+      String(txn.transaction_type || txn.type || '').toLowerCase();
 
     // Get account balance
     const { data: account } = await supabase
@@ -219,11 +222,9 @@ const getDeals = async (req, res) => {
       // Exit row only if closed
       if (trade.status === 'closed' && trade.close_time) {
         const exitCommission = Number(trade.sell_brokerage || 0);
-        // For partial closes, original_quantity holds the original position size
         const originalQty = Number(trade.original_quantity || trade.quantity || 0);
         const closedQty = Number(trade.quantity || 0);
 
-        const entryQty = Number(trade.original_quantity || trade.quantity || 0);
         allDeals.push({
           id: `exit-${trade.id}`,
           source: 'trade',
@@ -231,8 +232,8 @@ const getDeals = async (req, res) => {
           type: trade.trade_type === 'buy' ? 'sell' : 'buy',
           dealLabel: trade.trade_type === 'buy' ? 'Sell Out' : 'Buy Out',
           symbol: trade.symbol,
-          quantity: entryQty,
-          closed_quantity: trade.status === 'closed' ? qty : 0,
+          quantity: closedQty,
+          closed_quantity: closedQty,
           original_quantity: originalQty,
           price: Number(trade.close_price || 0),
           amount: Number(trade.profit || 0),
@@ -262,41 +263,81 @@ const getDeals = async (req, res) => {
     });
 
     filteredTxns.forEach((txn) => {
-      if (txn.transaction_type === 'deposit' && txn.status === 'completed') {
+      const txnType = normalizeTxnType(txn);
+      const txnStatus = String(txn.status || '').toLowerCase();
+      const isCompleted = !txnStatus || ['completed', 'approved', 'processed'].includes(txnStatus);
+      if (!isCompleted) return;
+
+      const amount = Number(txn.amount || 0);
+      const description = txn.description || txn.note || '';
+      const time = txn.processed_at || txn.created_at;
+      const isAdminAdjustment = /admin/i.test(description);
+
+      if (txnType === 'deposit') {
         allDeals.push({
           id: `deposit-${txn.id}`,
           source: 'transaction',
           side: 'deposit',
           type: 'deposit',
-          dealLabel: 'Deposit',
+          dealLabel: isAdminAdjustment ? 'Fund Added' : 'Deposit',
           symbol: null,
           quantity: null,
           price: null,
-          amount: Number(txn.amount || 0),
+          amount,
           profit: 0,
           commission: 0,
-          time: txn.processed_at || txn.created_at,
+          time,
           status: txn.status,
           transactionId: txn.id,
+          description,
+          balance_before: txn.balance_before,
+          balance_after: txn.balance_after,
         });
+        return;
       }
 
-      if (['withdraw', 'withdrawal'].includes(txn.transaction_type)) {
+      if (['withdraw', 'withdrawal'].includes(txnType)) {
         allDeals.push({
           id: `withdrawal-${txn.id}`,
           source: 'transaction',
           side: 'withdrawal',
           type: 'withdrawal',
-          dealLabel: 'Withdrawal',
+          dealLabel: isAdminAdjustment ? 'Fund Reduced' : 'Withdrawal',
           symbol: null,
           quantity: null,
           price: null,
-          amount: -Number(txn.amount || 0),
+          amount: -amount,
           profit: 0,
           commission: 0,
-          time: txn.processed_at || txn.created_at,
+          time,
           status: txn.status,
           transactionId: txn.id,
+          description,
+          balance_before: txn.balance_before,
+          balance_after: txn.balance_after,
+        });
+        return;
+      }
+
+      if (amount !== 0) {
+        allDeals.push({
+          id: `adjustment-${txn.id}`,
+          source: 'transaction',
+          side: amount >= 0 ? 'deposit' : 'withdrawal',
+          type: amount >= 0 ? 'deposit' : 'withdrawal',
+          dealLabel: description || (amount >= 0 ? 'Adjustment Credit' : 'Adjustment Debit'),
+          symbol: null,
+          quantity: null,
+          price: null,
+          amount,
+          profit: 0,
+          commission: 0,
+          time,
+          status: txn.status,
+          transactionId: txn.id,
+          description,
+          balance_before: txn.balance_before,
+          balance_after: txn.balance_after,
         });
       }
     });

@@ -54,6 +54,7 @@ exports.listUsers = async (req, res) => {
           brokerage_rate: user.brokerage_rate || 0.0003,
           max_saved_accounts: user.max_saved_accounts || 3,
           closing_mode: user.closing_mode || false,
+          liquidation_type: user.liquidation_type || 'liquidate',
           created_at: user.created_at,
           accounts: accounts || [],
         };
@@ -461,6 +462,9 @@ exports.addBalanceToAccount = async (req, res) => {
     const newBalance = currentBalance + parseFloat(amount); // admin-controlled only
     const newEquity = newBalance + currentCredit + currentProfit;
     const newFreeMargin = newEquity - parseFloat(account.margin || 0);
+    const processedAt = new Date().toISOString();
+    const transactionType = isReduction ? 'withdrawal' : 'deposit';
+    const description = note || (isReduction ? 'Admin reduction' : 'Admin deposit');
 
     const { error: updateError } = await supabase
       .from('accounts')
@@ -468,6 +472,7 @@ exports.addBalanceToAccount = async (req, res) => {
         balance: newBalance,
         equity: newEquity,
         free_margin: newFreeMargin,
+        updated_at: processedAt,
       })
       .eq('id', account.id);
 
@@ -476,10 +481,16 @@ exports.addBalanceToAccount = async (req, res) => {
     await supabase.from('transactions').insert({
       user_id: id,
       account_id: account.id,
-      type: isReduction ? 'withdrawal' : 'deposit',
+      transaction_type: transactionType,
+      type: transactionType,
       amount: absAmount,
+      payment_method: 'bank_transfer',
       status: 'completed',
-      description: note || (isReduction ? 'Admin reduction' : 'Admin deposit'),
+      reference: `ADM${Date.now().toString(36).toUpperCase()}`,
+      balance_before: currentBalance,
+      balance_after: newBalance,
+      processed_at: processedAt,
+      description,
     });
 
     res.json({

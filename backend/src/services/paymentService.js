@@ -16,9 +16,13 @@ class PaymentService {
         : null;
   }
 
+  isRazorpayEnabled() {
+    return this.mode === 'razorpay' && !!this.razorpay;
+  }
+
   getRazorpayKey() {
     // Only expose key if Razorpay is actually enabled
-    if (this.mode !== 'razorpay') return null;
+    if (!this.isRazorpayEnabled()) return null;
     return process.env.RAZORPAY_KEY_ID || null;
   }
 
@@ -94,13 +98,8 @@ class PaymentService {
     if (amount > 1000000) throw new Error('Maximum deposit is ₹10,00,000');
 
     // If no keys / mock mode => instantly credit
-    if (this.mode !== 'razorpay' || !this.razorpay) {
-      const result = await this.mockDeposit(userId, accountId, amount);
-      return {
-        mock: true,
-        completed: true,
-        ...result,
-      };
+    if (!this.isRazorpayEnabled()) {
+      throw new Error('Online deposit is disabled. Please contact admin to add funds.');
     }
 
     // Razorpay mode (when you add keys later)
@@ -163,8 +162,8 @@ class PaymentService {
   }
 
   async confirmDeposit(orderId, paymentId, signature) {
-    if (this.mode !== 'razorpay' || !this.razorpay) {
-      throw new Error('Razorpay not configured. Using mock payments right now.');
+    if (!this.isRazorpayEnabled()) {
+      throw new Error('Razorpay is not configured.');
     }
 
     const ok = this.verifyPaymentSignature(orderId, paymentId, signature);

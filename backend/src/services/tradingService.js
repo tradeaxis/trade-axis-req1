@@ -1,7 +1,144 @@
 // backend/src/services/tradingService.js
 const { supabase } = require('../config/supabase');
+const { isMarketOpen } = require('./marketStatus');
 
 class TradingService {
+  async getBrokerageRate(userId) {
+    if (!userId) return 0.0003;
+
+    try {
+      const { data: user } = await supabase
+        .from('users')
+        .select('brokerage_rate')
+        .eq('id', userId)
+        .single();
+
+      return Number(user?.brokerage_rate || 0.0003);
+    } catch (_) {
+      return 0.0003;
+    }
+  }
+
+  async settleAccount(accountId, netProfit, marginFreed, now) {
+    const { data: account } = await supabase
+      .from('accounts')
+      .select('balance, credit, margin')
+      .eq('id', accountId)
+      .single();
+
+    if (!account) return;
+
+    const balance = Number(account.balance || 0);
+    const currentCredit = Number(account.credit || 0);
+    const currentMargin = Number(account.margin || 0);
+    const newCredit = currentCredit + Number(netProfit || 0);
+    const newMargin = Math.max(0, currentMargin - Number(marginFreed || 0));
+    const newEquity = balance + newCredit;
+    const newFreeMargin = newEquity - newMargin;
+
+    await supabase
+      .from('accounts')
+      .update({
+        credit: newCredit,
+        equity: newEquity,
+        margin: newMargin,
+        free_margin: newFreeMargin,
+        updated_at: now,
+      })
+      .eq('id', accountId);
+  }
+
+  async resolveCloseMarketData(trade, overrideClosePrice = null) {
+    const manualClosePrice = Number(overrideClosePrice || 0);
+    if (manualClosePrice > 0) {
+      return {
+        closePrice: manualClosePrice,
+        lotSize: Number(trade.lot_size || 1) || 1,
+      };
+    }
+
+    const kiteStreamService = require('./kiteStreamService');
+    const livePrice = kiteStreamService.getPrice(trade.symbol);
+    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
+
+    if (livePrice && livePrice.last > 0 && liveAgeMs <= 120000) {
+      const closePrice = trade.trade_type === 'buy'
+        ? Number(livePrice.bid || livePrice.last || 0)
+        : Number(livePrice.ask || livePrice.last || 0);
+
+      return {
+        closePrice,
+        lotSize: Number(trade.lot_size || 1) || 1,
+      };
+    }
+
+    const { data: symbolData, error } = await supabase
+      .from('symbols')
+      .select('bid, ask, last_price, lot_size')
+      .eq('symbol', trade.symbol)
+      .single();
+
+    if (!error && symbolData) {
+      const closePrice = trade.trade_type === 'buy'
+        ? Number(symbolData.bid || symbolData.ask || symbolData.last_price || trade.current_price || trade.open_price || 0)
+        : Number(symbolData.ask || symbolData.bid || symbolData.last_price || trade.current_price || trade.open_price || 0);
+
+      return {
+        closePrice,
+        lotSize: Number(trade.lot_size || symbolData.lot_size || 1) || 1,
+      };
+    }
+
+    return {
+      closePrice: Number(trade.current_price || trade.open_price || 0),
+      lotSize: Number(trade.lot_size || 1) || 1,
+    };
+  }
+
+  async previewClosePosition(trade, options = {}) {
+    const quantity = Number(options.quantity || trade.quantity || 0);
+    if (quantity <= 0) {
+      return { success: false, message: 'Invalid quantity' };
+    }
+
+    const brokerageRate = options.brokerageRate ?? await this.getBrokerageRate(trade.user_id);
+    const { closePrice, lotSize } = await this.resolveCloseMarketData(trade, options.closePrice);
+
+    if (!closePrice || Number.isNaN(closePrice) || closePrice <= 0) {
+      return { success: false, message: `Cannot determine close price for ${trade.symbol}` };
+    }
+
+    const totalQuantity = Number(trade.quantity || 0);
+    const direction = trade.trade_type === 'buy' ? 1 : -1;
+    const openPrice = Number(trade.open_price || 0);
+    const grossProfit = (closePrice - openPrice) * direction * quantity * lotSize;
+    const totalBuyBrokerage = Number(trade.buy_brokerage || trade.brokerage || 0);
+    const buyBrokerage = totalQuantity > 0 && quantity < totalQuantity
+      ? (totalBuyBrokerage / totalQuantity) * quantity
+      : totalBuyBrokerage;
+    const sellBrokerage = closePrice * quantity * lotSize * brokerageRate;
+    const totalBrokerage = buyBrokerage + sellBrokerage;
+    const netProfit = grossProfit - totalBrokerage;
+    const totalMargin = Number(trade.margin || 0);
+    const marginFreed = totalQuantity > 0 && quantity < totalQuantity
+      ? (totalMargin / totalQuantity) * quantity
+      : totalMargin;
+
+    return {
+      success: true,
+      brokerageRate,
+      closePrice,
+      lotSize,
+      quantity,
+      grossProfit,
+      buyBrokerage,
+      sellBrokerage,
+      totalBrokerage,
+      netProfit,
+      marginFreed,
+    };
+  }
+
   // Execute market order
   async executeMarketOrder({
     userId,
@@ -25,7 +162,6 @@ class TradingService {
 
       // Calculate margin required
       const lotSize = symbolData.lot_size || 1;
-      const marginRate = symbolData.margin_rate || 10; // percentage
       const leverage = account.leverage || 5;
       const marginRequired = (openPrice * quantity * lotSize) / leverage;
 
@@ -47,6 +183,7 @@ class TradingService {
         user_id: userId,
         account_id: account.id,
         symbol: symbolData.symbol,
+        exchange: symbolData.exchange || 'NSE',
         trade_type: type,
         quantity,
         lot_size: lotSize,
@@ -56,7 +193,9 @@ class TradingService {
         take_profit: takeProfit,
         margin: marginRequired,
         brokerage,
-        profit: 0,
+        buy_brokerage: brokerage,
+        sell_brokerage: 0,
+        profit: -brokerage,
         status: 'open',
         comment,
         magic_number: magicNumber,

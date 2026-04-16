@@ -22,6 +22,7 @@ const compression = require('compression');
 const nodeCron = require('node-cron');
 
 const { testConnection, supabase } = require('./config/supabase');
+const { protect, adminOnly } = require('./middleware/auth');
 
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
@@ -238,7 +239,7 @@ app.use('/api/trading', tradingRoutes);
 app.use('/api/watchlists', watchlistRoutes);
 
 // ✅ Manual settlement trigger (admin only)
-app.post('/api/admin/trigger-settlement', async (req, res) => {
+app.post('/api/admin/trigger-settlement', protect, adminOnly, async (req, res) => {
   try {
     // Basic auth check (you should add proper admin middleware)
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -256,7 +257,7 @@ app.post('/api/admin/trigger-settlement', async (req, res) => {
 });
 
 // ✅ Settlement status endpoint
-app.get('/api/admin/settlement-status', async (req, res) => {
+app.get('/api/admin/settlement-status', protect, adminOnly, async (req, res) => {
   try {
     const lastRun = await getLastSettlementTime();
     const nextTarget = getLastSettlementTarget();

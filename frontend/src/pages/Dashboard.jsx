@@ -358,6 +358,11 @@ const Dashboard = () => {
   const [selectedAccount, setSelectedAccount] = useState(null);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [symbolData, setSymbolData] = useState(null);
+  const [marketStatus, setMarketStatus] = useState({
+    isHoliday: false,
+    message: '',
+    marketOpen: true,
+  });
 
   // Mobile tabs
   const [activeTab, setActiveTab] = useState('trade');
@@ -579,6 +584,23 @@ const Dashboard = () => {
     symbolsFetchedRef.current = true;
     fetchAllFuturesSymbols();
   }, [fetchAllFuturesSymbols]);
+
+  const fetchMarketStatus = useCallback(async () => {
+    try {
+      const res = await api.get('/market/status');
+      if (res.data?.success) {
+        setMarketStatus(res.data.data || {});
+      }
+    } catch (error) {
+      console.error('Failed to fetch market status:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMarketStatus();
+    const interval = setInterval(fetchMarketStatus, 60000);
+    return () => clearInterval(interval);
+  }, [fetchMarketStatus]);
 
     // ── Backend search fallback for QuotesTab ──
   const [backendSearchResults, setBackendSearchResults] = useState([]);
@@ -1574,6 +1596,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         }
       } catch (_) {}
 
+      await fetchMarketStatus();
+
       // Refresh trades
       if (selectedAccount?.id) {
         await fetchOpenTrades(selectedAccount.id);
@@ -1594,7 +1618,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       setIsRefreshing(false);
       refreshingRef.current = false;
     }
-  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, activeWatchlistId, fetchWatchlistSymbols]);
+  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, activeWatchlistId, fetchWatchlistSymbols, fetchMarketStatus]);
 
   // ════════════════════════════════════════
   //  RENDER FUNCTIONS (not components — no hooks, no remount cycles)
@@ -2346,13 +2370,24 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               <span className="text-xs" style={{ color: '#2962ff' }}>Tap to trade</span>
             </div>
           )}
+
+          {(marketStatus?.isHoliday || marketStatus?.marketOpen === false) && (
+            <div
+              className="mt-2 px-3 py-2 rounded-lg text-xs"
+              style={{ background: bgAlt2, border: `1px solid ${border}`, color: textMuted }}
+            >
+              {marketStatus?.isHoliday
+                ? (marketStatus?.message || 'Market holiday')
+                : 'Market is currently closed'}
+            </div>
+          )}
         </div>
 
         {/* ── Column Headers ── */}
         <div
           className="grid px-3 py-2 text-xs font-semibold border-b shrink-0"
           style={{
-            gridTemplateColumns: '2fr 1.2fr 1.2fr',
+            gridTemplateColumns: 'minmax(0, 2.7fr) minmax(76px, 1fr) minmax(76px, 1fr)',
             background: bgAlt2,
             borderColor: border,
             color: textMuted,
@@ -2416,21 +2451,25 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               );
               const symChange = Number(quote?.change ?? quote?.change_value ?? sym.change_value ?? 0);
               const symChangePercent = Number(quote?.change_percent ?? sym.change_percent ?? 0);
-              const marketOpen = isMarketOpenNow(sym.symbol);
+              const marketOpen = !marketStatus?.isHoliday && isMarketOpenNow(sym.symbol);
 
               const quoteTs = Number(quote?.timestamp || 0);
-              // Show "Off Quotes" only if:
-              // 1. Market is open
-              // 2. Symbol is in the active watchlist (user expects live data)
-              // 3. Quote timestamp is older than 60 seconds
               const isSubscribed = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
-              const isStale = marketOpen && isSubscribed && quoteTs > 0 && (Date.now() - quoteTs > 60000);
+              const quoteAgeMs = quoteTs > 0 ? (Date.now() - quoteTs) : Number.POSITIVE_INFINITY;
+              const isStale = marketOpen && isSubscribed && quoteAgeMs > 60000;
               void staleTick;
 
               const staleColor = '#9aa0a6';
-              const bidColor = isStale ? staleColor : (marketOpen ? '#ef5350' : textMuted);
-              const askColor = isStale ? staleColor : (marketOpen ? '#26a69a' : textMuted);
-              const nameColor = isStale ? staleColor : textPrimary;
+              const hasAnyPrice = symBid > 0 || symAsk > 0;
+              const priceShouldBeGrey = marketStatus?.isHoliday || !marketOpen || isStale || !hasAnyPrice;
+              const trendColor = symChange >= 0 ? '#2962ff' : '#ef5350';
+              const bidColor = priceShouldBeGrey ? staleColor : trendColor;
+              const askColor = priceShouldBeGrey ? staleColor : trendColor;
+              const changeColor = priceShouldBeGrey ? staleColor : trendColor;
+              const nameColor = textPrimary;
+              const statusLabel = marketStatus?.isHoliday
+                ? (marketStatus?.message || 'Holiday')
+                : (!marketOpen ? 'Closed' : (isStale ? 'Off Quotes' : ''));
 
               const getMonthAbbr = (dateStr) => {
                 if (!dateStr) return '';
@@ -2459,11 +2498,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                   onClick={(e) => handleSymbolTap(sym, e)}
                   className="grid items-center px-3 py-3 border-b cursor-pointer"
                   style={{
-                    gridTemplateColumns: '2.5fr 1fr 1fr',
+                    gridTemplateColumns: 'minmax(0, 2.7fr) minmax(76px, 1fr) minmax(76px, 1fr)',
                     background: isSelected ? bgAlt : 'transparent',
                     borderColor: border,
                     borderLeft: isSelected ? '3px solid #2962ff' : '3px solid transparent',
-                    opacity: isStale ? 0.6 : 1,
+                    opacity: 1,
                   }}
                 >
                   {/* Symbol Column */}
@@ -2482,35 +2521,34 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                       <div className="flex items-center gap-1" style={{ marginTop: '2px' }}>
                         <span
                           className="font-semibold"
-                          style={{ color: symChange >= 0 ? '#26a69a' : '#ef5350', fontSize: '12px' }}
+                          style={{ color: changeColor, fontSize: '12px' }}
                         >
                           {symChange >= 0 ? '+' : ''}{symChange.toFixed(2)}
                         </span>
                         <span
                           className="font-medium"
-                          style={{ color: symChangePercent >= 0 ? '#26a69a' : '#ef5350', fontSize: '12px' }}
+                          style={{ color: changeColor, fontSize: '12px' }}
                         >
                           ({symChangePercent >= 0 ? '+' : ''}{symChangePercent.toFixed(2)}%)
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: '2px' }}>
-                        {isStale && (
-                          <span style={{ color: '#ff9800', fontSize: '10px', fontWeight: 700 }}>Off Quotes</span>
+                      <div className="flex items-center gap-2 flex-nowrap overflow-hidden" style={{ marginTop: '2px' }}>
+                        {statusLabel && (
+                          <span style={{ color: staleColor, fontSize: '10px', fontWeight: 700, whiteSpace: 'nowrap' }}>{statusLabel}</span>
                         )}
                         {expiry && (
-                          <span style={{ color: textMuted, fontSize: '10px' }}>{expiry}</span>
+                          <span style={{ color: textMuted, fontSize: '10px', whiteSpace: 'nowrap' }}>{expiry}</span>
                         )}
                         {sym.lot_size && (
-                          <span style={{ color: '#f5c542', fontSize: '10px' }}>Lot:{sym.lot_size}</span>
+                          <span style={{ color: '#f5c542', fontSize: '10px', whiteSpace: 'nowrap' }}>Lot:{sym.lot_size}</span>
                         )}
                       </div>
-                      {/* L & H on same line */}
-                      <div className="flex items-center gap-3" style={{ marginTop: '1px' }}>
-                        <span className="font-mono" style={{ fontSize: '10px', color: textMuted }}>
-                          L: <span style={{ color: '#ef5350', fontWeight: 600 }}>{symLow > 0 ? symLow.toFixed(2) : '—'}</span>
+                      <div className="flex items-center gap-3 flex-nowrap overflow-hidden" style={{ marginTop: '3px' }}>
+                        <span className="font-mono shrink-0" style={{ fontSize: '10px', color: textMuted, whiteSpace: 'nowrap' }}>
+                          L: <span style={{ color: textMuted, fontWeight: 600 }}>{symLow > 0 ? symLow.toFixed(2) : '—'}</span>
                         </span>
-                        <span className="font-mono" style={{ fontSize: '10px', color: textMuted }}>
-                          H: <span style={{ color: '#26a69a', fontWeight: 600 }}>{symHigh > 0 ? symHigh.toFixed(2) : '—'}</span>
+                        <span className="font-mono shrink-0" style={{ fontSize: '10px', color: textMuted, whiteSpace: 'nowrap' }}>
+                          H: <span style={{ color: textMuted, fontWeight: 600 }}>{symHigh > 0 ? symHigh.toFixed(2) : '—'}</span>
                         </span>
                       </div>
                     </div>

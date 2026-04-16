@@ -2,6 +2,7 @@
 const { supabase } = require('../config/supabase');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
+const { getHolidayStatus, isAnyMarketOpen } = require('../services/marketStatus');
 
 const ALLOWED_CATEGORIES = [
   'index_futures',
@@ -191,6 +192,25 @@ exports.searchSymbols = async (req, res) => {
     res.json({ success: true, symbols: symbols || [], total: symbols?.length || 0 });
   } catch (error) {
     console.error('searchSymbols error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getStatus = async (req, res) => {
+  try {
+    const holidayStatus = getHolidayStatus();
+
+    res.json({
+      success: true,
+      data: {
+        ...holidayStatus,
+        marketOpen: isAnyMarketOpen(),
+        timestamp: new Date().toISOString(),
+        timezone: 'Asia/Kolkata',
+      },
+    });
+  } catch (error) {
+    console.error('getStatus error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
