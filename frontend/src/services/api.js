@@ -1,14 +1,13 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_URL = 'https://g5u65c9ttxdhv63j8nyoe64z.187.127.151.173.sslip.io/api';
 const PUBLIC_AUTH_ROUTES = ['/auth/login', '/auth/switch-account'];
 
 const api = axios.create({
   baseURL: API_URL,
-  timeout: 45000,
+  timeout: 60000,
 });
 
-// Add token to requests
 api.interceptors.request.use((config) => {
   const requestUrl = config.url || '';
   const skipAuth =
@@ -27,7 +26,6 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle errors
 api.interceptors.response.use(
   (response) => response,
   (error) => {
