@@ -4,7 +4,6 @@ import { toast } from 'react-hot-toast';
 import api from '../../services/api';
 import {
   RefreshCw,
-  ExternalLink,
   CheckCircle,
   XCircle,
   Play,
@@ -54,7 +53,16 @@ export default function AdminKiteSetup() {
     try {
       const res = await api.get('/admin/kite/login-url');
       if (res.data.success) {
-        setLoginUrl(res.data.loginUrl);
+        const nextLoginUrl = String(res.data.loginUrl || '').trim();
+        setLoginUrl(nextLoginUrl);
+        if (nextLoginUrl) {
+          try {
+            navigator.clipboard.writeText(nextLoginUrl);
+            toast.success('Login URL generated and copied');
+          } catch {
+            toast.success('Login URL generated below');
+          }
+        }
       } else {
         toast.error(res.data.message);
       }
@@ -145,15 +153,6 @@ export default function AdminKiteSetup() {
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
     toast.success('Copied to clipboard');
-  };
-
-  const openLoginPage = () => {
-    if (!loginUrl) return;
-
-    const popup = window.open(loginUrl, '_blank', 'noopener,noreferrer');
-    if (!popup) {
-      window.location.href = loginUrl;
-    }
   };
 
   const formatTime = (isoString) => {
@@ -284,14 +283,14 @@ export default function AdminKiteSetup() {
 
           <button
             onClick={getLoginUrl}
-            disabled={loading.loginUrl || !status?.configured}
+            disabled={loading.loginUrl}
             className="w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
             style={{ background: '#2962ff', color: '#fff' }}
           >
             {loading.loginUrl ? (
               <RefreshCw size={16} className="animate-spin" />
             ) : (
-              <ExternalLink size={16} />
+              <Copy size={16} />
             )}
             Get Login URL
           </button>
@@ -300,31 +299,29 @@ export default function AdminKiteSetup() {
             <div className="mt-2 p-3 rounded-lg" style={{ background: '#1e222d' }}>
               <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-xs" style={{ color: '#787b86' }}>
-                  Login URL
+                  Generated Login URL
                 </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={openLoginPage}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1"
-                    style={{ background: '#2962ff20', color: '#2962ff' }}
-                  >
-                    <ExternalLink size={12} />
-                    Open
-                  </button>
-                  <button onClick={() => copyToClipboard(loginUrl)}>
-                    <Copy size={14} color="#787b86" />
-                  </button>
-                </div>
+                <button
+                  onClick={() => copyToClipboard(loginUrl)}
+                  className="px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1"
+                  style={{ background: '#2962ff20', color: '#2962ff' }}
+                >
+                  <Copy size={12} />
+                  Copy URL
+                </button>
               </div>
-              <a
-                href={loginUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block text-xs break-all underline"
-                style={{ color: '#2962ff' }}
-              >
-                {loginUrl}
-              </a>
+              <textarea
+                readOnly
+                value={loginUrl}
+                rows={4}
+                className="w-full rounded-lg p-3 text-xs leading-5"
+                style={{
+                  background: '#11151d',
+                  border: '1px solid #363a45',
+                  color: '#2962ff',
+                  resize: 'none',
+                }}
+              />
               <p className="text-xs mt-2" style={{ color: '#f5c542' }}>
                 👆 Click above, login to Zerodha, then copy the request_token from the redirect URL
               </p>
