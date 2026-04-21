@@ -16,6 +16,21 @@ const deduplicateAccounts = (accounts) => {
   });
 };
 
+const loginRequest = (loginId, password) => {
+  const body = new URLSearchParams({
+    loginId,
+    password,
+  });
+
+  return api.post('/auth/login', body, {
+    skipAuth: true,
+    timeout: 45000,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+  });
+};
+
 const useAuthStore = create((set, get) => ({
   user: null,
   accounts: [],
@@ -30,7 +45,7 @@ const useAuthStore = create((set, get) => ({
     try {
       console.log('🔐 Login API Base URL:', api.defaults.baseURL);
 
-      const response = await api.post('/auth/login', { loginId, password });
+      const response = await loginRequest(loginId, password);
       const { user, accounts, token } = response.data.data || {};
 
       if (!user || !token) {
@@ -203,7 +218,7 @@ const useAuthStore = create((set, get) => ({
     }
 
     try {
-      const response = await api.post('/auth/login', { loginId, password });
+      const response = await loginRequest(loginId, password);
       const { user, token } = response.data.data;
 
       if (
@@ -249,11 +264,17 @@ const useAuthStore = create((set, get) => ({
         };
       }
 
-      const response = await api.post('/auth/switch-account', {
-        loginId: savedAccount.loginId || null,
-        email: savedAccount.email || null,
-        token: savedAccount.token,
-      });
+      const response = await api.post(
+        '/auth/switch-account',
+        {
+          loginId: savedAccount.loginId || null,
+          email: savedAccount.email || null,
+          token: savedAccount.token,
+        },
+        {
+          skipAuth: true,
+        }
+      );
 
       const { user, accounts, token } = response.data.data;
 

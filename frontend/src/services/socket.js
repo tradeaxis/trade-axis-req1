@@ -8,10 +8,7 @@
 
 import { io } from 'socket.io-client';
 
-const BACKEND_URL =
-  import.meta.env.VITE_API_URL?.replace('/api', '') ||
-  import.meta.env.VITE_BACKEND_URL ||
-  'http://localhost:5000';
+const BACKEND_URL = 'https://g5u65c9ttxdhv63j8nyoe64z.187.127.151.173.sslip.io';
 
 class SocketService {
   constructor() {
