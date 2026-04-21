@@ -147,6 +147,15 @@ export default function AdminKiteSetup() {
     toast.success('Copied to clipboard');
   };
 
+  const openLoginPage = () => {
+    if (!loginUrl) return;
+
+    const popup = window.open(loginUrl, '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      window.location.href = loginUrl;
+    }
+  };
+
   const formatTime = (isoString) => {
     if (!isoString) return 'Never';
     return new Date(isoString).toLocaleString();
@@ -289,19 +298,29 @@ export default function AdminKiteSetup() {
 
           {loginUrl && (
             <div className="mt-2 p-3 rounded-lg" style={{ background: '#1e222d' }}>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-xs" style={{ color: '#787b86' }}>
-                  Login URL:
+                  Login URL
                 </span>
-                <button onClick={() => copyToClipboard(loginUrl)}>
-                  <Copy size={14} color="#787b86" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={openLoginPage}
+                    className="px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1"
+                    style={{ background: '#2962ff20', color: '#2962ff' }}
+                  >
+                    <ExternalLink size={12} />
+                    Open
+                  </button>
+                  <button onClick={() => copyToClipboard(loginUrl)}>
+                    <Copy size={14} color="#787b86" />
+                  </button>
+                </div>
               </div>
               <a
                 href={loginUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs break-all hover:underline"
+                className="block text-xs break-all underline"
                 style={{ color: '#2962ff' }}
               >
                 {loginUrl}

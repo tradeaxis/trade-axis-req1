@@ -260,6 +260,92 @@ const filterByExpiry = (symbolsList) => {
 
   return [...filtered, ...withoutExpiry];
 };
+
+const buildHistoryPositionGroups = (closedTrades = []) => {
+  const groups = new Map();
+
+  (closedTrades || []).forEach((trade) => {
+    const symbol = String(trade.symbol || '').toUpperCase();
+    if (!symbol) return;
+
+    const rawOpenTime = trade.open_time || trade.created_at || trade.updated_at || '';
+    const openDate = rawOpenTime ? new Date(rawOpenTime) : null;
+    const openKey =
+      openDate && !Number.isNaN(openDate.getTime())
+        ? openDate.toISOString()
+        : `${symbol}-${trade.id || 'unknown'}`;
+
+    const key = `${symbol}::${trade.trade_type || ''}::${openKey}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: trade.id || key,
+        symbol,
+        tradeType: String(trade.trade_type || '').toLowerCase(),
+        openTime: rawOpenTime || null,
+        latestCloseTime: trade.close_time || trade.closeTime || null,
+        openQuantity: 0,
+        closedQuantity: 0,
+        openPrice: 0,
+        closeValue: 0,
+        totalProfit: 0,
+        totalCommission: 0,
+        trades: [],
+      });
+    }
+
+    const group = groups.get(key);
+    const closedQty = Number(trade.quantity || 0);
+    const openQty = Number(trade.original_quantity || trade.quantity || 0);
+    const openPrice = Number(trade.open_price || 0);
+    const closePrice = Number(trade.close_price || 0);
+    const closeTime = trade.close_time || trade.closeTime || null;
+
+    group.openQuantity = Math.max(group.openQuantity, openQty);
+    group.closedQuantity += closedQty;
+    if (!group.openPrice && openPrice > 0) group.openPrice = openPrice;
+    group.closeValue += closePrice * closedQty;
+    group.totalProfit += Number(trade.profit || 0);
+    group.totalCommission += Number(trade.brokerage || 0);
+    if (
+      closeTime &&
+      (!group.latestCloseTime || new Date(closeTime) > new Date(group.latestCloseTime))
+    ) {
+      group.latestCloseTime = closeTime;
+    }
+    group.trades.push(trade);
+  });
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const avgClosePrice =
+        group.closedQuantity > 0 ? group.closeValue / group.closedQuantity : 0;
+      const isLong = group.tradeType !== 'sell';
+      const buyQty = isLong ? group.openQuantity : group.closedQuantity;
+      const sellQty = isLong ? group.closedQuantity : group.openQuantity;
+      const remainingQty = Math.max(group.openQuantity - group.closedQuantity, 0);
+
+      return {
+        ...group,
+        buyQty,
+        sellQty,
+        buyPrice: isLong ? group.openPrice : avgClosePrice,
+        sellPrice: isLong ? avgClosePrice : group.openPrice,
+        remainingQty,
+        tradeCount: group.trades.length,
+        totalProfit: Number(group.totalProfit.toFixed(2)),
+        totalCommission: Number(group.totalCommission.toFixed(2)),
+        trades: [...group.trades].sort(
+          (a, b) =>
+            new Date(b.close_time || b.closeTime || 0) -
+            new Date(a.close_time || a.closeTime || 0)
+        ),
+      };
+    })
+    .sort(
+      (a, b) => new Date(b.latestCloseTime || 0) - new Date(a.latestCloseTime || 0)
+    );
+};
 // ============ MARKET HOURS CHECK (frontend) ============
 const isMarketOpenNow = (symbol = null) => {
   const now = new Date();
@@ -449,6 +535,7 @@ const Dashboard = () => {
   const [historyLocalSymbolFilter, setHistoryLocalSymbolFilter] = useState('');
   const [showHistorySymbolDropdown, setShowHistorySymbolDropdown] = useState(false);
   const historyDropdownRef = useRef(null);
+  const [expandedHistoryPositionId, setExpandedHistoryPositionId] = useState(null);
 
   // ── LIFTED from CloseConfirmModal ──
   const [closeQty, setCloseQty] = useState(1);
@@ -2632,28 +2719,9 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
   // History memos (lifted from HistoryTab)
   const historyUniqueSymbols = useMemo(() => {
-    const syms = new Set((tradeHistory || []).map((t) => t.symbol));
+    const syms = new Set((filteredHistoryTrades || []).map((t) => t.symbol));
     return Array.from(syms).sort();
-  }, [tradeHistory]);
-
-  const historyOverallStats = useMemo(() => {
-    let filtered = filteredHistoryTrades;
-    if (historyLocalSymbolFilter) {
-      filtered = filtered.filter((t) => t.symbol === historyLocalSymbolFilter);
-    }
-    // Gross P&L (without commission) for display
-    const getGross = (t) => Number(t.profit || 0) + Number(t.brokerage || 0);
-    const totalProfit = filtered
-      .filter((t) => getGross(t) > 0)
-      .reduce((sum, t) => sum + getGross(t), 0);
-    const totalLoss = Math.abs(
-      filtered
-        .filter((t) => getGross(t) < 0)
-        .reduce((sum, t) => sum + getGross(t), 0)
-    );
-    const netPnL = totalProfit - totalLoss;
-    return { totalProfit, totalLoss, netPnL, count: filtered.length };
-  }, [filteredHistoryTrades, historyLocalSymbolFilter]);
+  }, [filteredHistoryTrades]);
 
   const historyDisplayTrades = useMemo(() => {
     if (!historyLocalSymbolFilter) return filteredHistoryTrades;
@@ -2661,6 +2729,27 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       (t) => t.symbol === historyLocalSymbolFilter
     );
   }, [filteredHistoryTrades, historyLocalSymbolFilter]);
+
+  const historyPositionGroups = useMemo(
+    () => buildHistoryPositionGroups(historyDisplayTrades),
+    [historyDisplayTrades]
+  );
+
+  const historyOverallStats = useMemo(() => {
+    const totalProfit = historyPositionGroups
+      .filter((group) => group.totalProfit > 0)
+      .reduce((sum, group) => sum + group.totalProfit, 0);
+    const totalLoss = Math.abs(
+      historyPositionGroups
+        .filter((group) => group.totalProfit < 0)
+        .reduce((sum, group) => sum + group.totalProfit, 0)
+    );
+    const netPnL = historyPositionGroups.reduce(
+      (sum, group) => sum + group.totalProfit,
+      0
+    );
+    return { totalProfit, totalLoss, netPnL, count: historyPositionGroups.length };
+  }, [historyPositionGroups]);
 
   // ═══ ADD THESE 3 BLOCKS RIGHT HERE ═══
 
@@ -2678,15 +2767,16 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
   // ── Position aggregates for history ──
   const positionAggregates = useMemo(() => {
-    let totalBuyQty = 0;
-    let totalSellQty = 0;
-    (historyDisplayTrades || []).forEach((t) => {
-      const q = Number(t.quantity || 0);
-      if (t.trade_type === 'buy') totalBuyQty += q;
-      else totalSellQty += q;
-    });
+    const totalBuyQty = historyPositionGroups.reduce(
+      (sum, group) => sum + Number(group.buyQty || 0),
+      0
+    );
+    const totalSellQty = historyPositionGroups.reduce(
+      (sum, group) => sum + Number(group.sellQty || 0),
+      0
+    );
     return { totalBuyQty, totalSellQty };
-  }, [historyDisplayTrades]);
+  }, [historyPositionGroups]);
 
   // ══════════════════════════════════════════════════════════════
   //  RENDER FUNCTIONS (continued from Part 1)
@@ -4668,118 +4758,204 @@ const renderOrderConfirmation = () => {
 
         {/* ── Scrollable Content ── */}
         <div className="flex-1 overflow-y-auto">
-          {historyViewMode === 'positions' && (() => {
-            const netMap = {};
-            (historyDisplayTrades || []).forEach((t) => {
-              const sym = t.symbol;
-              if (!netMap[sym]) {
-                netMap[sym] = {
-                  symbol: sym, buyQty: 0, sellQty: 0, totalPnL: 0, trades: 0, lastClose: null,
-                  totalBuyValue: 0, totalSellValue: 0, totalCommission: 0,
-                  buyPrice: 0, sellPrice: 0,
-                };
-              }
-              const q = Number(t.quantity || 0);
-              const origQty = Number(t.original_quantity || t.quantity || 0);
-              const openP = Number(t.open_price || 0);
-              const closeP = Number(t.close_price || 0);
-              const commission = Number(t.brokerage || 0);
+          {historyViewMode === 'positions' && (
+            <>
+              {historyPositionGroups.length === 0 ? (
+                <div className="p-8 text-center" style={{ color: textMuted }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base">No closed positions</div>
+                </div>
+              ) : (
+                historyPositionGroups.map((group) => {
+                  const isExpanded = expandedHistoryPositionId === group.id;
+                  const pnl = Number(group.totalProfit || 0);
 
-              // For a closed trade: the trade_type tells us what was OPENED
-              // The close is the OPPOSITE action
-              // e.g., trade_type='buy' means: bought at open_price, sold at close_price
-              if (t.trade_type === 'buy') {
-                // Opened as buy → closed as sell
-                netMap[sym].buyQty += q;        // bought this many
-                netMap[sym].sellQty += q;        // sold this many (because it's closed)
-                netMap[sym].totalBuyValue += openP * q;
-                netMap[sym].totalSellValue += closeP * q;
-                netMap[sym].buyPrice = openP;    // track for display
-                netMap[sym].sellPrice = closeP;
-              } else {
-                // Opened as sell → closed as buy  
-                netMap[sym].sellQty += q;        // sold this many
-                netMap[sym].buyQty += q;          // bought back (because it's closed)
-                netMap[sym].totalSellValue += openP * q;
-                netMap[sym].totalBuyValue += closeP * q;
-                netMap[sym].sellPrice = openP;
-                netMap[sym].buyPrice = closeP;
-              }
-              netMap[sym].totalPnL += Number(t.profit || 0) + Number(t.brokerage || 0);
-              netMap[sym].totalCommission += commission;
-              netMap[sym].trades += 1;
-              const ct = t.close_time || t.closeTime;
-              if (ct && (!netMap[sym].lastClose || new Date(ct) > new Date(netMap[sym].lastClose))) {
-                netMap[sym].lastClose = ct;
-              }
-            });
-            const netPositions = Object.values(netMap).sort((a, b) => {
-              if (!a.lastClose) return 1;
-              if (!b.lastClose) return -1;
-              return new Date(b.lastClose) - new Date(a.lastClose);
-            });
-
-            return (
-              <>
-                {netPositions.length === 0 ? (
-                  <div className="p-8 text-center" style={{ color: textMuted }}>
-                    <Clock size={48} className="mx-auto mb-3 opacity-30" />
-                    <div className="text-base">No closed positions</div>
-                  </div>
-                ) : (
-                  netPositions.map((np) => {
-                    const netQty = np.buyQty - np.sellQty;
-                    const pnl = np.totalPnL;
-                    const avgBuyPrice = np.buyQty > 0 ? np.totalBuyValue / np.buyQty : 0;
-                    const avgSellPrice = np.sellQty > 0 ? np.totalSellValue / np.sellQty : 0;
-                    return (
-                      <div key={np.symbol} className="p-3 border-b" style={{ borderColor: border }}>
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
+                  return (
+                    <div key={group.id} className="border-b" style={{ borderColor: border }}>
+                      <button
+                        type="button"
+                        className="w-full p-3 text-left"
+                        onClick={() =>
+                          setExpandedHistoryPositionId((current) =>
+                            current === group.id ? null : group.id
+                          )
+                        }
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-bold text-base" style={{ color: textPrimary }}>
-                                {formatDisplaySymbol(np.symbol, allFuturesSymbols)}
+                                {formatDisplaySymbol(group.symbol, allFuturesSymbols)}
                               </span>
-                              <span className="text-xs px-2 py-0.5 rounded font-medium" style={{ background: '#2962ff20', color: '#2962ff' }}>
-                                {np.trades} trade{np.trades > 1 ? 's' : ''}
+                              <span
+                                className="text-[11px] px-2 py-0.5 rounded font-medium"
+                                style={{ background: '#2962ff20', color: '#2962ff' }}
+                              >
+                                {group.tradeCount} close{group.tradeCount > 1 ? 's' : ''}
                               </span>
+                              {group.remainingQty > 0 && (
+                                <span
+                                  className="text-[11px] px-2 py-0.5 rounded font-medium"
+                                  style={{ background: '#f5c54220', color: '#f5c542' }}
+                                >
+                                  Remaining {group.remainingQty}
+                                </span>
+                              )}
                             </div>
-                            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1 text-xs" style={{ color: textMuted }}>
-                              <span>Buy Qty: <span style={{ color: '#26a69a', fontWeight: 600 }}>{np.buyQty}</span></span>
-                              <span>Sell Qty: <span style={{ color: '#ef5350', fontWeight: 600 }}>{np.sellQty}</span></span>
-                              {avgBuyPrice > 0 && <span>Buy Price: <span style={{ color: textPrimary }}>{formatINR(avgBuyPrice)}</span></span>}
-                              {avgSellPrice > 0 && <span>Sell Price: <span style={{ color: textPrimary }}>{formatINR(avgSellPrice)}</span></span>}
+
+                            <div
+                              className="mt-2 grid grid-cols-3 gap-2 rounded-lg p-2 text-xs"
+                              style={{ background: bgAlt2 }}
+                            >
+                              <div>
+                                <div style={{ color: textMuted }}>Buy</div>
+                                <div className="font-semibold" style={{ color: '#26a69a' }}>
+                                  {group.buyQty || 0}
+                                </div>
+                                {group.buyPrice > 0 && (
+                                  <div style={{ color: textMuted }}>@ {group.buyPrice.toFixed(2)}</div>
+                                )}
+                              </div>
+                              <div>
+                                <div style={{ color: textMuted }}>Sell</div>
+                                <div className="font-semibold" style={{ color: '#ef5350' }}>
+                                  {group.sellQty || 0}
+                                </div>
+                                {group.sellPrice > 0 && (
+                                  <div style={{ color: textMuted }}>@ {group.sellPrice.toFixed(2)}</div>
+                                )}
+                              </div>
+                              <div>
+                                <div style={{ color: textMuted }}>Net</div>
+                                <div className="font-semibold" style={{ color: textPrimary }}>
+                                  {group.remainingQty}
+                                </div>
+                                <div style={{ color: '#f5c542' }}>
+                                  Comm {formatINR(group.totalCommission)}
+                                </div>
+                              </div>
                             </div>
-                            <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: textMuted }}>
-                              <span>Net Qty: <span style={{ color: textPrimary, fontWeight: 700 }}>{Math.abs(np.buyQty - np.sellQty)}</span></span>
-                              <span>Comm: <span style={{ color: '#f5c542' }}>{formatINR(np.totalCommission)}</span></span>
-                            </div>
-                            <div className="text-[11px] mt-0.5" style={{ color: textMuted }}>
-                              {np.lastClose ? new Date(np.lastClose).toLocaleString() : ''}
+
+                            <div className="flex items-center justify-between mt-2 text-[11px]">
+                              <span style={{ color: textMuted }}>
+                                {group.latestCloseTime
+                                  ? new Date(group.latestCloseTime).toLocaleString()
+                                  : ''}
+                              </span>
+                              <span style={{ color: textMuted }}>
+                                {isExpanded ? 'Hide breakdown' : 'Show breakdown'}
+                              </span>
                             </div>
                           </div>
-                          <div className="font-bold text-lg" style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}>
-                            {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
+
+                          <div className="text-right shrink-0">
+                            <div
+                              className="font-bold text-lg"
+                              style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}
+                            >
+                              {pnl >= 0 ? '+' : ''}
+                              {formatINR(pnl)}
+                            </div>
+                            <div className="text-xs mt-1" style={{ color: textMuted }}>
+                              {group.tradeType === 'sell' ? 'Short' : 'Long'}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })
-                )}
-              </>
-            );
-          })()}
+                      </button>
+
+                      {isExpanded && (
+                        <div className="px-3 pb-3">
+                          <div
+                            className="rounded-lg overflow-hidden"
+                            style={{ border: `1px solid ${border}`, background: bgAlt }}
+                          >
+                            {group.trades.map((trade, idx) => {
+                              const closeQty = Number(trade.quantity || 0);
+                              const openQty = Number(
+                                trade.original_quantity || trade.quantity || 0
+                              );
+                              const tradePnL = Number(trade.profit || 0);
+                              const tradeCommission = Number(trade.brokerage || 0);
+                              const closeTime = trade.close_time || trade.closeTime;
+
+                              return (
+                                <div
+                                  key={trade.id || `${group.id}-${idx}`}
+                                  className="px-3 py-2 border-b last:border-b-0"
+                                  style={{ borderColor: border }}
+                                >
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span
+                                          className="text-[11px] px-1.5 py-0.5 rounded font-medium"
+                                          style={{
+                                            background:
+                                              group.tradeType === 'sell'
+                                                ? '#2962ff20'
+                                                : '#ef535020',
+                                            color:
+                                              group.tradeType === 'sell'
+                                                ? '#2962ff'
+                                                : '#ef5350',
+                                          }}
+                                        >
+                                          {group.tradeType === 'sell' ? 'Buy Out' : 'Sell Out'}
+                                        </span>
+                                        <span className="text-sm font-medium" style={{ color: textPrimary }}>
+                                          Qty {closeQty}
+                                          {openQty !== closeQty ? ` of ${openQty}` : ''}
+                                        </span>
+                                      </div>
+                                      <div className="text-xs mt-1" style={{ color: textMuted }}>
+                                        {Number(trade.open_price || 0).toFixed(2)} to{' '}
+                                        {Number(trade.close_price || 0).toFixed(2)}
+                                      </div>
+                                      <div className="text-[11px] mt-1" style={{ color: '#f5c542' }}>
+                                        Commission {formatINR(tradeCommission)}
+                                      </div>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <div className="text-xs" style={{ color: textMuted }}>
+                                        {closeTime ? new Date(closeTime).toLocaleString() : ''}
+                                      </div>
+                                      <div
+                                        className="font-bold text-sm mt-1"
+                                        style={{ color: tradePnL >= 0 ? '#26a69a' : '#ef5350' }}
+                                      >
+                                        {tradePnL >= 0 ? '+' : ''}
+                                        {formatINR(tradePnL)}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </>
+          )}
 
           {historyViewMode === 'orders' && (() => {
-            const executedOrders = (historyDisplayTrades || []).map((o) => ({
+            const orderPeriodStart = getPeriodStart(historyPeriod);
+            const executedOrders = (tradeHistory || []).map((o) => ({
               ...o, _source: 'trade', _status: o.trade_type, _time: o.open_time,
             }));
             const pendingHistory = (pendingOrderHistory || []).map((o) => ({
               ...o, _source: 'pending', _status: o.status, _time: o.created_at || o.updated_at,
             }));
-            const allOrders = [...executedOrders, ...pendingHistory].sort(
-              (a, b) => new Date(b._time || 0) - new Date(a._time || 0)
-            );
+            const allOrders = [...executedOrders, ...pendingHistory]
+              .filter((order) => {
+                if (!orderPeriodStart) return true;
+                if (!order._time) return false;
+                return new Date(order._time) >= orderPeriodStart;
+              })
+              .sort((a, b) => new Date(b._time || 0) - new Date(a._time || 0));
 
             const getStatusStyle = (status) => {
               switch (status) {
@@ -4897,52 +5073,141 @@ const renderOrderConfirmation = () => {
                 </div>
               ) : (
                 filteredDeals.map((d, idx) => {
-                  const dp = Number(d.profit || 0) + Number(d.brokerage || 0);
+                  const commission = Number(d.commission || d.brokerage || 0);
+                  const isEntryDeal = d.source === 'trade' && d.side === 'entry';
+                  const rawAmount = Number(
+                    isEntryDeal ? -commission : (d.amount ?? d.profit ?? 0)
+                  );
                   const dt = d.time || d.close_time || d.open_time || d.created_at;
                   const dealPrice = Number(d.price || d.open_price || d.close_price || 0);
-                  const dealType = d.type || d.trade_type || '';
-                  const isBuyIn = dealType === 'buy';
-                  const dealLabel = isBuyIn ? 'Buy In' : dealType === 'sell' ? 'Sell Out' : String(dealType).toUpperCase();
+                  const dealLabel =
+                    d.dealLabel ||
+                    (d.type ? String(d.type).replace(/_/g, ' ').toUpperCase() : 'DEAL');
+                  const symbolLabel = d.symbol
+                    ? formatDisplaySymbol(d.symbol, allFuturesSymbols)
+                    : null;
+                  const badgeTone = (() => {
+                    if (String(d.type || '').toLowerCase() === 'deposit') {
+                      return { bg: '#26a69a20', color: '#26a69a' };
+                    }
+                    if (
+                      ['withdrawal', 'withdraw'].includes(
+                        String(d.type || '').toLowerCase()
+                      )
+                    ) {
+                      return { bg: '#ef535020', color: '#ef5350' };
+                    }
+                    if (String(d.type || '').toLowerCase() === 'settlement') {
+                      return { bg: '#2962ff20', color: '#2962ff' };
+                    }
+                    if (isEntryDeal) {
+                      return {
+                        bg:
+                          String(d.type || '').toLowerCase() === 'buy'
+                            ? '#26a69a20'
+                            : '#ef535020',
+                        color:
+                          String(d.type || '').toLowerCase() === 'buy'
+                            ? '#26a69a'
+                            : '#ef5350',
+                      };
+                    }
+                    if (d.source === 'trade' && d.side === 'exit') {
+                      return {
+                        bg:
+                          String(d.type || '').toLowerCase() === 'buy'
+                            ? '#26a69a20'
+                            : '#ef535020',
+                        color:
+                          String(d.type || '').toLowerCase() === 'buy'
+                            ? '#26a69a'
+                            : '#ef5350',
+                      };
+                    }
+                    return { bg: '#787b8620', color: textMuted };
+                  })();
+
+                  const meta = [];
+                  if (d.quantity !== null && d.quantity !== undefined) {
+                    let qtyLabel = `Qty ${d.quantity}`;
+                    if (
+                      d.original_quantity !== null &&
+                      d.original_quantity !== undefined &&
+                      Number(d.original_quantity) !== Number(d.quantity)
+                    ) {
+                      qtyLabel += ` of ${d.original_quantity}`;
+                    }
+                    meta.push(qtyLabel);
+                  }
+                  if (dealPrice > 0) meta.push(`Price ${dealPrice.toFixed(2)}`);
+                  if (d.balance_after !== undefined && d.balance_after !== null) {
+                    meta.push(`Bal ${formatINR(d.balance_after)}`);
+                  }
+
                   return (
                     <div key={d.id || idx} className="p-3 border-b" style={{ borderColor: border }}>
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <div className="flex items-center gap-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-bold text-sm" style={{ color: textPrimary }}>
-                              {d.symbol ? formatDisplaySymbol(d.symbol, allFuturesSymbols) : '—'}
+                              {symbolLabel || dealLabel}
                             </span>
-                            {dealType && (
-                              <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{
-                                background: isBuyIn ? '#26a69a20' : '#ef535020',
-                                color: isBuyIn ? '#26a69a' : '#ef5350',
-                              }}>
+                            {symbolLabel && (
+                              <span
+                                className="text-[11px] px-1.5 py-0.5 rounded font-medium"
+                                style={{ background: badgeTone.bg, color: badgeTone.color }}
+                              >
                                 {dealLabel}
                               </span>
                             )}
                           </div>
                           <div className="text-xs mt-1" style={{ color: textMuted }}>
-                            {d.quantity ? `Qty: ${d.quantity}` : ''}
-                            {dealPrice > 0 ? ` @ ₹${dealPrice.toFixed(2)}` : ''}
+                            {dt ? new Date(dt).toLocaleString() : ''}
                           </div>
-                          {/* Show commission per deal row */}
-                          {Number(d.commission || 0) > 0 && (
-                            <div className="text-[10px] mt-0.5" style={{ color: '#f5c542' }}>
-                              Comm: {formatINR(d.commission)}
+                          {meta.length > 0 && (
+                            <div
+                              className="flex flex-wrap gap-x-3 gap-y-1 text-xs mt-1"
+                              style={{ color: textMuted }}
+                            >
+                              {meta.map((item) => (
+                                <span key={`${d.id || idx}-${item}`}>{item}</span>
+                              ))}
+                            </div>
+                          )}
+                          {d.description && (
+                            <div className="text-[11px] mt-1" style={{ color: textMuted }}>
+                              {d.description}
+                            </div>
+                          )}
+                          {commission > 0 && (
+                            <div className="text-[11px] mt-1" style={{ color: '#f5c542' }}>
+                              Commission {formatINR(commission)}
                             </div>
                           )}
                         </div>
+
                         <div className="text-right shrink-0">
-                          <div className="text-xs" style={{ color: textMuted }}>
-                            {dt ? new Date(dt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : ''}
+                          <div
+                            className="font-bold text-sm"
+                            style={{
+                              color:
+                                rawAmount > 0
+                                  ? '#26a69a'
+                                  : rawAmount < 0
+                                  ? '#ef5350'
+                                  : textPrimary,
+                            }}
+                          >
+                            {rawAmount > 0 ? '+' : rawAmount < 0 ? '-' : ''}
+                            {formatINR(Math.abs(rawAmount))}
                           </div>
-                          <div className="text-[10px]" style={{ color: textMuted }}>
-                            {dt ? new Date(dt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}
+                          <div className="text-[10px] mt-1" style={{ color: textMuted }}>
+                            {isEntryDeal
+                              ? 'Entry impact'
+                              : d.source === 'trade' && d.side === 'exit'
+                              ? 'Net result'
+                              : 'Account movement'}
                           </div>
-                          {dp !== 0 && (
-                            <div className="font-bold text-sm mt-0.5" style={{ color: dp >= 0 ? '#26a69a' : '#ef5350' }}>
-                              {dp >= 0 ? '+' : ''}{formatINR(dp)}
-                            </div>
-                          )}
                         </div>
                       </div>
                     </div>
