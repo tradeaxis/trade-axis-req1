@@ -9,6 +9,7 @@
 const { KiteTicker } = require('kiteconnect');
 const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
+const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
 
 // Default spread per segment when depth is unavailable (mode != 'full')
 // These are conservative estimates; actual spread depends on liquidity
@@ -64,14 +65,15 @@ class KiteStreamService {
   async buildTokenMap() {
     const { data, error } = await supabase
       .from('symbols')
-      .select('symbol, kite_instrument_token, kite_exchange, tick_size')
+      .select('symbol, kite_instrument_token, kite_exchange, tick_size, underlying, kite_tradingsymbol, display_name, instrument_type')
       .eq('is_active', true)
+      .eq('instrument_type', 'FUT')
       .not('kite_instrument_token', 'is', null);
 
     if (error) throw error;
 
     const map = new Map(); // token → { symbols: [], tickSize, exchange }
-    for (const row of data || []) {
+    for (const row of (data || []).filter(isAllowedSymbolRow)) {
       const token    = Number(row.kite_instrument_token);
       const tickSize = Number(row.tick_size || 0.05);
       const exchange = String(row.kite_exchange || 'NFO').toUpperCase();
@@ -79,7 +81,10 @@ class KiteStreamService {
       if (!map.has(token)) {
         map.set(token, { symbols: [], tickSize, exchange });
       }
-      map.get(token).symbols.push(row.symbol.toUpperCase());
+      const symbol = row.symbol.toUpperCase();
+      if (!map.get(token).symbols.includes(symbol)) {
+        map.get(token).symbols.push(symbol);
+      }
     }
 
     this.tokenToSymbols = map;

@@ -260,143 +260,18 @@ class KiteService {
   }
 
   async syncSymbolsToDB() {
-    const instruments = await this.fetchFuturesInstruments();
+    const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
+    const result = await syncKiteInstruments();
 
-    console.log(`📊 Fetched ${instruments.length} FUT instruments from Kite`);
-
-    if (instruments.length === 0) {
-      throw new Error('No futures instruments found. Session may have expired.');
+    if (!result.success) {
+      throw new Error(result.reason || 'Instrument sync failed');
     }
-
-    const indexSet = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']);
-    const sensexSet = new Set(['SENSEX', 'BANKEX']);
-    const byUnderlying = new Map();
-    const rows = [];
-
-    for (const inst of instruments) {
-      const tradingsymbol = String(inst.tradingsymbol).toUpperCase();
-      const underlying = String(inst.name || '').toUpperCase();
-      const exchange = String(inst.exchange || '').toUpperCase();
-
-      if (!underlying) continue;
-
-      let category = 'stock_futures';
-      if (exchange === 'MCX') category = 'commodity_futures';
-      else if (sensexSet.has(underlying)) category = 'sensex_futures';
-      else if (indexSet.has(underlying)) category = 'index_futures';
-
-      const displayName = this.createShortDisplayName(inst);
-      const expiryDate = inst.expiry
-        ? new Date(inst.expiry).toISOString().slice(0, 10)
-        : null;
-
-      rows.push({
-        symbol: tradingsymbol,
-        display_name: displayName,
-        exchange: exchange === 'NFO' ? 'NSE' : exchange === 'BFO' ? 'BSE' : 'MCX',
-        category,
-        segment: exchange,
-        instrument_type: 'FUT',
-        lot_size: 1,
-        tick_size: Number(inst.tick_size || 0.05),
-        kite_exchange: exchange,
-        kite_tradingsymbol: tradingsymbol,
-        kite_instrument_token: inst.instrument_token,
-        expiry_date: expiryDate,
-        underlying,
-        series: null,
-        is_active: true,
-        trading_hours: exchange === 'MCX' ? '09:00-23:30' : '09:15-15:30',
-        last_update: new Date().toISOString(),
-        original_lot_size: Number(inst.lot_size || 1),
-      });
-
-      if (!byUnderlying.has(underlying)) byUnderlying.set(underlying, []);
-      byUnderlying.get(underlying).push(inst);
-    }
-
-    const seriesNames = ['I', 'II', 'III'];
-    const seriesLabels = ['Near Month', 'Next Month', 'Far Month'];
-
-    for (const [underlying, list] of byUnderlying.entries()) {
-      const sorted = [...list].sort((a, b) => new Date(a.expiry) - new Date(b.expiry));
-      const now = new Date();
-      const active = sorted.filter((i) => new Date(i.expiry) >= now);
-      const picks = active.slice(0, 3);
-
-      for (let idx = 0; idx < picks.length; idx++) {
-        const inst = picks[idx];
-        const series = seriesNames[idx];
-        const aliasSymbol = `${underlying}-${series}`;
-        const exchange = String(inst.exchange || '').toUpperCase();
-
-        let category = 'stock_futures';
-        if (exchange === 'MCX') category = 'commodity_futures';
-        else if (sensexSet.has(underlying)) category = 'sensex_futures';
-        else if (indexSet.has(underlying)) category = 'index_futures';
-
-        const month = this.getMonthName(inst.expiry);
-        const year = new Date(inst.expiry).getFullYear().toString().slice(-2);
-
-        rows.push({
-          symbol: aliasSymbol,
-          display_name: `${underlying} ${seriesLabels[idx]} (${month}${year})`,
-          exchange: exchange === 'NFO' ? 'NSE' : exchange === 'BFO' ? 'BSE' : 'MCX',
-          category,
-          segment: exchange,
-          instrument_type: 'FUT',
-          lot_size: 1,
-          tick_size: Number(inst.tick_size || 0.05),
-          kite_exchange: exchange,
-          kite_tradingsymbol: String(inst.tradingsymbol).toUpperCase(),
-          kite_instrument_token: inst.instrument_token,
-          expiry_date: inst.expiry ? new Date(inst.expiry).toISOString().slice(0, 10) : null,
-          underlying,
-          series,
-          is_active: true,
-          trading_hours: exchange === 'MCX' ? '09:00-23:30' : '09:15-15:30',
-          last_update: new Date().toISOString(),
-          original_lot_size: Number(inst.lot_size || 1),
-        });
-      }
-    }
-
-    console.log(`📝 Upserting ${rows.length} symbols (${byUnderlying.size} underlyings)...`);
-
-    // Only deactivate exchanges we successfully fetched
-    const fetchedExchanges = new Set(rows.map(r => r.exchange));
-    if (fetchedExchanges.size > 0) {
-      console.log(`🔄 Deactivating FUT symbols for: ${[...fetchedExchanges].join(', ')}`);
-      await supabase
-        .from('symbols')
-        .update({ is_active: false })
-        .eq('instrument_type', 'FUT')
-        .in('exchange', [...fetchedExchanges]);
-    }
-
-    const chunkSize = 500;
-    let upsertedCount = 0;
-
-    for (let i = 0; i < rows.length; i += chunkSize) {
-      const chunk = rows.slice(i, i + chunkSize);
-      const { error } = await supabase
-        .from('symbols')
-        .upsert(chunk, { onConflict: 'symbol' });
-
-      if (error) {
-        console.error('⚠️ syncSymbolsToDB chunk error (continuing):', error.message);
-        // Don't throw — continue with remaining chunks
-      }
-      upsertedCount += chunk.length;
-    }
-
-    console.log(`✅ Synced ${upsertedCount} symbols (lot_size=1) from ${byUnderlying.size} underlyings`);
 
     return {
-      count: upsertedCount,
-      underlyings: byUnderlying.size,
-      contracts: instruments.length,
-      aliases: upsertedCount - instruments.length,
+      count: result.upserted || 0,
+      underlyings: result.underlyings || 0,
+      contracts: result.contracts || 0,
+      aliases: result.aliases || 0,
     };
   }
 

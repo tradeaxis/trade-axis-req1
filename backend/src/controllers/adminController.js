@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
+const { fetchHolidaysFromKite } = require('../services/marketStatus');
 
 // ============ HELPER: Generate Random Password ============
 const generateTempPassword = () => {
@@ -820,6 +821,15 @@ exports.createKiteSession = async (req, res) => {
       console.warn('⚠️ Auto-sync failed:', syncErr.message);
     }
 
+    let holidayResult = null;
+    try {
+      const holidays = await fetchHolidaysFromKite();
+      holidayResult = { fetched: true, count: holidays.length };
+    } catch (holidayErr) {
+      console.warn('⚠️ Holiday refresh failed:', holidayErr.message);
+      holidayResult = { fetched: false, count: 0, message: holidayErr.message };
+    }
+
     res.json({
       success: true,
       message: 'Kite session created successfully! Stream restarted. Token valid until tomorrow 6 AM IST.',
@@ -827,6 +837,7 @@ exports.createKiteSession = async (req, res) => {
       createdAt: session.createdAt,
       stream: streamResult,
       sync: syncResult,
+      holidays: holidayResult,
     });
   } catch (error) {
     console.error('createKiteSession error:', error);
@@ -845,11 +856,20 @@ exports.syncKiteSymbols = async (req, res) => {
       });
     }
 
-    const result = await kiteService.syncSymbolsToDB();
+    const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
+    const result = await syncKiteInstruments();
+
+    if (result.success && result.upserted > 0) {
+      try {
+        await kiteStreamService.refreshSubscriptions();
+      } catch (refreshErr) {
+        console.warn('⚠️ Stream refresh failed after manual sync:', refreshErr.message);
+      }
+    }
 
     res.json({
       success: true,
-      message: `Synced ${result.count} symbols from ${result.underlyings} underlyings`,
+      message: `Synced ${result.upserted || 0} symbols from ${result.underlyings || 0} underlyings`,
       ...result,
     });
   } catch (error) {

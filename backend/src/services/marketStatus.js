@@ -1,5 +1,6 @@
 // backend/src/services/marketStatus.js
 const { supabase } = require('../config/supabase');
+const https = require('https');
 
 let isMarketHoliday = false;
 let holidayMessage = '';
@@ -15,6 +16,83 @@ const getISTDateString = () => {
   return ist.toISOString().slice(0, 10);
 };
 
+const normalizeHolidayDate = (value) => {
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  const match = String(value).match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : null;
+};
+
+const collectHolidayDates = (node, out = new Set()) => {
+  if (!node) return out;
+
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectHolidayDates(item, out));
+    return out;
+  }
+
+  if (typeof node === 'object') {
+    const directDate = normalizeHolidayDate(
+      node.date || node.holiday_date || node.trading_date,
+    );
+    if (directDate) out.add(directDate);
+
+    Object.values(node).forEach((value) => {
+      if (value && typeof value === 'object') {
+        collectHolidayDates(value, out);
+      }
+    });
+  }
+
+  return out;
+};
+
+const fetchKiteHolidayPayload = async (apiKey, accessToken) =>
+  new Promise((resolve, reject) => {
+    const req = https.request(
+      'https://api.kite.trade/market.holidays',
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `token ${apiKey}:${accessToken}`,
+          'X-Kite-Version': '3',
+          'User-Agent': 'Trade Axis',
+        },
+      },
+      (res) => {
+        let body = '';
+
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(
+              new Error(
+                `Kite holiday request failed (${res.statusCode}): ${body.slice(0, 200)}`,
+              ),
+            );
+          }
+
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(new Error(`Invalid Kite holiday response: ${error.message}`));
+          }
+        });
+      },
+    );
+
+    req.on('error', reject);
+    req.end();
+  });
+
 // ✅ Fetch holidays from Kite API
 const fetchHolidaysFromKite = async () => {
   try {
@@ -29,19 +107,18 @@ const fetchHolidaysFromKite = async () => {
     const kc = kiteService.getKiteInstance();
     if (!kc) return [];
 
-    // Kite API: kc.getHolidays() returns array of holiday objects
-    const holidays = await kc.getHolidays();
-    
-    // Extract dates (format: YYYY-MM-DD)
-    const dates = (holidays || [])
-      .map(h => {
-        if (h.date) {
-          const d = new Date(h.date);
-          return d.toISOString().slice(0, 10);
-        }
-        return null;
-      })
-      .filter(Boolean);
+    let holidayPayload = [];
+
+    if (typeof kc.getHolidays === 'function') {
+      holidayPayload = await kc.getHolidays();
+    } else {
+      holidayPayload = await fetchKiteHolidayPayload(
+        kiteService.apiKey,
+        kiteService.accessToken,
+      );
+    }
+
+    const dates = [...collectHolidayDates(holidayPayload)].sort();
 
     console.log(`📅 Fetched ${dates.length} market holidays from Kite`);
     
@@ -76,6 +153,9 @@ const loadHolidaysFromDB = async () => {
     if (data?.value) {
       const parsed = JSON.parse(data.value);
       holidaysCache = parsed.holidays || [];
+      lastHolidayFetch = parsed.fetchedAt
+        ? new Date(parsed.fetchedAt).getTime()
+        : null;
       console.log(`📅 Loaded ${holidaysCache.length} holidays from DB`);
     }
   } catch (e) {
@@ -107,6 +187,7 @@ const getHolidayStatus = () => ({
   message: holidayMessage || (isHolidayActiveToday() ? 'Market Holiday (Kite)' : ''),
   date: holidayDate,
   holidays: holidaysCache,
+  fetchedAt: lastHolidayFetch ? new Date(lastHolidayFetch).toISOString() : null,
 });
 
 // Commodity keywords

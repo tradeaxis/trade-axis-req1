@@ -8,6 +8,10 @@
 
 const { supabase } = require('../config/supabase');
 const kiteService  = require('../services/kiteService');
+const {
+  isAllowedKiteInstrument,
+  isAllowedSymbolRow,
+} = require('../config/allowedKiteUniverse');
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
@@ -91,10 +95,11 @@ async function syncKiteInstruments() {
       }
       const name = String(inst.name || '').trim();
       if (!name) return false;                       // skip if no underlying name
+      if (!isAllowedKiteInstrument(inst)) return false;
       return true;
     });
 
-    console.log(`📊 Active FUT instruments: ${futures.length}`);
+    console.log(`📊 Active allowlisted FUT instruments: ${futures.length}`);
 
     if (futures.length === 0) {
       console.log('❌ No active futures found. Session may have expired.');
@@ -189,7 +194,32 @@ async function syncKiteInstruments() {
       }
     }
 
-    console.log(`📝 Total rows to upsert: ${rows.length}  (${futures.length} contracts + ${rows.length - futures.length} aliases from ${byUnderlying.size} underlyings)`);
+    const rowSymbols = new Set(rows.map((row) => row.symbol));
+    let preservedCount = 0;
+
+    const { data: existingRows } = await supabase
+      .from('symbols')
+      .select('*')
+      .eq('instrument_type', 'FUT');
+
+    for (const row of existingRows || []) {
+      if (!row || !isAllowedSymbolRow(row) || rowSymbols.has(row.symbol)) continue;
+
+      rows.push({
+        ...row,
+        lot_size: Number(row.lot_size || 1),
+        tick_size: Number(row.tick_size || 0.05),
+        original_lot_size: Number(row.original_lot_size || row.lot_size || 1),
+        is_active: true,
+        last_update: nowISO,
+      });
+      rowSymbols.add(row.symbol);
+      preservedCount++;
+    }
+
+    console.log(
+      `📝 Total rows to upsert: ${rows.length} (${futures.length} contracts + ${rows.length - futures.length} aliases/preserved rows from ${byUnderlying.size} underlyings, preserved ${preservedCount})`,
+    );
 
     // ── 6. Deactivate only symbols we're about to replace ──────────────────
     // Build set of exchanges we actually fetched successfully

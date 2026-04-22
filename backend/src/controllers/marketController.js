@@ -3,6 +3,7 @@ const { supabase } = require('../config/supabase');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
 const { getHolidayStatus, isAnyMarketOpen } = require('../services/marketStatus');
+const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
 
 const ALLOWED_CATEGORIES = [
   'index_futures',
@@ -60,6 +61,8 @@ exports.getSymbols = async (req, res) => {
       if (offset >= 10000) hasMore = false;
     }
 
+    allSymbols = allSymbols.filter(isAllowedSymbolRow);
+
     // Always include Gift Nifty if present in DB
     const { data: giftRows } = await supabase
       .from('symbols')
@@ -70,7 +73,7 @@ exports.getSymbols = async (req, res) => {
 
     if (giftRows && giftRows.length > 0) {
       const seenSymbols = new Set(allSymbols.map((s) => s.symbol));
-      giftRows.forEach((g) => {
+      giftRows.filter(isAllowedSymbolRow).forEach((g) => {
         if (!seenSymbols.has(g.symbol)) {
           allSymbols.unshift(g);
           seenSymbols.add(g.symbol);
@@ -189,7 +192,8 @@ exports.searchSymbols = async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true, symbols: symbols || [], total: symbols?.length || 0 });
+    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow);
+    res.json({ success: true, symbols: filteredSymbols, total: filteredSymbols.length });
   } catch (error) {
     console.error('searchSymbols error:', error);
     res.status(500).json({ success: false, message: error.message });
