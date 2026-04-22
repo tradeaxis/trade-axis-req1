@@ -91,7 +91,9 @@ export default function AdminKiteSetup() {
 
         // Show stream status from the response (backend already restarted it)
         if (res.data.stream?.started) {
-          toast.success(`Stream started with ${res.data.stream.tokens} symbols`);
+          toast.success(
+            `Stream started: ${res.data.stream.underlyingCount || 0} live symbols, refresh every ${res.data.stream.emitIntervalSeconds || 3}s`,
+          );
         } else if (res.data.stream) {
           toast.error(`Stream issue: ${res.data.stream.reason || 'unknown'}`);
         }
@@ -240,7 +242,7 @@ export default function AdminKiteSetup() {
           </div>
           <div className="text-xs" style={{ color: '#787b86' }}>
             {status?.stream?.running
-              ? `${status?.stream?.tokenCount || 0} symbols streaming`
+              ? `${status?.stream?.underlyingCount || 0} live symbols (${status?.stream?.tokenCount || 0} tokens)`
               : 'Stream not running'}
           </div>
         </div>
@@ -255,7 +257,7 @@ export default function AdminKiteSetup() {
           </div>
           <div className="text-xs" style={{ color: '#787b86' }}>
             {status?.stream?.lastTickAt
-              ? formatTime(status.stream.lastTickAt)
+              ? `${formatTime(status.stream.lastTickAt)} • UI update every ${status?.stream?.emitIntervalSeconds || 3}s`
               : 'No ticks yet'}
           </div>
         </div>

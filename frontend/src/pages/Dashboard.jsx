@@ -199,66 +199,49 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
   return rawSymbol.replace(/-I+$/, '').replace(/FUT$/i, '');
 };
 
-// ============ EXPIRY FILTER HELPER ============
-// Rules:
-// 1. Show ONLY current month (nearest expiry) contracts
-// 2. Show NEXT month contracts only when current month expiry is within 5 days
-// 3. Expiries are fetched from Kite (stored in symbols table)
-const filterByExpiry = (symbolsList) => {
-  const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
+const normalizeLiveUnderlyingKey = (value) =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/-[IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
 
-  const withExpiry    = symbolsList.filter(s => s.expiry_date);
-  const withoutExpiry = symbolsList.filter(s => !s.expiry_date);
+const pickLiveContractRows = (symbolsList = []) => {
+  const rowsByUnderlying = new Map();
 
-  if (withExpiry.length === 0) return symbolsList;
-
-  // Get all future (including today) expiry dates sorted ascending
-  const futureExpiryDates = [
-    ...new Set(
-      withExpiry
-        .filter(s => {
-          const expStr = new Date(s.expiry_date).toISOString().slice(0, 10);
-          return expStr >= todayStr;
-        })
-        .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
-    )
-  ].sort();
-
-  if (futureExpiryDates.length === 0) {
-    // All expired — show most recent (fallback)
-    const latestPast = withExpiry
-      .map(s => new Date(s.expiry_date).toISOString().slice(0, 10))
-      .sort()
-      .reverse()[0];
-    return [
-      ...withExpiry.filter(s => new Date(s.expiry_date).toISOString().slice(0, 10) === latestPast),
-      ...withoutExpiry,
-    ];
+  for (const row of symbolsList) {
+    const key = normalizeLiveUnderlyingKey(row?.underlying || row?.symbol);
+    if (!key) continue;
+    if (!rowsByUnderlying.has(key)) rowsByUnderlying.set(key, []);
+    rowsByUnderlying.get(key).push(row);
   }
 
-  // Nearest expiry date (current month contract)
-  const nearestExpiry = futureExpiryDates[0];
-  const nearestExpiryDate = new Date(nearestExpiry);
+  const today = new Date().toISOString().slice(0, 10);
+  const picked = [];
 
-  // Calculate days until nearest expiry
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const daysUntilExpiry = Math.ceil((nearestExpiryDate - now) / msPerDay);
+  for (const rows of rowsByUnderlying.values()) {
+    const sorted = [...rows].sort((a, b) => {
+      const aExpiry = String(a?.expiry_date || '9999-12-31');
+      const bExpiry = String(b?.expiry_date || '9999-12-31');
+      if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
 
-  // Determine which expiry dates to show
-  const showDates = new Set([nearestExpiry]); // Always show current month
+      const aSeries = String(a?.series || '').toUpperCase();
+      const bSeries = String(b?.series || '').toUpperCase();
+      const aPriority = aSeries === 'I' ? 0 : aSeries ? 2 : 1;
+      const bPriority = bSeries === 'I' ? 0 : bSeries ? 2 : 1;
+      if (aPriority !== bPriority) return aPriority - bPriority;
 
-  // Show next month only if current month expiry is within 5 days
-  if (daysUntilExpiry <= 5 && futureExpiryDates.length > 1) {
-    showDates.add(futureExpiryDates[1]); // Add next month
+      return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
+    });
+
+    const preferred =
+      sorted.find((row) => !row?.expiry_date || String(row.expiry_date) >= today) || sorted[0];
+
+    if (preferred) picked.push(preferred);
   }
 
-  const filtered = withExpiry.filter(s => {
-    const d = new Date(s.expiry_date).toISOString().slice(0, 10);
-    return showDates.has(d);
-  });
-
-  return [...filtered, ...withoutExpiry];
+  return picked;
 };
 
 const buildHistoryPositionGroups = (closedTrades = []) => {
@@ -460,6 +443,7 @@ const Dashboard = () => {
   const [quotesViewMode, setQuotesViewMode] = useState('advanced');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const visibleQuoteSubscriptionsRef = useRef(new Set());
 
   // Watchlist dropdown
   const [isWatchlistDropdownOpen, setIsWatchlistDropdownOpen] = useState(false);
@@ -1142,46 +1126,51 @@ const accountStats = useMemo(() => {
         return aE.localeCompare(bE);
       });
 
-      // Deduplicate: show only 1 per underlying per expiry month
-      const seen = new Set();
-      const expiryFiltered = filterByExpiry(results);  // ✅ ADD THIS LINE
-      const deduped = expiryFiltered.filter((s) => {   // ✅ CHANGE results → expiryFiltered
-        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT?$/i, '').toUpperCase();
-        const m = s.expiry_date ? new Date(s.expiry_date).getMonth() : 'x';
-        const key = `${u}|${m}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      return deduped.slice(0, 200);
+      return pickLiveContractRows(results).slice(0, 200);
     }
 
-    // 4) Not searching → show watchlist symbols only
-    const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
+    // 4) Not searching → show the same live contracts that the backend streams
+    const wl = new Set((activeSymbols || []).map((x) => normalizeLiveUnderlyingKey(x)));
     if (wl.size === 0) {
-      // ✅ FIX: Apply expiry filter ONLY for default view (empty watchlist)
-      list = filterByExpiry(list);
-      const seenD = new Set();
-      return list.filter((s) => {
-        const u = (s.underlying || s.symbol || '').replace(/\d{2}[A-Z]{3}FUT$/i, '').replace(/FUT$/i, '').replace(/-I+$/, '').toUpperCase();
-        if (seenD.has(u)) return false;
-        seenD.add(u);
-        return true;
-      }).slice(0, 20);
+      return pickLiveContractRows(list).slice(0, 20);
     }
-    // ✅ FIX: Watchlist has symbols → NO expiry filter.
-    //    User explicitly added these symbols; show them all.
-    const wlFiltered = list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
-    const seenWl = new Set();
-    return wlFiltered.filter((s) => {
-      const u = (s.underlying || s.symbol || '').toUpperCase();
-      const m = s.expiry_date ? new Date(s.expiry_date).getMonth() + '-' + new Date(s.expiry_date).getFullYear() : 'no-exp';
-      const key = `${u}|${m}`;
-      if (seenWl.has(key)) return false;
-      seenWl.add(key);
-      return true;
-    });
+
+    const wlFiltered = list.filter((s) =>
+      wl.has(normalizeLiveUnderlyingKey(s.underlying || s.symbol)),
+    );
+    return pickLiveContractRows(wlFiltered);
   }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols, backendSearchResults]);
+
+  const displayedQuoteSymbolSet = useMemo(
+    () =>
+      new Set(
+        (quotesDisplayedSymbols || [])
+          .map((sym) => String(sym?.symbol || '').toUpperCase())
+          .filter(Boolean),
+      ),
+    [quotesDisplayedSymbols],
+  );
+
+  useEffect(() => {
+    const nextSymbols = new Set(
+      (quotesDisplayedSymbols || [])
+        .map((sym) => String(sym?.symbol || '').toUpperCase())
+        .filter(Boolean),
+    );
+
+    const prevSymbols = visibleQuoteSubscriptionsRef.current || new Set();
+    const toSubscribe = [...nextSymbols].filter((sym) => !prevSymbols.has(sym));
+    const toUnsubscribe = [...prevSymbols].filter((sym) => !nextSymbols.has(sym));
+
+    if (toUnsubscribe.length > 0) {
+      socketService.unsubscribeSymbols(toUnsubscribe);
+    }
+    if (toSubscribe.length > 0) {
+      socketService.subscribeSymbols(toSubscribe);
+    }
+
+    visibleQuoteSubscriptionsRef.current = nextSymbols;
+  }, [quotesDisplayedSymbols]);
 
   const filteredHistoryTrades = useMemo(() => {
     const start = getPeriodStart(historyPeriod);
@@ -2235,14 +2224,15 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
     return (
       <div
-        className="fixed inset-0 z-50 bg-black/60 flex items-end justify-center"
+        className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
         onClick={() => setShowWatchlistMenu(false)}
       >
         <div
-          className="w-full max-w-lg rounded-t-xl"
+          className="w-full max-w-sm rounded-2xl overflow-hidden"
           style={{
             background: '#1e222d',
             border: '1px solid #363a45',
+            maxHeight: '70vh',
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -2260,7 +2250,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               <X size={24} color="#787b86" />
             </button>
           </div>
-          <div className="max-h-80 overflow-y-auto">
+          <div className="max-h-[55vh] overflow-y-auto">
             {watchlists.map((wl) => (
               <div
                 key={wl.id}
@@ -2541,7 +2531,10 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               const marketOpen = !marketStatus?.isHoliday && isMarketOpenNow(sym.symbol);
 
               const quoteTs = Number(quote?.timestamp || 0);
-              const isSubscribed = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
+              const symbolKey = String(sym.symbol).toUpperCase();
+              const isSubscribed =
+                displayedQuoteSymbolSet.has(symbolKey) ||
+                (activeSymbols || []).includes(symbolKey);
               const quoteAgeMs = quoteTs > 0 ? (Date.now() - quoteTs) : Number.POSITIVE_INFINITY;
               const isStale = marketOpen && isSubscribed && quoteAgeMs > 60000;
               void staleTick;

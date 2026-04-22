@@ -891,7 +891,7 @@ exports.startKiteStream = async (req, res) => {
     if (result.started) {
       res.json({
         success: true,
-        message: `Kite stream started with ${result.tokens} symbols`,
+        message: `Kite stream started with ${result.underlyingCount || result.tokens} live symbols`,
         ...result,
       });
     } else {

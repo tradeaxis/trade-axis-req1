@@ -34,11 +34,15 @@ class KiteStreamService {
 
     // Live price cache: symbol (uppercase) → priceData
     this.priceCache = new Map();
+    this.lastEmitAt = new Map();
+    this.underlyingCount = 0;
+    this.mappedSymbolCount = 0;
 
     // Dirty symbols for DB flush
     this.dirtySymbols   = new Set();
     this.dbFlushInterval= null;
-    this.DB_FLUSH_MS    = 5000;
+    this.DB_FLUSH_MS    = 3000;
+    this.EMIT_INTERVAL_MS = 3000;
   }
 
   isRunning() { return this.running; }
@@ -65,16 +69,70 @@ class KiteStreamService {
   async buildTokenMap() {
     const { data, error } = await supabase
       .from('symbols')
-      .select('symbol, kite_instrument_token, kite_exchange, tick_size, underlying, kite_tradingsymbol, display_name, instrument_type')
+      .select('symbol, kite_instrument_token, kite_exchange, tick_size, underlying, kite_tradingsymbol, display_name, instrument_type, expiry_date, series')
       .eq('is_active', true)
       .eq('instrument_type', 'FUT')
       .not('kite_instrument_token', 'is', null);
 
     if (error) throw error;
 
+    const allowedRows = (data || []).filter(isAllowedSymbolRow);
+    const today = new Date().toISOString().slice(0, 10);
+
+    const [openTradesRes, pendingOrdersRes] = await Promise.all([
+      supabase.from('trades').select('symbol').eq('status', 'open'),
+      supabase.from('pending_orders').select('symbol').eq('status', 'pending'),
+    ]);
+
+    const forcedSymbols = new Set(
+      [...(openTradesRes.data || []), ...(pendingOrdersRes.data || [])]
+        .map((row) => String(row.symbol || '').toUpperCase())
+        .filter(Boolean),
+    );
+
+    const rowsByUnderlying = new Map();
+    for (const row of allowedRows) {
+      const key = String(row.underlying || row.symbol || '').toUpperCase();
+      if (!rowsByUnderlying.has(key)) rowsByUnderlying.set(key, []);
+      rowsByUnderlying.get(key).push(row);
+    }
+
+    const selectedTokens = new Set();
+    const selectedUnderlyingKeys = new Set();
+
+    for (const [underlyingKey, rows] of rowsByUnderlying.entries()) {
+      const sorted = [...rows].sort((a, b) => {
+        const aExpiry = String(a.expiry_date || '9999-12-31');
+        const bExpiry = String(b.expiry_date || '9999-12-31');
+        if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
+
+        const aSeries = String(a.series || '');
+        const bSeries = String(b.series || '');
+        if (aSeries && !bSeries) return -1;
+        if (!aSeries && bSeries) return 1;
+        return String(a.symbol || '').localeCompare(String(b.symbol || ''));
+      });
+
+      const preferred =
+        sorted.find((row) => !row.expiry_date || row.expiry_date >= today) || sorted[0];
+
+      if (!preferred?.kite_instrument_token) continue;
+      selectedTokens.add(Number(preferred.kite_instrument_token));
+      selectedUnderlyingKeys.add(underlyingKey);
+    }
+
+    for (const row of allowedRows) {
+      const symbol = String(row.symbol || '').toUpperCase();
+      if (forcedSymbols.has(symbol) && row.kite_instrument_token) {
+        selectedTokens.add(Number(row.kite_instrument_token));
+      }
+    }
+
     const map = new Map(); // token → { symbols: [], tickSize, exchange }
-    for (const row of (data || []).filter(isAllowedSymbolRow)) {
+    for (const row of allowedRows) {
       const token    = Number(row.kite_instrument_token);
+      if (!selectedTokens.has(token)) continue;
+
       const tickSize = Number(row.tick_size || 0.05);
       const exchange = String(row.kite_exchange || 'NFO').toUpperCase();
 
@@ -88,7 +146,9 @@ class KiteStreamService {
     }
 
     this.tokenToSymbols = map;
-    console.log(`🗺️  Token map built: ${map.size} unique tokens → covering ${[...map.values()].reduce((n, v) => n + v.symbols.length, 0)} symbols`);
+    this.underlyingCount = selectedUnderlyingKeys.size;
+    this.mappedSymbolCount = [...map.values()].reduce((n, v) => n + v.symbols.length, 0);
+    console.log(`🗺️  Token map built: ${map.size} unique tokens → covering ${this.mappedSymbolCount} symbols across ${this.underlyingCount} underlyings`);
     return map;
   }
 
@@ -213,7 +273,15 @@ class KiteStreamService {
     this.ticker.connect();
     this.startDBFlush();
 
-    return { started: true, tokens: tokens.length, mode };
+    return {
+      started: true,
+      tokens: tokens.length,
+      underlyingCount: this.underlyingCount,
+      mappedSymbolCount: this.mappedSymbolCount,
+      emitIntervalSeconds: Math.round(this.EMIT_INTERVAL_MS / 1000),
+      dbFlushSeconds: Math.round(this.DB_FLUSH_MS / 1000),
+      mode,
+    };
   }
 
   async stop() {
@@ -235,6 +303,9 @@ class KiteStreamService {
       this.priceCache.clear();
       this.dirtySymbols.clear();
       this.tokenToSymbols.clear();
+      this.lastEmitAt.clear();
+      this.underlyingCount = 0;
+      this.mappedSymbolCount = 0;
     }
     console.log('🛑 KiteStreamService fully stopped. Price cache cleared.');
     return { stopped: true };
@@ -326,6 +397,11 @@ class KiteStreamService {
 
         // Emit to socket room for this symbol (frontend subscribes to symbol name)
         if (this.io) {
+          const emitTs = Date.now();
+          const lastEmitAt = this.lastEmitAt.get(sym) || 0;
+          if (emitTs - lastEmitAt < this.EMIT_INTERVAL_MS) continue;
+          this.lastEmitAt.set(sym, emitTs);
+
           const room = `symbol:${sym}`;
           
           // Sample logging: 1% of emissions when debugging
@@ -347,7 +423,7 @@ class KiteStreamService {
             change:        priceData.change,
             changePercent: priceData.changePct,
             volume:        priceData.volume,
-            timestamp:     priceData.timestamp,
+            timestamp:     emitTs,
             source:        'kite',
           });
         }
@@ -413,8 +489,12 @@ class KiteStreamService {
       tickAgeSeconds:    tickAge,
       sessionExpired:    this.lastTickAt === null && !this.running,
       tokenCount:        this.tokenToSymbols?.size || 0,
+      underlyingCount:   this.underlyingCount || 0,
+      mappedSymbolCount: this.mappedSymbolCount || 0,
       cachedPrices:      this.priceCache.size,
       pendingDBWrites:   this.dirtySymbols.size,
+      emitIntervalSeconds: Math.round(this.EMIT_INTERVAL_MS / 1000),
+      dbFlushSeconds:    Math.round(this.DB_FLUSH_MS / 1000),
       warning:           this.lastTickAt === null 
         ? '⚠️ No ticks received — Kite session may be expired. Re-authenticate in Admin Panel.'
         : (tickAge && tickAge > 60 ? `⚠️ Last tick was ${tickAge}s ago — stream may be stalled` : null),
@@ -427,18 +507,24 @@ class KiteStreamService {
       return { refreshed: false };
     }
 
-    const oldCount = this.tokenToSymbols.size;
+    const previousTokens = Array.from(this.tokenToSymbols.keys());
+    const oldCount = previousTokens.length;
     await this.buildTokenMap();
     const newCount = this.tokenToSymbols.size;
 
     const tokens = Array.from(this.tokenToSymbols.keys());
     const mode   = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
 
+    const removedTokens = previousTokens.filter((token) => !this.tokenToSymbols.has(token));
+    if (removedTokens.length > 0 && typeof this.ticker.unsubscribe === 'function') {
+      this.ticker.unsubscribe(removedTokens);
+    }
+
     this.ticker.subscribe(tokens);
     this.ticker.setMode(mode, tokens);
 
     console.log(`🔄 Refreshed subscriptions: ${oldCount} → ${newCount} tokens`);
-    return { refreshed: true, oldCount, newCount };
+    return { refreshed: true, oldCount, newCount, removedCount: removedTokens.length };
   }
 }
 
