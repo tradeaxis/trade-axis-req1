@@ -59,7 +59,7 @@ export default function Mt5Chart({ symbol = 'RELIANCE', timeframe = '1h' }) {
     const load = async () => {
       try {
         const res = await api.get(`/market/candles/${symbol}?timeframe=${timeframe}&count=300`);
-        const data = res.data?.data || [];
+        const data = res.data?.candles || res.data?.data || [];
         if (seriesRef.current) {
           seriesRef.current.setData(data);
           chartRef.current?.timeScale().fitContent();

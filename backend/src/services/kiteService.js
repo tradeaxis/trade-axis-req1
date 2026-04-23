@@ -333,7 +333,9 @@ class KiteService {
       );
 
       return (raw || []).slice(-count).map((c) => ({
-        time: Math.floor(new Date(c.date).getTime() / 1000),
+        time: ['1d', '1w', '1M'].includes(timeframe)
+          ? DateTime.fromJSDate(new Date(c.date), { zone: 'Asia/Kolkata' }).toFormat('yyyy-MM-dd')
+          : Math.floor(new Date(c.date).getTime() / 1000),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),

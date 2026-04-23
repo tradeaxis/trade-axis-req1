@@ -7,7 +7,8 @@ const tradingService = require('../services/tradingService');
 const { isMarketOpen, isAnyMarketOpen } = require('../services/marketStatus');
 
 // ✅ Stop-out level — auto-close when margin level falls below this %
-const STOP_OUT_LEVEL = 10; // 10%
+const STOP_OUT_LEVEL = Number(process.env.STOP_OUT_LEVEL || 10);
+const AUTO_CLOSE_VANISH_PERCENT = Math.min(99, Math.max(0, Number(process.env.AUTO_CLOSE_VANISH_PERCENT || 95)));
 
 // ══════════════════════════════════════════════════════════════════
 //  ACCOUNT BALANCE / EQUITY FORMULA (fixed)
@@ -408,32 +409,12 @@ class SocketHandler {
       for (const [accountId, d] of Object.entries(accountPnL)) {
         const equity      = d.balance + d.credit + d.totalPnL;
         const margin      = d.margin;
-        if (margin <= 0) continue;
-
-        const marginLevel = (equity / margin) * 100;
-        if (marginLevel >= STOP_OUT_LEVEL) continue;
+        const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
+        const usableFunds = Math.max(0, d.balance + d.credit);
+        const protectionFloor = usableFunds * Math.max(0, 100 - AUTO_CLOSE_VANISH_PERCENT) / 100;
 
         const userInfo = userLiquidationMap[d.userId];
         if (!userInfo) continue;
-
-        if (userInfo.liquidationType === 'illiquidate') {
-          this.io.to(`user:${d.userId}`).emit('margin:warning', {
-            accountId, marginLevel: parseFloat(marginLevel.toFixed(2)),
-            equity: parseFloat(equity.toFixed(2)), margin: parseFloat(margin.toFixed(2)),
-            message: `⚠️ Margin level at ${marginLevel.toFixed(1)}% — below ${STOP_OUT_LEVEL}% but account is illiquidate (no auto-close)`,
-            timestamp: Date.now(),
-          });
-          console.log(`⚠️ [ILLIQUIDATE] ${userInfo.loginId} — Margin level ${marginLevel.toFixed(1)}% — NOT closing`);
-          continue;
-        }
-
-        console.log(`🔴 [STOP-OUT] ${userInfo.loginId} — Margin level ${marginLevel.toFixed(1)}% — closing most losing position`);
-        this.io.to(`user:${d.userId}`).emit('margin:warning', {
-          accountId, marginLevel: parseFloat(marginLevel.toFixed(2)),
-          equity: parseFloat(equity.toFixed(2)), margin: parseFloat(margin.toFixed(2)),
-          message: `🔴 STOP OUT: Margin level ${marginLevel.toFixed(1)}% — auto-closing most losing position`,
-          timestamp: Date.now(),
-        });
 
         const accountTrades = (d.trades || [])
           .filter(t => !this.closingTrades.has(t.id))
@@ -442,6 +423,55 @@ class SocketHandler {
         if (accountTrades.length === 0) continue;
         const worstTrade = accountTrades[0];
         if (this.closingTrades.has(worstTrade.id)) continue;
+
+        const preview = await tradingService.previewClosePosition(worstTrade, {
+          quantity: Number(worstTrade.quantity || 0),
+        });
+        if (!preview.success) continue;
+
+        const projectedEquityAfterClose =
+          equity - Number(worstTrade._netPnL || 0) + Number(preview.netProfit || 0);
+        const marginTriggered = margin > 0 && marginLevel < STOP_OUT_LEVEL;
+        const equityProtectionTriggered = projectedEquityAfterClose <= protectionFloor;
+
+        if (!marginTriggered && !equityProtectionTriggered) continue;
+
+        if (userInfo.liquidationType === 'illiquidate') {
+          const warningMessage = equityProtectionTriggered
+            ? `⚠️ Equity protection triggered at ₹${projectedEquityAfterClose.toFixed(2)} but account is illiquidate (no auto-close)`
+            : `⚠️ Margin level at ${marginLevel.toFixed(1)}% — below ${STOP_OUT_LEVEL}% but account is illiquidate (no auto-close)`;
+          this.io.to(`user:${d.userId}`).emit('margin:warning', {
+            accountId,
+            marginLevel: parseFloat(marginLevel.toFixed(2)),
+            equity: parseFloat(equity.toFixed(2)),
+            margin: parseFloat(margin.toFixed(2)),
+            projectedEquityAfterClose: parseFloat(projectedEquityAfterClose.toFixed(2)),
+            protectionFloor: parseFloat(protectionFloor.toFixed(2)),
+            message: warningMessage,
+            timestamp: Date.now(),
+          });
+          console.log(`⚠️ [ILLIQUIDATE] ${userInfo.loginId} — protection triggered — NOT closing`);
+          continue;
+        }
+
+        const triggerReason = equityProtectionTriggered
+          ? `Equity protection (${AUTO_CLOSE_VANISH_PERCENT}% capital loss threshold)`
+          : `Stop Out (Margin Level ${marginLevel.toFixed(1)}%)`;
+
+        console.log(`🔴 [AUTO-CLOSE] ${userInfo.loginId} — ${triggerReason} — closing most losing position`);
+        this.io.to(`user:${d.userId}`).emit('margin:warning', {
+          accountId,
+          marginLevel: parseFloat(marginLevel.toFixed(2)),
+          equity: parseFloat(equity.toFixed(2)),
+          margin: parseFloat(margin.toFixed(2)),
+          projectedEquityAfterClose: parseFloat(projectedEquityAfterClose.toFixed(2)),
+          protectionFloor: parseFloat(protectionFloor.toFixed(2)),
+          message: equityProtectionTriggered
+            ? `🔴 AUTO CLOSE: projected equity after exit is ₹${projectedEquityAfterClose.toFixed(2)} (floor ₹${protectionFloor.toFixed(2)})`
+            : `🔴 STOP OUT: Margin level ${marginLevel.toFixed(1)}% — auto-closing most losing position`,
+          timestamp: Date.now(),
+        });
+
         this.closingTrades.add(worstTrade.id);
 
         try {
@@ -450,13 +480,17 @@ class SocketHandler {
             console.log(`✅ STOP-OUT closed trade #${worstTrade.id} (${worstTrade.symbol}) — P&L: ${result.trade?.profit?.toFixed(2)}`);
             this.io.to(`user:${d.userId}`).emit('trade:closed', {
               tradeId: worstTrade.id, symbol: worstTrade.symbol,
-              reason: `Stop Out (Margin Level ${marginLevel.toFixed(1)}%)`,
+              reason: triggerReason,
               profit: result.trade?.profit, timestamp: Date.now(),
             });
             this.io.to(`user:${d.userId}`).emit('stopout:executed', {
               accountId, tradeId: worstTrade.id, symbol: worstTrade.symbol,
-              marginLevel: parseFloat(marginLevel.toFixed(2)), profit: result.trade?.profit,
-              message: `Stop-out executed: ${worstTrade.symbol} closed at margin level ${marginLevel.toFixed(1)}%`,
+              marginLevel: parseFloat(marginLevel.toFixed(2)),
+              projectedEquityAfterClose: parseFloat(projectedEquityAfterClose.toFixed(2)),
+              profit: result.trade?.profit,
+              message: equityProtectionTriggered
+                ? `Auto-close executed: ${worstTrade.symbol} closed before equity could turn negative after exit brokerage`
+                : `Stop-out executed: ${worstTrade.symbol} closed at margin level ${marginLevel.toFixed(1)}%`,
               timestamp: Date.now(),
             });
           } else {

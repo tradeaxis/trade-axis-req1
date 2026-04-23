@@ -17,14 +17,14 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
-// Leverage options — updated to include 1:300, 1:500, 1:1000
-const LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000];
+const DEFAULT_LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500];
 
 export default function AdminUsers() {
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [expandedUserId, setExpandedUserId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [leverageOptions, setLeverageOptions] = useState(DEFAULT_LEVERAGE_OPTIONS);
 
   // Add Money Modal State
   const [addMoneyModal, setAddMoneyModal] = useState(null);
@@ -73,6 +73,28 @@ export default function AdminUsers() {
   useEffect(() => {
     loadUsers();
   }, [loadUsers]);
+
+  useEffect(() => {
+    const loadLeverageOptions = async () => {
+      try {
+        const res = await api.get('/admin/leverage-options');
+        const options = Array.isArray(res.data?.options) && res.data.options.length > 0
+          ? res.data.options.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+          : DEFAULT_LEVERAGE_OPTIONS;
+        setLeverageOptions(options);
+        setForm((prev) => ({
+          ...prev,
+          leverage: options.includes(prev.leverage)
+            ? prev.leverage
+            : (options.includes(300) ? 300 : options[options.length - 1] || prev.leverage),
+        }));
+      } catch (_) {
+        setLeverageOptions(DEFAULT_LEVERAGE_OPTIONS);
+      }
+    };
+
+    loadLeverageOptions();
+  }, []);
 
   const copyLoginId = (loginId) => {
     if (!loginId) return;
@@ -135,7 +157,7 @@ export default function AdminUsers() {
           email: '',
           role: 'user',
           password: '',
-          leverage: 300,
+          leverage: leverageOptions.includes(300) ? 300 : leverageOptions[leverageOptions.length - 1],
           maxSavedAccounts: 10,
           brokerageRate: '0.06',
           demoBalance: 100000,
@@ -462,7 +484,7 @@ export default function AdminUsers() {
                   className="w-full px-3 py-2 rounded text-sm"
                   style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}
                 >
-                  {LEVERAGE_OPTIONS.map((lev) => (
+                  {leverageOptions.map((lev) => (
                     <option key={lev} value={lev}>1:{lev}</option>
                   ))}
                 </select>
@@ -777,7 +799,7 @@ export default function AdminUsers() {
                                       color: '#2962ff' 
                                     }}
                                   >
-                                    {LEVERAGE_OPTIONS.map((lev) => (
+                                    {leverageOptions.map((lev) => (
                                       <option key={lev} value={lev}>1:{lev}</option>
                                     ))}
                                   </select>

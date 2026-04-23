@@ -2,6 +2,11 @@
 const { supabase } = require('../config/supabase');
 const kiteStreamService = require('../services/kiteStreamService');
 const { isMarketOpen, getHolidayStatus, isCommoditySymbol } = require('../services/marketStatus');
+const {
+  buildTradeEntryEvent,
+  ensureTradeEntryHistory,
+  mergeTradeCommentEvents,
+} = require('../utils/tradeCommentEvents');
 
 // ─────────────────────────────────────────────
 //  HELPERS
@@ -312,7 +317,16 @@ exports.placeOrder = async (req, res) => {
             stop_loss: parseFloat(stopLoss) || 0, take_profit: parseFloat(takeProfit) || 0,
             margin: flipMargin, brokerage: flipBrokerage, buy_brokerage: flipBrokerage,
             sell_brokerage: 0, profit: -flipBrokerage, status: 'open',
-            comment: `Flip from closing ${existing.id}`, open_time: now,
+            comment: mergeTradeCommentEvents(`Flip from closing ${existing.id}`, [
+              buildTradeEntryEvent({
+                action: 'entry',
+                time: now,
+                quantity: remainingQty,
+                price: openPrice,
+                commission: flipBrokerage,
+              }),
+            ]),
+            open_time: now,
           };
           const { data: flipTrade, error: flipErr } = await supabase
             .from('trades').insert(flipData).select().single();
@@ -397,6 +411,17 @@ exports.placeOrder = async (req, res) => {
       const additionalBrokerage = entryBrokerage;
       const newTotalMargin = parseFloat(existing.margin || 0) + additionalMargin;
       const newBuyBrokerage = parseFloat(existing.buy_brokerage || existing.brokerage || 0) + additionalBrokerage;
+      const entryEvents = ensureTradeEntryHistory(existing);
+      const updatedEntryEvents = [
+        ...entryEvents,
+        buildTradeEntryEvent({
+          action: 'add',
+          time: now,
+          quantity: addQty,
+          price: openPrice,
+          commission: additionalBrokerage,
+        }),
+      ];
 
       const currentPrice = parseFloat(existing.current_price || openPrice);
       const direction = type === 'buy' ? 1 : -1;
@@ -409,15 +434,19 @@ exports.placeOrder = async (req, res) => {
           profit: newProfit, current_price: currentPrice,
           stop_loss: parseFloat(stopLoss) || parseFloat(existing.stop_loss) || 0,
           take_profit: parseFloat(takeProfit) || parseFloat(existing.take_profit) || 0,
-          comment: `${existing.comment || ''} [+${addQty}@${openPrice.toFixed(2)}]`.trim(),
+          comment: mergeTradeCommentEvents(
+            `${existing.comment || ''} [+${addQty}@${openPrice.toFixed(2)}]`.trim(),
+            updatedEntryEvents,
+          ),
           updated_at: now,
         }).eq('id', existing.id).select().single();
       if (updateError) throw updateError;
 
       const newAccountMargin = parseFloat(account.margin || 0) + additionalMargin;
-      const newFreeMargin = parseFloat(account.balance) - newAccountMargin;
+      const accountEquityBase = Number(account.equity ?? (Number(account.balance || 0) + Number(account.credit || 0)));
+      const newFreeMargin = accountEquityBase - newAccountMargin;
       await supabase.from('accounts').update({
-        margin: newAccountMargin, free_margin: Math.max(0, newFreeMargin), updated_at: now,
+        margin: newAccountMargin, free_margin: newFreeMargin, updated_at: now,
       }).eq('id', accountId);
 
       return res.json({
@@ -433,7 +462,16 @@ exports.placeOrder = async (req, res) => {
       quantity: parseFloat(quantity), open_price: openPrice, current_price: openPrice,
       stop_loss: parseFloat(stopLoss) || 0, take_profit: parseFloat(takeProfit) || 0,
       margin: marginRequired, brokerage: entryBrokerage, buy_brokerage: entryBrokerage,
-      sell_brokerage: 0, profit: -entryBrokerage, status: 'open', comment,
+      sell_brokerage: 0, profit: -entryBrokerage, status: 'open',
+      comment: mergeTradeCommentEvents(comment, [
+        buildTradeEntryEvent({
+          action: 'entry',
+          time: now,
+          quantity: parseFloat(quantity),
+          price: openPrice,
+          commission: entryBrokerage,
+        }),
+      ]),
       open_time: now,
     };
 
@@ -445,7 +483,8 @@ exports.placeOrder = async (req, res) => {
     }
 
     const newMargin = parseFloat(account.margin || 0) + marginRequired;
-    const newFreeMargin = parseFloat(account.balance) - newMargin;
+    const accountEquityBase = Number(account.equity ?? (Number(account.balance || 0) + Number(account.credit || 0)));
+    const newFreeMargin = accountEquityBase - newMargin;
     await supabase.from('accounts').update({
       margin: newMargin, free_margin: newFreeMargin, updated_at: now,
     }).eq('id', accountId);
@@ -794,7 +833,7 @@ exports.addQuantity = async (req, res) => {
 
     const { data: trade, error: tradeError } = await supabase
       .from('trades')
-      .select('*, accounts!inner(user_id, balance, margin, free_margin, leverage)')
+      .select('*, accounts!inner(user_id, balance, credit, equity, profit, margin, free_margin, leverage)')
       .eq('id', tradeId).eq('status', 'open').single();
     if (tradeError || !trade)
       return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
@@ -813,6 +852,7 @@ exports.addQuantity = async (req, res) => {
     const oldPrice    = parseFloat(trade.open_price);
     const leverage    = trade.accounts.leverage || 5;
     const lotSize     = 1;
+    const now         = new Date().toISOString();
 
     const additionalMargin    = (addPrice * addQty * lotSize) / leverage;
     const freeMargin           = parseFloat(trade.accounts.free_margin || 0);
@@ -827,25 +867,46 @@ exports.addQuantity = async (req, res) => {
     const additionalBrok= addPrice * addQty * lotSize * brokerageRate;
     const newBuyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0) + additionalBrok;
     const newTotalMargin  = parseFloat(trade.margin || 0) + additionalMargin;
+    const entryEvents = ensureTradeEntryHistory(trade);
+    const updatedEntryEvents = [
+      ...entryEvents,
+      buildTradeEntryEvent({
+        action: 'add',
+        time: now,
+        quantity: addQty,
+        price: addPrice,
+        commission: additionalBrok,
+      }),
+    ];
 
     const currentPrice = parseFloat(trade.current_price || addPrice);
     const direction    = trade.trade_type === 'buy' ? 1 : -1;
     const newProfit    = ((currentPrice - newAvgPrice) * direction * newQty * lotSize) - newBuyBrokerage;
-    const now          = new Date().toISOString();
 
     const { data: updatedTrade, error: updateError } = await supabase
       .from('trades').update({
         quantity: newQty, open_price: newAvgPrice, margin: newTotalMargin,
         brokerage: newBuyBrokerage, buy_brokerage: newBuyBrokerage,
         profit: newProfit, current_price: currentPrice,
-        comment: `${trade.comment || ''} [+${addQty}@${addPrice.toFixed(2)}]`.trim(), updated_at: now,
+        comment: mergeTradeCommentEvents(
+          `${trade.comment || ''} [+${addQty}@${addPrice.toFixed(2)}]`.trim(),
+          updatedEntryEvents,
+        ),
+        updated_at: now,
       }).eq('id', tradeId).select().single();
     if (updateError) throw updateError;
 
     const newAccountMargin = parseFloat(trade.accounts.margin || 0) + additionalMargin;
-    const newFreeMargin    = parseFloat(trade.accounts.balance || 0) - newAccountMargin;
+    const accountEquityBase = Number(
+      trade.accounts.equity ?? (
+        Number(trade.accounts.balance || 0) +
+        Number(trade.accounts.credit || 0) +
+        Number(trade.accounts.profit || 0)
+      )
+    );
+    const newFreeMargin    = accountEquityBase - newAccountMargin;
     await supabase.from('accounts').update({
-      margin: newAccountMargin, free_margin: Math.max(0, newFreeMargin), updated_at: now,
+      margin: newAccountMargin, free_margin: newFreeMargin, updated_at: now,
     }).eq('id', accountId);
 
     res.json({

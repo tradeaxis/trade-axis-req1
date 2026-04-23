@@ -8,6 +8,7 @@ const adminAuth = [protect, adminOnly];
 
 // ================= USER ROUTES =================
 router.get('/users', adminAuth, adminController.listUsers);
+router.get('/leverage-options', adminAuth, adminController.getLeverageOptions);
 router.post('/users', adminAuth, adminController.createUser);
 router.patch('/users/:id/active', adminAuth, adminController.setUserActive);
 router.post('/users/:id/reset-password', adminAuth, adminController.resetPassword);

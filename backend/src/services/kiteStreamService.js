@@ -22,6 +22,40 @@ const DEFAULT_TICK_SIZES = {
   MCX_SX: 0.25,
 };
 
+const getPreferredContractRow = (rows = [], now = new Date()) => {
+  if (!rows.length) return null;
+
+  const today = now.toISOString().slice(0, 10);
+  const rollToNextMonth = now.getDate() >= 20;
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+
+  const sorted = [...rows].sort((a, b) => {
+    const aExpiry = String(a.expiry_date || '9999-12-31');
+    const bExpiry = String(b.expiry_date || '9999-12-31');
+    if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
+
+    const aSeries = String(a.series || '');
+    const bSeries = String(b.series || '');
+    if (aSeries && !bSeries) return -1;
+    if (!aSeries && bSeries) return 1;
+    return String(a.symbol || '').localeCompare(String(b.symbol || ''));
+  });
+
+  const upcoming = sorted.filter((row) => !row.expiry_date || row.expiry_date >= today);
+  if (upcoming.length === 0) return sorted[0];
+
+  if (!rollToNextMonth) return upcoming[0];
+
+  const nextMonthRow = upcoming.find((row) => {
+    if (!row.expiry_date) return false;
+    const expiry = new Date(row.expiry_date);
+    return expiry.getFullYear() > currentYear || expiry.getMonth() > currentMonth;
+  });
+
+  return nextMonthRow || upcoming[0];
+};
+
 class KiteStreamService {
   constructor() {
     this.ticker      = null;
@@ -77,7 +111,6 @@ class KiteStreamService {
     if (error) throw error;
 
     const allowedRows = (data || []).filter(isAllowedSymbolRow);
-    const today = new Date().toISOString().slice(0, 10);
 
     const [openTradesRes, pendingOrdersRes] = await Promise.all([
       supabase.from('trades').select('symbol').eq('status', 'open'),
@@ -97,24 +130,12 @@ class KiteStreamService {
       rowsByUnderlying.get(key).push(row);
     }
 
+    const now = new Date();
     const selectedTokens = new Set();
     const selectedUnderlyingKeys = new Set();
 
     for (const [underlyingKey, rows] of rowsByUnderlying.entries()) {
-      const sorted = [...rows].sort((a, b) => {
-        const aExpiry = String(a.expiry_date || '9999-12-31');
-        const bExpiry = String(b.expiry_date || '9999-12-31');
-        if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
-
-        const aSeries = String(a.series || '');
-        const bSeries = String(b.series || '');
-        if (aSeries && !bSeries) return -1;
-        if (!aSeries && bSeries) return 1;
-        return String(a.symbol || '').localeCompare(String(b.symbol || ''));
-      });
-
-      const preferred =
-        sorted.find((row) => !row.expiry_date || row.expiry_date >= today) || sorted[0];
+      const preferred = getPreferredContractRow(rows, now);
 
       if (!preferred?.kite_instrument_token) continue;
       selectedTokens.add(Number(preferred.kite_instrument_token));

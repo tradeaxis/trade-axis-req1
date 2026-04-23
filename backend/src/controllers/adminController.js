@@ -5,6 +5,10 @@ const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
 const { fetchHolidaysFromKite } = require('../services/marketStatus');
+const {
+  getAllowedLeverageOptions,
+  isAllowedLeverage,
+} = require('../config/leverageOptions');
 
 // ============ HELPER: Generate Random Password ============
 const generateTempPassword = () => {
@@ -87,6 +91,8 @@ exports.createUser = async (req, res) => {
       createLive = true,
       liquidationType = 'liquidate',
     } = req.body;
+    const leverageNum = Number(leverage) || 300;
+    const allowedLeverageOptions = getAllowedLeverageOptions();
 
     if (!loginId || !loginId.trim()) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
@@ -94,6 +100,13 @@ exports.createUser = async (req, res) => {
 
     if (!createDemo && !createLive) {
       return res.status(400).json({ success: false, message: 'Select at least one account type' });
+    }
+
+    if (!isAllowedLeverage(leverageNum)) {
+      return res.status(400).json({
+        success: false,
+        message: `Unsupported leverage 1:${leverageNum}. Allowed: ${allowedLeverageOptions.map((value) => `1:${value}`).join(', ')}`,
+      });
     }
 
     const cleanLoginId = loginId.trim().toUpperCase();
@@ -174,7 +187,7 @@ exports.createUser = async (req, res) => {
       await supabase
         .from('users')
         .update({
-          leverage: Number(leverage) || 300,
+          leverage: leverageNum,
           brokerage_rate: Number(brokerageRate) || 0.0006,
         })
         .eq('id', user.id);
@@ -198,7 +211,7 @@ exports.createUser = async (req, res) => {
           equity: Number(demoBalance) || 100000,
           margin: 0,
           free_margin: Number(demoBalance) || 100000,
-          leverage: Number(leverage) || 300,
+          leverage: leverageNum,
           currency: 'INR',
           is_active: true,
         }]);
@@ -218,7 +231,7 @@ exports.createUser = async (req, res) => {
           equity: 0,
           margin: 0,
           free_margin: 0,
-          leverage: Number(leverage) || 300,
+          leverage: leverageNum,
           currency: 'INR',
           is_active: true,
         }]);
@@ -296,7 +309,7 @@ exports.resetPassword = async (req, res) => {
 exports.getLeverageOptions = async (req, res) => {
   res.json({
     success: true,
-    options: [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000],
+    options: getAllowedLeverageOptions(),
   });
 };
 
@@ -310,6 +323,14 @@ exports.updateUserLeverage = async (req, res) => {
     }
 
     const leverageNum = Number(leverage);
+    const allowedLeverageOptions = getAllowedLeverageOptions();
+
+    if (!isAllowedLeverage(leverageNum)) {
+      return res.status(400).json({
+        success: false,
+        message: `Unsupported leverage 1:${leverageNum}. Allowed: ${allowedLeverageOptions.map((value) => `1:${value}`).join(', ')}`,
+      });
+    }
 
     if (accountId) {
       const { error: accountError } = await supabase
@@ -319,9 +340,12 @@ exports.updateUserLeverage = async (req, res) => {
 
       if (accountError) {
         console.error('Update account leverage error:', accountError);
+        const isConstraintError = /accounts_leverage_check/i.test(accountError.message || '');
         return res.status(500).json({ 
           success: false, 
-          message: `Failed to update account leverage: ${accountError.message}` 
+          message: isConstraintError
+            ? `Database leverage constraint rejected 1:${leverageNum}. Run the leverage DB update first or use one of: ${allowedLeverageOptions.map((value) => `1:${value}`).join(', ')}`
+            : `Failed to update account leverage: ${accountError.message}`,
         });
       }
     } else {
@@ -332,9 +356,12 @@ exports.updateUserLeverage = async (req, res) => {
 
       if (accountError) {
         console.error('Update accounts leverage error:', accountError);
+        const isConstraintError = /accounts_leverage_check/i.test(accountError.message || '');
         return res.status(500).json({ 
           success: false, 
-          message: `Failed to update accounts leverage: ${accountError.message}` 
+          message: isConstraintError
+            ? `Database leverage constraint rejected 1:${leverageNum}. Run the leverage DB update first or use one of: ${allowedLeverageOptions.map((value) => `1:${value}`).join(', ')}`
+            : `Failed to update accounts leverage: ${accountError.message}`,
         });
       }
 

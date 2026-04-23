@@ -95,7 +95,7 @@ const Chart = ({ symbol }) => {
     const loadData = async () => {
       try {
         const response = await api.get(`/market/candles/${symbol}?timeframe=${timeframe}&count=200`);
-        const candles = response.data.data;
+        const candles = response.data?.candles || response.data?.data;
         
         if (candleSeriesRef.current && candles && candles.length > 0) {
           candleSeriesRef.current.setData(candles);

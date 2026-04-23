@@ -207,6 +207,41 @@ const normalizeLiveUnderlyingKey = (value) =>
     .replace(/FUT$/i, '')
     .replace(/[^A-Z0-9]/g, '');
 
+const getPreferredLiveContractRow = (rows = [], now = new Date()) => {
+  if (!rows.length) return null;
+
+  const today = now.toISOString().slice(0, 10);
+  const rollToNextMonth = now.getDate() >= 20;
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+
+  const sorted = [...rows].sort((a, b) => {
+    const aExpiry = String(a?.expiry_date || '9999-12-31');
+    const bExpiry = String(b?.expiry_date || '9999-12-31');
+    if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
+
+    const aSeries = String(a?.series || '').toUpperCase();
+    const bSeries = String(b?.series || '').toUpperCase();
+    const aPriority = aSeries === 'I' ? 0 : aSeries ? 2 : 1;
+    const bPriority = bSeries === 'I' ? 0 : bSeries ? 2 : 1;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+
+    return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
+  });
+
+  const upcoming = sorted.filter((row) => !row?.expiry_date || String(row.expiry_date) >= today);
+  if (upcoming.length === 0) return sorted[0];
+  if (!rollToNextMonth) return upcoming[0];
+
+  const nextMonthRow = upcoming.find((row) => {
+    if (!row?.expiry_date) return false;
+    const expiry = new Date(row.expiry_date);
+    return expiry.getFullYear() > currentYear || expiry.getMonth() > currentMonth;
+  });
+
+  return nextMonthRow || upcoming[0];
+};
+
 const pickLiveContractRows = (symbolsList = []) => {
   const rowsByUnderlying = new Map();
 
@@ -217,26 +252,11 @@ const pickLiveContractRows = (symbolsList = []) => {
     rowsByUnderlying.get(key).push(row);
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
   const picked = [];
 
   for (const rows of rowsByUnderlying.values()) {
-    const sorted = [...rows].sort((a, b) => {
-      const aExpiry = String(a?.expiry_date || '9999-12-31');
-      const bExpiry = String(b?.expiry_date || '9999-12-31');
-      if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
-
-      const aSeries = String(a?.series || '').toUpperCase();
-      const bSeries = String(b?.series || '').toUpperCase();
-      const aPriority = aSeries === 'I' ? 0 : aSeries ? 2 : 1;
-      const bPriority = bSeries === 'I' ? 0 : bSeries ? 2 : 1;
-      if (aPriority !== bPriority) return aPriority - bPriority;
-
-      return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
-    });
-
-    const preferred =
-      sorted.find((row) => !row?.expiry_date || String(row.expiry_date) >= today) || sorted[0];
+    const preferred = getPreferredLiveContractRow(rows, now);
 
     if (preferred) picked.push(preferred);
   }
@@ -449,6 +469,9 @@ const Dashboard = () => {
   const [isWatchlistDropdownOpen, setIsWatchlistDropdownOpen] = useState(false);
   const [editingWatchlistId, setEditingWatchlistId] = useState(null);
   const [editingWatchlistName, setEditingWatchlistName] = useState('');
+  const [showWatchlistCreateModal, setShowWatchlistCreateModal] = useState(false);
+  const [newWatchlistName, setNewWatchlistName] = useState('');
+  const [watchlistCreateLoading, setWatchlistCreateLoading] = useState(false);
   const watchlistDropdownRef = useRef(null);
 
   // Chart
@@ -961,7 +984,7 @@ const accountStats = useMemo(() => {
   const pnl = totalPnL;  // ← Changed from recalculating
 
   const equity = balance + credit + pnl;
-  const freeMargin = Math.max(0, equity - margin);
+  const freeMargin = equity - margin;
   const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
 
   return {
@@ -976,6 +999,8 @@ const accountStats = useMemo(() => {
     totalCommission,
   };
 }, [selectedAccount, totalPnL, totalCommission]);  // ← Add totalPnL dependency
+
+  const headlinePnL = accountStats.equity - accountStats.balance;
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -1216,17 +1241,33 @@ const accountStats = useMemo(() => {
   const handleCreateWatchlist = async (e) => {
     e?.stopPropagation();
     e?.preventDefault();
-    const name = window.prompt('New watchlist name?');
-    if (!name) return;
+    setShowWatchlistCreateModal(true);
+    setNewWatchlistName('');
+    setIsWatchlistDropdownOpen(false);
+    setShowWatchlistMenu(false);
+  };
+
+  const submitCreateWatchlist = async () => {
+    const name = newWatchlistName.trim();
+    if (!name) {
+      toast.error('Watchlist name is required');
+      return;
+    }
+
+    setWatchlistCreateLoading(true);
     try {
-      const created = await createWatchlist(name.trim(), false);
+      const created = await createWatchlist(name, false);
       setActiveWatchlistId(created.id);
       await fetchWatchlistSymbols(created.id);
       toast.success('Watchlist created');
       setIsWatchlistDropdownOpen(false);
+      setShowWatchlistCreateModal(false);
+      setNewWatchlistName('');
     } catch (err) {
       console.error(err);
       toast.error('Failed to create watchlist');
+    } finally {
+      setWatchlistCreateLoading(false);
     }
   };
 
@@ -1279,6 +1320,27 @@ const accountStats = useMemo(() => {
       toast.success(exists ? 'Removed from watchlist' : 'Added to watchlist', { duration: 1500 });
     }
   };
+
+  const refreshAccountActivity = useCallback(
+    async (accountId = selectedAccount?.id) => {
+      if (!accountId) return;
+
+      await Promise.allSettled([
+        fetchOpenTrades(accountId),
+        fetchPendingOrders?.(accountId),
+        fetchTradeHistory(accountId),
+        fetchDeals(accountId, historyPeriod),
+      ]);
+    },
+    [
+      selectedAccount?.id,
+      fetchOpenTrades,
+      fetchPendingOrders,
+      fetchTradeHistory,
+      fetchDeals,
+      historyPeriod,
+    ],
+  );
 
 const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0) => {
     if (!selectedAccount?.id || !selectedSymbol) return;
@@ -1403,8 +1465,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           : `Order Executed`,
       });
 
-      fetchOpenTrades(selectedAccount.id);
-      fetchPendingOrders?.(selectedAccount.id);
+      await refreshAccountActivity(selectedAccount.id);
       setShowOrderModal(false);
       setLimitPrice('');
       setOrderExecType('instant');
@@ -1430,6 +1491,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
     const result = await closeTrade(tradeId, selectedAccount?.id);
     if (result.success) {
+      await refreshAccountActivity(selectedAccount?.id);
       setOrderConfirmation({
         phase: 'success',
         type: 'CLOSE',
@@ -1674,12 +1736,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
       await fetchMarketStatus();
 
-      // Refresh trades
-      if (selectedAccount?.id) {
-        await fetchOpenTrades(selectedAccount.id);
-        await fetchPendingOrders?.(selectedAccount.id);
-        await fetchTradeHistory(selectedAccount.id);
-      }
+      // Refresh trades and deals
+      await refreshAccountActivity(selectedAccount?.id);
 
       // Refresh watchlist
       if (activeWatchlistId) {
@@ -1694,7 +1752,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       setIsRefreshing(false);
       refreshingRef.current = false;
     }
-  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, activeWatchlistId, fetchWatchlistSymbols, fetchMarketStatus]);
+  }, [selectedAccount?.id, activeWatchlistId, fetchWatchlistSymbols, fetchMarketStatus, refreshAccountActivity]);
 
   // ════════════════════════════════════════
   //  RENDER FUNCTIONS (not components — no hooks, no remount cycles)
@@ -1720,6 +1778,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         });
         const result = await closeTrade(trade.id, selectedAccount?.id, closeQty);
         if (result.success) {
+          await refreshAccountActivity(selectedAccount?.id);
           setOrderConfirmation({
             phase: 'success',
             type: 'CLOSE',
@@ -1728,7 +1787,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             message: `Closed ${closeQty} of ${maxQty}`,
           });
           setCloseConfirmTrade(null);
-          fetchOpenTrades(selectedAccount.id);
           setTimeout(() => setOrderConfirmation(null), 3000);
         } else {
           setOrderConfirmation({
@@ -2328,6 +2386,93 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             >
               <FolderPlus size={20} />
               Create New Watchlist
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderWatchlistCreateModal = () => {
+    if (!showWatchlistCreateModal) return null;
+
+    return (
+      <div
+        className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4"
+        onClick={() => {
+          if (watchlistCreateLoading) return;
+          setShowWatchlistCreateModal(false);
+        }}
+      >
+        <div
+          className="w-full max-w-sm rounded-2xl overflow-hidden"
+          style={{
+            background: theme === 'light' ? '#ffffff' : '#1e222d',
+            border: `1px solid ${theme === 'light' ? '#e2e8f0' : '#363a45'}`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="flex items-center justify-between p-4 border-b"
+            style={{ borderColor: theme === 'light' ? '#e2e8f0' : '#363a45' }}
+          >
+            <div>
+              <div className="font-bold text-lg" style={{ color: theme === 'light' ? '#1e293b' : '#d1d4dc' }}>
+                Create Watchlist
+              </div>
+              <div className="text-xs mt-1" style={{ color: theme === 'light' ? '#64748b' : '#787b86' }}>
+                Add a new watchlist without leaving the quotes screen.
+              </div>
+            </div>
+            <button
+              onClick={() => setShowWatchlistCreateModal(false)}
+              disabled={watchlistCreateLoading}
+            >
+              <X size={22} color={theme === 'light' ? '#64748b' : '#787b86'} />
+            </button>
+          </div>
+
+          <div className="p-4">
+            <input
+              type="text"
+              value={newWatchlistName}
+              onChange={(e) => setNewWatchlistName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitCreateWatchlist();
+              }}
+              placeholder="Watchlist name"
+              autoFocus
+              className="w-full px-4 py-3 rounded-lg text-sm"
+              style={{
+                background: theme === 'light' ? '#f8fafc' : '#131722',
+                border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
+                color: theme === 'light' ? '#1e293b' : '#d1d4dc',
+              }}
+            />
+          </div>
+
+          <div
+            className="p-4 border-t flex gap-3"
+            style={{ borderColor: theme === 'light' ? '#e2e8f0' : '#363a45' }}
+          >
+            <button
+              onClick={() => setShowWatchlistCreateModal(false)}
+              disabled={watchlistCreateLoading}
+              className="flex-1 py-3 rounded-lg font-medium"
+              style={{
+                background: theme === 'light' ? '#f1f5f9' : '#2a2e39',
+                color: theme === 'light' ? '#475569' : '#d1d4dc',
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submitCreateWatchlist}
+              disabled={watchlistCreateLoading}
+              className="flex-1 py-3 rounded-lg font-semibold text-white disabled:opacity-50"
+              style={{ background: '#2962ff' }}
+            >
+              {watchlistCreateLoading ? 'Creating...' : 'Create'}
             </button>
           </div>
         </div>
@@ -4008,7 +4153,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             </div>
             <div
               className="font-semibold text-sm"
-              style={{ color: '#26a69a' }}
+              style={{ color: accountStats.freeMargin >= 0 ? '#26a69a' : '#ef5350' }}
             >
               {formatINR(accountStats.freeMargin)}
             </div>
@@ -4415,7 +4560,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                   <span style={{ color: '#787b86' }}>
                     Free Margin
                   </span>
-                  <span style={{ color: '#26a69a' }}>
+                  <span style={{ color: accountStats.freeMargin >= 0 ? '#26a69a' : '#ef5350' }}>
                     {formatINR(accountStats.freeMargin)}
                   </span>
                 </div>
@@ -5130,11 +5275,11 @@ const renderOrderConfirmation = () => {
                     ) {
                       qtyLabel += ` of ${d.original_quantity}`;
                     }
-                    meta.push(qtyLabel);
+                    meta.push({ label: qtyLabel, tone: '#f5c542' });
                   }
-                  if (dealPrice > 0) meta.push(`Price ${dealPrice.toFixed(2)}`);
+                  if (dealPrice > 0) meta.push({ label: `Price ${dealPrice.toFixed(2)}`, tone: '#f5c542' });
                   if (d.balance_after !== undefined && d.balance_after !== null) {
-                    meta.push(`Bal ${formatINR(d.balance_after)}`);
+                    meta.push({ label: `Bal ${formatINR(d.balance_after)}`, tone: textMuted });
                   }
 
                   return (
@@ -5160,10 +5305,14 @@ const renderOrderConfirmation = () => {
                           {meta.length > 0 && (
                             <div
                               className="flex flex-wrap gap-x-3 gap-y-1 text-xs mt-1"
-                              style={{ color: textMuted }}
                             >
                               {meta.map((item) => (
-                                <span key={`${d.id || idx}-${item}`}>{item}</span>
+                                <span
+                                  key={`${d.id || idx}-${item.label}`}
+                                  style={{ color: item.tone || textMuted }}
+                                >
+                                  {item.label}
+                                </span>
                               ))}
                             </div>
                           )}
@@ -5173,7 +5322,7 @@ const renderOrderConfirmation = () => {
                             </div>
                           )}
                           {commission > 0 && (
-                            <div className="text-[11px] mt-1" style={{ color: '#f5c542' }}>
+                            <div className="text-[11px] mt-1" style={{ color: textMuted }}>
                               Commission {formatINR(commission)}
                             </div>
                           )}
@@ -5763,11 +5912,11 @@ const renderOrderConfirmation = () => {
         <div
           className="text-lg font-bold lg:text-base"
           style={{
-            color: totalPnL >= 0 ? '#26a69a' : '#ef5350',
+            color: headlinePnL >= 0 ? '#26a69a' : '#ef5350',
           }}
         >
-          {totalPnL >= 0 ? '+' : ''}
-          {formatINR(totalPnL)}
+          {headlinePnL >= 0 ? '+' : ''}
+          {formatINR(headlinePnL)}
         </div>
 
         {/* Mobile refresh button */}
@@ -5896,6 +6045,7 @@ const renderOrderConfirmation = () => {
       {renderOrderModal()}
       {renderOrderConfirmation()}
       {renderChangePasswordModal()}
+      {renderWatchlistCreateModal()}
     </div>
   );
 };

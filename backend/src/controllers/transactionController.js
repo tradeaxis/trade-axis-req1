@@ -1,6 +1,7 @@
 // backend/src/controllers/transactionController.js
 const { supabase } = require('../config/supabase');
 const paymentService = require('../services/paymentService');
+const { getTradeEntryEvents } = require('../utils/tradeCommentEvents');
 
 // GET /api/transactions/razorpay-key (public)
 const getRazorpayKey = (req, res) => {
@@ -157,6 +158,31 @@ const inferExitCommission = (trade) => {
   return 0;
 };
 
+const isTimestampWithinPeriod = (value, startDate) => {
+  if (!startDate) return true;
+  if (!value) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed >= startDate;
+};
+
+const extractChainEntryEvents = (rows = []) => {
+  const candidate = [...rows]
+    .map((row) => ({
+      row,
+      entryEvents: getTradeEntryEvents(row?.comment),
+      scoreTime: new Date(row?.updated_at || row?.close_time || row?.open_time || 0).getTime(),
+    }))
+    .filter((item) => item.entryEvents.length > 0)
+    .sort((a, b) => {
+      if (b.entryEvents.length !== a.entryEvents.length) {
+        return b.entryEvents.length - a.entryEvents.length;
+      }
+      return b.scoreTime - a.scoreTime;
+    })[0];
+
+  return candidate?.entryEvents || [];
+};
+
 const getDeals = async (req, res) => {
   try {
     const { accountId, period = 'month', limit = 200 } = req.query;
@@ -264,32 +290,59 @@ const getDeals = async (req, res) => {
           return rowTime < bestTime ? row : best;
         }, rows[0]) || rows[0];
 
-      const entryQuantity = rows.reduce(
-        (maxQty, row) => Math.max(maxQty, Number(row.original_quantity || row.quantity || 0)),
-        0,
-      );
-      const entryCommission = rows.reduce(
-        (sum, row) => sum + inferEntryCommission(row),
-        0,
-      );
+      const parsedEntryEvents = extractChainEntryEvents(rows);
 
-      allDeals.push({
-        id: `entry-${chain.key}`,
-        source: 'trade',
-        side: 'entry',
-        type: chain.tradeType,
-        dealLabel: chain.tradeType === 'buy' ? 'Buy In' : 'Sell In',
-        symbol: chain.symbol,
-        quantity: entryQuantity,
-        original_quantity: entryQuantity,
-        price: Number(entryTrade?.open_price || 0),
-        amount: 0,
-        profit: 0,
-        commission: entryCommission,
-        time: chain.openTime || entryTrade?.open_time,
-        status: 'completed',
-        tradeId: entryTrade?.id,
-      });
+      if (parsedEntryEvents.length > 0) {
+        parsedEntryEvents
+          .filter((event) => isTimestampWithinPeriod(event.time, startDate))
+          .sort((a, b) => new Date(a.time) - new Date(b.time))
+          .forEach((event, index) => {
+            allDeals.push({
+              id: `entry-${chain.key}-${index}`,
+              source: 'trade',
+              side: 'entry',
+              type: chain.tradeType,
+              dealLabel: chain.tradeType === 'buy' ? 'Buy In' : 'Sell In',
+              symbol: chain.symbol,
+              quantity: Number(event.quantity || 0),
+              original_quantity: Number(event.quantity || 0),
+              price: Number(event.price || 0),
+              amount: 0,
+              profit: 0,
+              commission: Number(event.commission || 0),
+              time: event.time,
+              status: 'completed',
+              tradeId: entryTrade?.id,
+            });
+          });
+      } else if (isTimestampWithinPeriod(chain.openTime || entryTrade?.open_time, startDate)) {
+        const entryQuantity = rows.reduce(
+          (maxQty, row) => Math.max(maxQty, Number(row.original_quantity || row.quantity || 0)),
+          0,
+        );
+        const entryCommission = rows.reduce(
+          (sum, row) => sum + inferEntryCommission(row),
+          0,
+        );
+
+        allDeals.push({
+          id: `entry-${chain.key}`,
+          source: 'trade',
+          side: 'entry',
+          type: chain.tradeType,
+          dealLabel: chain.tradeType === 'buy' ? 'Buy In' : 'Sell In',
+          symbol: chain.symbol,
+          quantity: entryQuantity,
+          original_quantity: entryQuantity,
+          price: Number(entryTrade?.open_price || 0),
+          amount: 0,
+          profit: 0,
+          commission: entryCommission,
+          time: chain.openTime || entryTrade?.open_time,
+          status: 'completed',
+          tradeId: entryTrade?.id,
+        });
+      }
 
       rows
         .filter((row) => row.status === 'closed' && row.close_time)

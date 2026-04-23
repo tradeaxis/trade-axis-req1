@@ -346,48 +346,23 @@ class TradingService {
   // Close position
   async closePosition(trade) {
     try {
-      // ✅ Use live price from memory cache first, DB fallback
-      const kiteStreamService = require('./kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
+      const preview = await this.previewClosePosition(trade, {
+        quantity: Number(trade.quantity || 0),
+      });
 
-      let closePrice;
-
-      if (livePrice && livePrice.last > 0) {
-        // Use live Kite price
-        closePrice = trade.trade_type === 'buy'
-          ? Number(livePrice.bid || livePrice.last || 0)
-          : Number(livePrice.ask || livePrice.last || 0);
-      } else {
-        // Fallback to DB
-        const { data: symbolData, error: symbolError } = await supabase
-          .from('symbols')
-          .select('bid, ask, lot_size')
-          .eq('symbol', trade.symbol)
-          .single();
-
-        if (symbolError || !symbolData) {
-          return { success: false, message: 'Failed to get current price' };
-        }
-
-        closePrice = trade.trade_type === 'buy'
-          ? parseFloat(symbolData.bid || symbolData.ask || 0)
-          : parseFloat(symbolData.ask || symbolData.bid || 0);
+      if (!preview.success) {
+        return { success: false, message: preview.message || 'Failed to get current price' };
       }
-
-      // Calculate P&L
-      const direction = trade.trade_type === 'buy' ? 1 : -1;
-      const priceDiff = (closePrice - parseFloat(trade.open_price)) * direction;
-      const lotSize = trade.lot_size || symbolData.lot_size || 1;
-      const grossProfit = priceDiff * trade.quantity * lotSize;
-      const netProfit = grossProfit - parseFloat(trade.brokerage || 0);
 
       // Update trade
       const closeTime = new Date().toISOString();
       const { data: closedTrade, error: updateError } = await supabase
         .from('trades')
         .update({
-          close_price: closePrice,
-          profit: netProfit,
+          close_price: preview.closePrice,
+          profit: preview.netProfit,
+          sell_brokerage: preview.sellBrokerage,
+          brokerage: preview.totalBrokerage,
           status: 'closed',
           close_time: closeTime,
           updated_at: closeTime,
@@ -398,37 +373,17 @@ class TradingService {
 
       if (updateError) throw updateError;
 
-      // Update account balance and margin
-      const { data: account } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('id', trade.account_id)
-        .single();
-
-      if (account) {
-        const currentBalance = parseFloat(account.balance || 0);
-        const currentCredit = parseFloat(account.credit || 0);
-        const newCredit = currentCredit + netProfit;
-        const newMargin = Math.max(0, parseFloat(account.margin || 0) - parseFloat(trade.margin || 0));
-        const newEquity = currentBalance + newCredit;
-        const newFreeMargin = newEquity - newMargin;
-
-        await supabase
-          .from('accounts')
-          .update({
-            credit: newCredit,
-            equity: newEquity,
-            margin: newMargin,
-            free_margin: newFreeMargin,
-            updated_at: closeTime,
-          })
-          .eq('id', account.id);
-      }
+      await this.settleAccount(
+        trade.account_id,
+        preview.netProfit,
+        preview.marginFreed,
+        closeTime,
+      );
 
       return {
         success: true,
         trade: closedTrade,
-        message: `Position closed at ${closePrice}. P&L: ${netProfit.toFixed(2)}`,
+        message: `Position closed at ${preview.closePrice}. P&L: ${preview.netProfit.toFixed(2)}`,
       };
     } catch (error) {
       console.error('Close position error:', error);
