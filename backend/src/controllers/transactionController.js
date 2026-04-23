@@ -127,6 +127,36 @@ const getTransaction = async (req, res) => {
 
 // ✅ NEW: GET /api/transactions/deals (protected)
 // Returns combined deals: closed trades (profit), deposits, withdrawals, commissions
+const buildTradeChainKey = (trade) => {
+  const symbol = String(trade?.symbol || '').toUpperCase();
+  const side = String(trade?.trade_type || '').toLowerCase();
+  const openTime = trade?.open_time || trade?.created_at || trade?.updated_at || trade?.id || '';
+  return `${symbol}::${side}::${openTime}`;
+};
+
+const inferEntryCommission = (trade) => {
+  if (trade?.buy_brokerage !== undefined && trade?.buy_brokerage !== null) {
+    return Number(trade.buy_brokerage || 0);
+  }
+
+  const totalBrokerage = Number(trade?.brokerage || 0);
+  const sellBrokerage = Number(trade?.sell_brokerage || 0);
+
+  if (sellBrokerage > 0) {
+    return Math.max(0, totalBrokerage - sellBrokerage);
+  }
+
+  return totalBrokerage;
+};
+
+const inferExitCommission = (trade) => {
+  if (trade?.sell_brokerage !== undefined && trade?.sell_brokerage !== null) {
+    return Number(trade.sell_brokerage || 0);
+  }
+
+  return 0;
+};
+
 const getDeals = async (req, res) => {
   try {
     const { accountId, period = 'month', limit = 200 } = req.query;
@@ -190,60 +220,104 @@ const getDeals = async (req, res) => {
 
     if (tradesError) throw tradesError;
 
-    const filteredTrades = (trades || []).filter((trade) => {
+    const tradeMatchesPeriod = (trade) => {
       if (!startDate) return true;
       const openOk = trade.open_time && new Date(trade.open_time) >= startDate;
       const closeOk = trade.close_time && new Date(trade.close_time) >= startDate;
       return openOk || closeOk;
+    };
+
+    const visibleTrades = (trades || []).filter(tradeMatchesPeriod);
+    const visibleTradeChainKeys = new Set(visibleTrades.map(buildTradeChainKey));
+
+    const tradeChains = new Map();
+
+    (trades || []).forEach((trade) => {
+      const chainKey = buildTradeChainKey(trade);
+
+      if (!tradeChains.has(chainKey)) {
+        tradeChains.set(chainKey, {
+          key: chainKey,
+          symbol: trade.symbol,
+          tradeType: trade.trade_type,
+          openTime: trade.open_time,
+          rows: [],
+        });
+      }
+
+      tradeChains.get(chainKey).rows.push(trade);
     });
 
-    filteredTrades.forEach((trade) => {
-      const qty = Number(trade.quantity || 0);
-      const entryCommission = Number(trade.buy_brokerage || trade.brokerage || 0);
+    tradeChains.forEach((chain) => {
+      if (!visibleTradeChainKeys.has(chain.key)) return;
 
-      // Entry row
+      const rows = [...chain.rows];
+      const entryTrade =
+        rows.reduce((best, row) => {
+          const rowQty = Number(row.original_quantity || row.quantity || 0);
+          const bestQty = Number(best?.original_quantity || best?.quantity || 0);
+          if (rowQty > bestQty) return row;
+          if (rowQty < bestQty) return best;
+
+          const bestTime = new Date(best?.updated_at || best?.close_time || best?.open_time || 0).getTime();
+          const rowTime = new Date(row?.updated_at || row?.close_time || row?.open_time || 0).getTime();
+          return rowTime < bestTime ? row : best;
+        }, rows[0]) || rows[0];
+
+      const entryQuantity = rows.reduce(
+        (maxQty, row) => Math.max(maxQty, Number(row.original_quantity || row.quantity || 0)),
+        0,
+      );
+      const entryCommission = rows.reduce(
+        (sum, row) => sum + inferEntryCommission(row),
+        0,
+      );
+
       allDeals.push({
-        id: `entry-${trade.id}`,
+        id: `entry-${chain.key}`,
         source: 'trade',
         side: 'entry',
-        type: trade.trade_type, // buy / sell
-        dealLabel: trade.trade_type === 'buy' ? 'Buy In' : 'Sell In',
-        symbol: trade.symbol,
-        quantity: qty,
-        price: Number(trade.open_price || 0),
+        type: chain.tradeType,
+        dealLabel: chain.tradeType === 'buy' ? 'Buy In' : 'Sell In',
+        symbol: chain.symbol,
+        quantity: entryQuantity,
+        original_quantity: entryQuantity,
+        price: Number(entryTrade?.open_price || 0),
         amount: 0,
         profit: 0,
         commission: entryCommission,
-        time: trade.open_time,
+        time: chain.openTime || entryTrade?.open_time,
         status: 'completed',
-        tradeId: trade.id,
+        tradeId: entryTrade?.id,
       });
 
-      // Exit row only if closed
-      if (trade.status === 'closed' && trade.close_time) {
-        const exitCommission = Number(trade.sell_brokerage || 0);
-        const originalQty = Number(trade.original_quantity || trade.quantity || 0);
-        const closedQty = Number(trade.quantity || 0);
+      rows
+        .filter((row) => row.status === 'closed' && row.close_time)
+        .filter(tradeMatchesPeriod)
+        .sort((a, b) => new Date(a.close_time) - new Date(b.close_time))
+        .forEach((trade) => {
+          const closedQty = Number(trade.quantity || 0);
+          const originalQty = Number(trade.original_quantity || trade.quantity || 0);
 
-        allDeals.push({
-          id: `exit-${trade.id}`,
-          source: 'trade',
-          side: 'exit',
-          type: trade.trade_type === 'buy' ? 'sell' : 'buy',
-          dealLabel: trade.trade_type === 'buy' ? 'Sell Out' : 'Buy Out',
-          symbol: trade.symbol,
-          quantity: closedQty,
-          closed_quantity: closedQty,
-          original_quantity: originalQty,
-          price: Number(trade.close_price || 0),
-          amount: Number(trade.profit || 0),
-          profit: Number(trade.profit || 0),
-          commission: exitCommission,
-          time: trade.close_time,
-          status: 'completed',
-          tradeId: trade.id,
+          allDeals.push({
+            id: `exit-${trade.id}`,
+            source: 'trade',
+            side: 'exit',
+            type: trade.trade_type === 'buy' ? 'sell' : 'buy',
+            dealLabel: trade.trade_type === 'buy' ? 'Sell Out' : 'Buy Out',
+            symbol: trade.symbol,
+            quantity: closedQty,
+            closed_quantity: closedQty,
+            original_quantity: originalQty,
+            price: Number(trade.close_price || 0),
+            amount: Number(trade.profit || 0),
+            profit: Number(trade.profit || 0),
+            commission: inferExitCommission(trade),
+            time: trade.close_time,
+            status: 'completed',
+            tradeId: trade.id,
+          });
         });
-      }
     });
 
     // 2) Deposits / Withdrawals
