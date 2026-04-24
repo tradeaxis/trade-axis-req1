@@ -134,7 +134,6 @@ class WeeklySettlementService {
             exchange: trade.exchange || 'NSE',
             trade_type: trade.trade_type,       // same direction
             quantity: qty,                       // same quantity
-            original_quantity: qty,
             open_price: closePrice,              // opens at settlement price
             current_price: closePrice,           // same → P&L = 0
             stop_loss: Number(trade.stop_loss || 0),    // preserved

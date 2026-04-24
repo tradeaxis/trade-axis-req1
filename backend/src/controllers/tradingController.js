@@ -374,7 +374,7 @@ exports.placeOrder = async (req, res) => {
         const partialReduceRecord = {
           user_id: userId, account_id: accountId, symbol: existing.symbol,
           exchange: existing.exchange, trade_type: existing.trade_type,
-          quantity: incomingQty, original_quantity: existingQty,
+          quantity: incomingQty,
           open_price: parseFloat(existing.open_price), close_price: openPrice,
           current_price: openPrice, stop_loss: 0, take_profit: 0,
           margin: closedMargin, buy_brokerage: closedBuyBrok, sell_brokerage: exitBrokerage,
@@ -674,7 +674,6 @@ exports.closePosition = async (req, res) => {
       exchange:          trade.exchange,
       trade_type:        trade.trade_type,     // ← original side (buy/sell)
       quantity:          quantityToClose,       // ← how many were closed now
-      original_quantity: tradeQuantity,         // ← how many were open before this close
       open_price:        parseFloat(trade.open_price),
       close_price:       closePrice,
       current_price:     closePrice,

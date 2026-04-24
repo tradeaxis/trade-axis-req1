@@ -227,8 +227,17 @@ const findScrollableParent = (element) => {
   return null;
 };
 
-const getPreferredLiveContractRow = (rows = [], now = new Date()) => {
-  if (!rows.length) return null;
+const getSeriesPriority = (series = '') => {
+  const value = String(series || '').toUpperCase();
+  if (value === 'I') return 0;
+  if (value === 'II') return 1;
+  if (value === 'III') return 2;
+  if (!value) return 3;
+  return 4;
+};
+
+const getUpcomingLiveContractRows = (rows = [], now = new Date(), maxContracts = 2) => {
+  if (!rows.length) return [];
 
   const today = now.toISOString().slice(0, 10);
 
@@ -237,18 +246,30 @@ const getPreferredLiveContractRow = (rows = [], now = new Date()) => {
     const bExpiry = String(b?.expiry_date || '9999-12-31');
     if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
 
-    const aSeries = String(a?.series || '').toUpperCase();
-    const bSeries = String(b?.series || '').toUpperCase();
-    const aPriority = aSeries === 'I' ? 0 : aSeries ? 2 : 1;
-    const bPriority = bSeries === 'I' ? 0 : bSeries ? 2 : 1;
+    const aPriority = getSeriesPriority(a?.series);
+    const bPriority = getSeriesPriority(b?.series);
     if (aPriority !== bPriority) return aPriority - bPriority;
 
     return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
   });
 
   const upcoming = sorted.filter((row) => !row?.expiry_date || String(row.expiry_date) >= today);
-  if (upcoming.length === 0) return sorted[0];
-  return upcoming[0];
+  const sourceRows = upcoming.length > 0 ? upcoming : sorted;
+  const targetCount = Math.max(1, maxContracts);
+  const selectedRows = [];
+  const seenExpiryKeys = new Set();
+
+  for (const row of sourceRows) {
+    const expiryKey = String(row?.expiry_date || row?.kite_instrument_token || row?.symbol || '');
+    if (seenExpiryKeys.has(expiryKey)) continue;
+
+    selectedRows.push(row);
+    seenExpiryKeys.add(expiryKey);
+
+    if (selectedRows.length >= targetCount) break;
+  }
+
+  return selectedRows;
 };
 
 const pickLiveContractRows = (symbolsList = []) => {
@@ -262,15 +283,27 @@ const pickLiveContractRows = (symbolsList = []) => {
   }
 
   const now = new Date();
+  const preferredVisibleContracts = now.getDate() >= 20 ? 2 : 1;
   const picked = [];
 
   for (const rows of rowsByUnderlying.values()) {
-    const preferred = getPreferredLiveContractRow(rows, now);
-
-    if (preferred) picked.push(preferred);
+    const visibleRows = getUpcomingLiveContractRows(rows, now, preferredVisibleContracts);
+    if (visibleRows.length > 0) {
+      picked.push(...visibleRows);
+    }
   }
 
-  return picked;
+  return picked.sort((a, b) => {
+    const aUnderlying = String(a?.underlying || a?.symbol || '');
+    const bUnderlying = String(b?.underlying || b?.symbol || '');
+    if (aUnderlying !== bUnderlying) return aUnderlying.localeCompare(bUnderlying);
+
+    const aExpiry = String(a?.expiry_date || '9999-12-31');
+    const bExpiry = String(b?.expiry_date || '9999-12-31');
+    if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
+
+    return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
+  });
 };
 
 const buildHistoryPositionGroups = (closedTrades = []) => {

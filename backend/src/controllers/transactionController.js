@@ -158,6 +158,24 @@ const inferExitCommission = (trade) => {
   return 0;
 };
 
+const inferOriginalQuantity = (trade) => {
+  const explicit = Number(trade?.original_quantity);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+
+  const comment = String(trade?.comment || '');
+  const partialMatch = comment.match(/partial close:\s*([\d.]+)\s+of\s+([\d.]+)/i);
+  if (partialMatch) {
+    const parsed = Number(partialMatch[2]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return Number(trade?.quantity || 0);
+};
+
 const isTimestampWithinPeriod = (value, startDate) => {
   if (!startDate) return true;
   if (!value) return false;
@@ -289,8 +307,8 @@ const getDeals = async (req, res) => {
       const rows = [...chain.rows];
       const entryTrade =
         rows.reduce((best, row) => {
-          const rowQty = Number(row.original_quantity || row.quantity || 0);
-          const bestQty = Number(best?.original_quantity || best?.quantity || 0);
+          const rowQty = inferOriginalQuantity(row);
+          const bestQty = inferOriginalQuantity(best);
           if (rowQty > bestQty) return row;
           if (rowQty < bestQty) return best;
 
@@ -326,7 +344,7 @@ const getDeals = async (req, res) => {
           });
       } else if (isTimestampWithinPeriod(chain.openTime || entryTrade?.open_time, startDate)) {
         const entryQuantity = rows.reduce(
-          (maxQty, row) => Math.max(maxQty, Number(row.original_quantity || row.quantity || 0)),
+          (maxQty, row) => Math.max(maxQty, inferOriginalQuantity(row)),
           0,
         );
         const entryCommission = rows.reduce(
@@ -359,7 +377,7 @@ const getDeals = async (req, res) => {
         .sort((a, b) => new Date(a.close_time) - new Date(b.close_time))
         .forEach((trade) => {
           const closedQty = Number(trade.quantity || 0);
-          const originalQty = Number(trade.original_quantity || trade.quantity || 0);
+          const originalQty = inferOriginalQuantity(trade);
 
           allDeals.push({
             id: `exit-${trade.id}`,

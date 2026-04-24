@@ -22,8 +22,17 @@ const DEFAULT_TICK_SIZES = {
   MCX_SX: 0.25,
 };
 
-const getPreferredContractRow = (rows = [], now = new Date()) => {
-  if (!rows.length) return null;
+const getSeriesPriority = (series = '') => {
+  const value = String(series || '').toUpperCase();
+  if (value === 'I') return 0;
+  if (value === 'II') return 1;
+  if (value === 'III') return 2;
+  if (!value) return 3;
+  return 4;
+};
+
+const getUpcomingContractRows = (rows = [], now = new Date(), maxContracts = 2) => {
+  if (!rows.length) return [];
 
   const today = now.toISOString().slice(0, 10);
 
@@ -32,16 +41,30 @@ const getPreferredContractRow = (rows = [], now = new Date()) => {
     const bExpiry = String(b.expiry_date || '9999-12-31');
     if (aExpiry !== bExpiry) return aExpiry.localeCompare(bExpiry);
 
-    const aSeries = String(a.series || '');
-    const bSeries = String(b.series || '');
-    if (aSeries && !bSeries) return -1;
-    if (!aSeries && bSeries) return 1;
+    const aPriority = getSeriesPriority(a.series);
+    const bPriority = getSeriesPriority(b.series);
+    if (aPriority !== bPriority) return aPriority - bPriority;
+
     return String(a.symbol || '').localeCompare(String(b.symbol || ''));
   });
 
   const upcoming = sorted.filter((row) => !row.expiry_date || row.expiry_date >= today);
-  if (upcoming.length === 0) return sorted[0];
-  return upcoming[0];
+  const sourceRows = upcoming.length > 0 ? upcoming : sorted;
+  const targetCount = Math.max(1, maxContracts);
+  const selectedRows = [];
+  const seenExpiryKeys = new Set();
+
+  for (const row of sourceRows) {
+    const expiryKey = String(row.expiry_date || row.kite_instrument_token || row.symbol || '');
+    if (seenExpiryKeys.has(expiryKey)) continue;
+
+    selectedRows.push(row);
+    seenExpiryKeys.add(expiryKey);
+
+    if (selectedRows.length >= targetCount) break;
+  }
+
+  return selectedRows;
 };
 
 class KiteStreamService {
@@ -119,14 +142,19 @@ class KiteStreamService {
     }
 
     const now = new Date();
+    const preferredVisibleContracts = now.getDate() >= 20 ? 2 : 1;
     const selectedTokens = new Set();
     const selectedUnderlyingKeys = new Set();
 
     for (const [underlyingKey, rows] of rowsByUnderlying.entries()) {
-      const preferred = getPreferredContractRow(rows, now);
+      const selectedRows = getUpcomingContractRows(rows, now, preferredVisibleContracts);
+      if (!selectedRows.length) continue;
 
-      if (!preferred?.kite_instrument_token) continue;
-      selectedTokens.add(Number(preferred.kite_instrument_token));
+      selectedRows.forEach((row) => {
+        if (row?.kite_instrument_token) {
+          selectedTokens.add(Number(row.kite_instrument_token));
+        }
+      });
       selectedUnderlyingKeys.add(underlyingKey);
     }
 
