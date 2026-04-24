@@ -253,9 +253,6 @@ const getDeals = async (req, res) => {
       return openOk || closeOk;
     };
 
-    const visibleTrades = (trades || []).filter(tradeMatchesPeriod);
-    const visibleTradeChainKeys = new Set(visibleTrades.map(buildTradeChainKey));
-
     const tradeChains = new Map();
 
     (trades || []).forEach((trade) => {
@@ -272,6 +269,18 @@ const getDeals = async (req, res) => {
       }
 
       tradeChains.get(chainKey).rows.push(trade);
+    });
+
+    const visibleTradeChainKeys = new Set();
+
+    tradeChains.forEach((chain, chainKey) => {
+      const hasTradeTimestampInPeriod = chain.rows.some(tradeMatchesPeriod);
+      const hasEntryEventInPeriod = extractChainEntryEvents(chain.rows)
+        .some((event) => isTimestampWithinPeriod(event.time, startDate));
+
+      if (!startDate || hasTradeTimestampInPeriod || hasEntryEventInPeriod) {
+        visibleTradeChainKeys.add(chainKey);
+      }
     });
 
     tradeChains.forEach((chain) => {

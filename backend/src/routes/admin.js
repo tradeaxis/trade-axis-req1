@@ -24,6 +24,8 @@ router.delete('/users/:id', adminAuth, adminController.deleteUser);
 router.get('/open-positions', adminAuth, adminController.getAllOpenPositions);
 router.get('/users/:userId/open-positions', adminAuth, adminController.getUserOpenPositions);
 router.post('/users/close-all-positions', adminAuth, adminController.adminCloseAllUserPositions);
+router.patch('/positions/:tradeId', adminAuth, adminController.adminUpdatePosition);
+router.delete('/positions/:tradeId', adminAuth, adminController.adminDeletePosition);
 
 // ================= WITHDRAWAL ROUTES =================
 router.get('/withdrawals', adminAuth, adminController.listWithdrawals);

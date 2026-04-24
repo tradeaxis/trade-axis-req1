@@ -1,7 +1,7 @@
 // frontend/src/pages/AdminPanel.jsx  ── FIXED VERSION (adds Symbol Ban tab)
 import { useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { Calendar, Lock, RefreshCw, Search } from 'lucide-react';
+import { Calendar, Edit3, Lock, RefreshCw, Search, Trash2 } from 'lucide-react';
 import AdminUsers      from '../components/admin/AdminUsers';
 import AdminWithdrawals from '../components/admin/AdminWithdrawals';
 import AdminKiteSetup  from '../components/admin/AdminKiteSetup';
@@ -27,6 +27,16 @@ export default function AdminPanel() {
   const [manualPrice,   setManualPrice]     = useState('');
   const [manualReason,  setManualReason]    = useState('');
   const [manualLoading, setManualLoading]   = useState(false);
+  const [positionEdit, setPositionEdit]     = useState({
+    quantity: '',
+    openPrice: '',
+    currentPrice: '',
+    stopLoss: '',
+    takeProfit: '',
+    comment: '',
+  });
+  const [positionEditLoading, setPositionEditLoading] = useState(false);
+  const [positionDeleteLoading, setPositionDeleteLoading] = useState(false);
 
   const [adminUsers,                    setAdminUsers]                    = useState([]);
   const [selectedUserId,                setSelectedUserId]                = useState('');
@@ -45,6 +55,31 @@ export default function AdminPanel() {
     if (selectedUserId) fetchSelectedUserPositions(selectedUserId);
     else { setSelectedUserPositions([]); setManualTradeId(''); setPositionSearch(''); }
   }, [selectedUserId]);
+
+  const selectedManualPosition = (selectedUserPositions || []).find((p) => p.id === manualTradeId) || null;
+
+  useEffect(() => {
+    if (!selectedManualPosition) {
+      setPositionEdit({
+        quantity: '',
+        openPrice: '',
+        currentPrice: '',
+        stopLoss: '',
+        takeProfit: '',
+        comment: '',
+      });
+      return;
+    }
+
+    setPositionEdit({
+      quantity: String(selectedManualPosition.quantity ?? ''),
+      openPrice: String(selectedManualPosition.open_price ?? ''),
+      currentPrice: String(selectedManualPosition.current_price ?? selectedManualPosition.open_price ?? ''),
+      stopLoss: String(selectedManualPosition.stop_loss ?? ''),
+      takeProfit: String(selectedManualPosition.take_profit ?? ''),
+      comment: String(selectedManualPosition.comment || ''),
+    });
+  }, [selectedManualPosition]);
 
   const fetchHolidayStatus = async () => {
     try {
@@ -152,6 +187,56 @@ export default function AdminPanel() {
     } catch (e) {
       toast.error(e.response?.data?.message || 'Manual close failed');
     } finally { setManualLoading(false); }
+  };
+
+  const handleUpdateSelectedPosition = async () => {
+    if (!manualTradeId.trim()) return toast.error('Please select a position first');
+
+    setPositionEditLoading(true);
+    try {
+      const res = await api.patch(`/admin/positions/${manualTradeId.trim()}`, {
+        quantity: positionEdit.quantity,
+        openPrice: positionEdit.openPrice,
+        currentPrice: positionEdit.currentPrice,
+        stopLoss: positionEdit.stopLoss,
+        takeProfit: positionEdit.takeProfit,
+        comment: positionEdit.comment,
+      });
+
+      if (res.data?.success) {
+        toast.success(res.data.message || 'Position updated');
+        if (selectedUserId) await fetchSelectedUserPositions(selectedUserId);
+      } else {
+        toast.error(res.data?.message || 'Failed to update position');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Failed to update position');
+    } finally {
+      setPositionEditLoading(false);
+    }
+  };
+
+  const handleDeleteSelectedPosition = async () => {
+    if (!manualTradeId.trim()) return toast.error('Please select a position first');
+    if (!window.confirm('Delete the selected open position? This will remove it completely.')) return;
+
+    setPositionDeleteLoading(true);
+    try {
+      const res = await api.delete(`/admin/positions/${manualTradeId.trim()}`);
+      if (res.data?.success) {
+        toast.success(res.data.message || 'Position deleted');
+        setManualTradeId('');
+        setManualPrice('');
+        setManualReason('');
+        if (selectedUserId) await fetchSelectedUserPositions(selectedUserId);
+      } else {
+        toast.error(res.data?.message || 'Failed to delete position');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Failed to delete position');
+    } finally {
+      setPositionDeleteLoading(false);
+    }
   };
 
   const handleCloseAllSelectedUserPositions = async () => {
@@ -405,6 +490,61 @@ export default function AdminPanel() {
               <input type="text" value={manualTradeId} onChange={e => setManualTradeId(e.target.value)} placeholder="Selected Trade ID"
                 className="w-full px-4 py-3 rounded-lg text-sm mb-3 font-mono"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }} />
+
+              {selectedManualPosition && (
+                <div className="mb-3 p-3 rounded-lg" style={{ background: '#1e222d', border: '1px solid #363a45' }}>
+                  <div className="flex items-center gap-2 mb-3">
+                    <Edit3 size={16} color="#2962ff" />
+                    <div className="text-sm font-semibold" style={{ color: '#d1d4dc' }}>
+                      Edit Selected Position
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input type="number" value={positionEdit.quantity} onChange={e => setPositionEdit(prev => ({ ...prev, quantity: e.target.value }))}
+                      placeholder="Quantity"
+                      className="w-full px-3 py-2.5 rounded-lg text-sm"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+                    <input type="number" value={positionEdit.openPrice} onChange={e => setPositionEdit(prev => ({ ...prev, openPrice: e.target.value }))}
+                      placeholder="Open price"
+                      className="w-full px-3 py-2.5 rounded-lg text-sm"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+                    <input type="number" value={positionEdit.currentPrice} onChange={e => setPositionEdit(prev => ({ ...prev, currentPrice: e.target.value }))}
+                      placeholder="Current price"
+                      className="w-full px-3 py-2.5 rounded-lg text-sm"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+                    <input type="number" value={positionEdit.stopLoss} onChange={e => setPositionEdit(prev => ({ ...prev, stopLoss: e.target.value }))}
+                      placeholder="Stop loss"
+                      className="w-full px-3 py-2.5 rounded-lg text-sm"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+                    <input type="number" value={positionEdit.takeProfit} onChange={e => setPositionEdit(prev => ({ ...prev, takeProfit: e.target.value }))}
+                      placeholder="Take profit"
+                      className="w-full px-3 py-2.5 rounded-lg text-sm col-span-2"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+                  </div>
+
+                  <input type="text" value={positionEdit.comment} onChange={e => setPositionEdit(prev => ({ ...prev, comment: e.target.value }))}
+                    placeholder="Position note / comment"
+                    className="w-full px-3 py-2.5 rounded-lg text-sm mb-3"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }} />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={handleUpdateSelectedPosition} disabled={positionEditLoading}
+                      className="py-2.5 rounded-lg font-semibold text-white disabled:opacity-50 flex items-center justify-center gap-2"
+                      style={{ background: '#2962ff' }}>
+                      <Edit3 size={15} />
+                      {positionEditLoading ? 'Saving...' : 'Save Edits'}
+                    </button>
+                    <button onClick={handleDeleteSelectedPosition} disabled={positionDeleteLoading}
+                      className="py-2.5 rounded-lg font-semibold text-white disabled:opacity-50 flex items-center justify-center gap-2"
+                      style={{ background: '#ef5350' }}>
+                      <Trash2 size={15} />
+                      {positionDeleteLoading ? 'Deleting...' : 'Delete Position'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <input type="number" value={manualPrice} onChange={e => setManualPrice(e.target.value)} placeholder="Manual close price (optional)"
                 className="w-full px-4 py-3 rounded-lg text-sm mb-3"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }} />

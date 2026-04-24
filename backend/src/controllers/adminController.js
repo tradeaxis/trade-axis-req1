@@ -4,15 +4,68 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
+const tradingService = require('../services/tradingService');
 const { fetchHolidaysFromKite } = require('../services/marketStatus');
 const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
 } = require('../config/leverageOptions');
+const { fitTradeComment } = require('../utils/tradeCommentEvents');
 
 // ============ HELPER: Generate Random Password ============
 const generateTempPassword = () => {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
+};
+
+const buildAdminTradeComment = (prefix, note) => (
+  fitTradeComment(`${prefix}: ${note || 'Manual admin action'}`)
+);
+
+const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toISOString()) => {
+  const { data: account, error: accountError } = await supabase
+    .from('accounts')
+    .select('balance, credit')
+    .eq('id', accountId)
+    .single();
+
+  if (accountError || !account) {
+    throw accountError || new Error('Account not found');
+  }
+
+  const { data: openTrades, error: openTradesError } = await supabase
+    .from('trades')
+    .select('profit, margin')
+    .eq('account_id', accountId)
+    .eq('status', 'open');
+
+  if (openTradesError) throw openTradesError;
+
+  const floatingProfit = (openTrades || []).reduce(
+    (sum, row) => sum + Number(row.profit || 0),
+    0,
+  );
+  const totalMargin = (openTrades || []).reduce(
+    (sum, row) => sum + Number(row.margin || 0),
+    0,
+  );
+  const balance = Number(account.balance || 0);
+  const credit = Number(account.credit || 0);
+  const equity = balance + credit + floatingProfit;
+  const freeMargin = equity - totalMargin;
+
+  const { error: updateError } = await supabase
+    .from('accounts')
+    .update({
+      equity,
+      margin: totalMargin,
+      free_margin: freeMargin,
+      updated_at: updatedAt,
+    })
+    .eq('id', accountId);
+
+  if (updateError) throw updateError;
+
+  return { balance, credit, floatingProfit, totalMargin, equity, freeMargin };
 };
 
 // ============ USER FUNCTIONS ============
@@ -1054,7 +1107,7 @@ exports.adminClosePosition = async (req, res) => {
     // Get the trade
     const { data: trade, error: tradeError } = await supabase
       .from('trades')
-      .select('*, accounts!inner(user_id, balance, margin)')
+      .select('*, accounts!inner(user_id)')
       .eq('id', tradeId)
       .eq('status', 'open')
       .single();
@@ -1063,43 +1116,16 @@ exports.adminClosePosition = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
     }
 
-    // Get user brokerage rate
-    const { data: userData } = await supabase
-      .from('users')
-      .select('brokerage_rate')
-      .eq('id', trade.accounts.user_id)
-      .single();
+    const preview = await tradingService.previewClosePosition(trade, {
+      closePrice: manualPrice && Number(manualPrice) > 0 ? Number(manualPrice) : undefined,
+    });
 
-    const brokerageRate = userData?.brokerage_rate || 0.0003;
-
-    // Determine close price
-    let closePrice;
-    if (manualPrice && Number(manualPrice) > 0) {
-      closePrice = Number(manualPrice);
-    } else {
-      // Use live price
-      const kiteStreamService = require('../services/kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
-      if (livePrice) {
-        closePrice = trade.trade_type === 'buy' ? livePrice.bid : livePrice.ask;
-      } else {
-        closePrice = parseFloat(trade.current_price || trade.open_price);
-      }
+    if (!preview.success) {
+      return res.status(400).json({
+        success: false,
+        message: preview.message || 'Cannot determine close price',
+      });
     }
-
-    if (!closePrice || closePrice <= 0) {
-      return res.status(400).json({ success: false, message: 'Cannot determine close price' });
-    }
-
-    const tradeQuantity = parseFloat(trade.quantity);
-    const direction = trade.trade_type === 'buy' ? 1 : -1;
-    const priceDiff = (closePrice - parseFloat(trade.open_price)) * direction;
-    const grossProfit = priceDiff * tradeQuantity;
-    
-    const sellBrokerage = closePrice * tradeQuantity * brokerageRate;
-    const buyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0);
-    const totalBrokerage = buyBrokerage + sellBrokerage;
-    const netProfit = grossProfit - totalBrokerage;
 
     const closeTime = new Date().toISOString();
 
@@ -1107,14 +1133,14 @@ exports.adminClosePosition = async (req, res) => {
     const { data: closedTrade, error: updateError } = await supabase
       .from('trades')
       .update({
-        close_price: closePrice,
-        profit: netProfit,
-        sell_brokerage: sellBrokerage,
-        brokerage: totalBrokerage,
+        close_price: preview.closePrice,
+        profit: preview.netProfit,
+        sell_brokerage: preview.sellBrokerage,
+        brokerage: preview.totalBrokerage,
         status: 'closed',
         close_time: closeTime,
         updated_at: closeTime,
-        comment: `Admin close: ${reason || 'Manual close by admin'}`,
+        comment: buildAdminTradeComment('Admin close', reason || 'Manual close by admin'),
       })
       .eq('id', tradeId)
       .select()
@@ -1122,41 +1148,17 @@ exports.adminClosePosition = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // Update account
-    const currentBalance = parseFloat(trade.accounts.balance || 0);
-    const newMargin = Math.max(
-      0,
-      parseFloat(trade.accounts.margin || 0) - parseFloat(trade.margin || 0)
+    await tradingService.settleAccount(
+      trade.account_id,
+      preview.netProfit,
+      preview.marginFreed,
+      closeTime,
     );
-
-    const { data: remainingTrades } = await supabase
-      .from('trades')
-      .select('profit')
-      .eq('account_id', trade.account_id)
-      .eq('status', 'open')
-      .neq('id', tradeId);
-
-    const remainingPnL = (remainingTrades || []).reduce(
-      (sum, t) => sum + Number(t.profit || 0),
-      0
-    );
-
-    const newEquity = currentBalance + remainingPnL;
-
-    await supabase
-      .from('accounts')
-      .update({
-        equity: newEquity,
-        margin: newMargin,
-        free_margin: newEquity - newMargin,
-        updated_at: closeTime,
-      })
-      .eq('id', trade.account_id);
 
     res.json({
       success: true,
       data: closedTrade,
-      message: `Admin closed ${trade.symbol} ${trade.trade_type.toUpperCase()} x${tradeQuantity} @ ₹${closePrice.toFixed(2)}. P&L: ₹${netProfit.toFixed(2)}`,
+      message: `Admin closed ${trade.symbol} ${trade.trade_type.toUpperCase()} x${Number(trade.quantity || 0)} @ Rs.${preview.closePrice.toFixed(2)}. P&L: Rs.${preview.netProfit.toFixed(2)}`,
     });
   } catch (error) {
     console.error('adminClosePosition error:', error);
@@ -1169,7 +1171,7 @@ exports.getAllOpenPositions = async (req, res) => {
   try {
     const { data: trades, error } = await supabase
       .from('trades')
-      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time')
+      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time, stop_loss, take_profit, comment')
       .eq('status', 'open')
       .order('open_time', { ascending: false })
       .limit(500);
@@ -1223,7 +1225,7 @@ exports.getUserOpenPositions = async (req, res) => {
 
     const { data: trades, error } = await supabase
       .from('trades')
-      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time')
+      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time, stop_loss, take_profit, comment')
       .eq('status', 'open')
       .eq('user_id', userId)
       .order('open_time', { ascending: false });
@@ -1264,7 +1266,7 @@ exports.adminCloseAllUserPositions = async (req, res) => {
 
     const { data: trades, error: tradesErr } = await supabase
       .from('trades')
-      .select('*, accounts!inner(user_id, balance, margin)')
+      .select('*, accounts!inner(user_id)')
       .eq('status', 'open')
       .eq('user_id', userId);
 
@@ -1278,86 +1280,36 @@ exports.adminCloseAllUserPositions = async (req, res) => {
 
     for (const trade of trades) {
       try {
-        const { data: userData } = await supabase
-          .from('users')
-          .select('brokerage_rate')
-          .eq('id', trade.user_id)
-          .single();
+        const preview = await tradingService.previewClosePosition(trade, {
+          closePrice: manualPrice && Number(manualPrice) > 0 ? Number(manualPrice) : undefined,
+        });
 
-        const brokerageRate = userData?.brokerage_rate || 0.0003;
-
-        let closePrice;
-        if (manualPrice && Number(manualPrice) > 0) {
-          closePrice = Number(manualPrice);
-        } else {
-          const livePrice = kiteStreamService.getPrice(trade.symbol);
-          if (livePrice?.timestamp && Date.now() - livePrice.timestamp <= 10000) {
-            closePrice =
-              trade.trade_type === 'buy'
-                ? Number(livePrice.bid || livePrice.last || 0)
-                : Number(livePrice.ask || livePrice.last || 0);
-          } else {
-            closePrice = Number(trade.current_price || trade.open_price || 0);
-          }
-        }
-
-        if (!closePrice || closePrice <= 0) continue;
-
-        const tradeQuantity = Number(trade.quantity || 0);
-        const direction = trade.trade_type === 'buy' ? 1 : -1;
-        const priceDiff = (closePrice - Number(trade.open_price || 0)) * direction;
-        const grossProfit = priceDiff * tradeQuantity;
-
-        const sellBrokerage = closePrice * tradeQuantity * brokerageRate;
-        const buyBrokerage = Number(trade.buy_brokerage || trade.brokerage || 0);
-        const totalBrokerage = buyBrokerage + sellBrokerage;
-        const netProfit = grossProfit - totalBrokerage;
+        if (!preview.success) continue;
 
         const closeTime = new Date().toISOString();
 
-        await supabase
+        const { error: updateError } = await supabase
           .from('trades')
           .update({
-            close_price: closePrice,
-            profit: netProfit,
-            sell_brokerage: sellBrokerage,
-            brokerage: totalBrokerage,
+            close_price: preview.closePrice,
+            profit: preview.netProfit,
+            sell_brokerage: preview.sellBrokerage,
+            brokerage: preview.totalBrokerage,
             status: 'closed',
             close_time: closeTime,
             updated_at: closeTime,
-            comment: `Admin close all: ${reason || 'Manual close by admin'}`,
+            comment: buildAdminTradeComment('Admin close all', reason || 'Manual close by admin'),
           })
           .eq('id', trade.id);
 
-        const currentBalance = Number(trade.accounts.balance || 0);
-        const newMargin = Math.max(
-          0,
-          Number(trade.accounts.margin || 0) - Number(trade.margin || 0)
+        if (updateError) throw updateError;
+
+        await tradingService.settleAccount(
+          trade.account_id,
+          preview.netProfit,
+          preview.marginFreed,
+          closeTime,
         );
-
-        const { data: remainingTrades } = await supabase
-          .from('trades')
-          .select('profit')
-          .eq('account_id', trade.account_id)
-          .eq('status', 'open')
-          .neq('id', trade.id);
-
-        const remainingPnL = (remainingTrades || []).reduce(
-          (sum, t) => sum + Number(t.profit || 0),
-          0
-        );
-
-        const newEquity = currentBalance + remainingPnL;
-
-        await supabase
-          .from('accounts')
-          .update({
-            equity: newEquity,
-            margin: newMargin,
-            free_margin: newEquity - newMargin,
-            updated_at: closeTime,
-          })
-          .eq('id', trade.account_id);
 
         closedCount++;
       } catch (innerErr) {
@@ -1372,6 +1324,137 @@ exports.adminCloseAllUserPositions = async (req, res) => {
     });
   } catch (error) {
     console.error('adminCloseAllUserPositions error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.adminUpdatePosition = async (req, res) => {
+  try {
+    const { tradeId } = req.params;
+    const {
+      quantity,
+      openPrice,
+      currentPrice,
+      stopLoss,
+      takeProfit,
+      comment,
+    } = req.body || {};
+
+    if (!tradeId) {
+      return res.status(400).json({ success: false, message: 'Trade ID is required' });
+    }
+
+    const { data: trade, error: tradeError } = await supabase
+      .from('trades')
+      .select('*, accounts!inner(user_id, leverage)')
+      .eq('id', tradeId)
+      .eq('status', 'open')
+      .single();
+
+    if (tradeError || !trade) {
+      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
+    }
+
+    const nextQuantity = quantity !== undefined && quantity !== null && quantity !== ''
+      ? Number(quantity)
+      : Number(trade.quantity || 0);
+    const nextOpenPrice = openPrice !== undefined && openPrice !== null && openPrice !== ''
+      ? Number(openPrice)
+      : Number(trade.open_price || 0);
+    const nextCurrentPrice = currentPrice !== undefined && currentPrice !== null && currentPrice !== ''
+      ? Number(currentPrice)
+      : Number(trade.current_price || trade.open_price || 0);
+
+    if (!Number.isFinite(nextQuantity) || nextQuantity <= 0) {
+      return res.status(400).json({ success: false, message: 'Quantity must be greater than 0' });
+    }
+    if (!Number.isFinite(nextOpenPrice) || nextOpenPrice <= 0) {
+      return res.status(400).json({ success: false, message: 'Open price must be greater than 0' });
+    }
+    if (!Number.isFinite(nextCurrentPrice) || nextCurrentPrice <= 0) {
+      return res.status(400).json({ success: false, message: 'Current price must be greater than 0' });
+    }
+
+    const lotSize = Number(trade.lot_size || 1) || 1;
+    const leverage = Number(trade.accounts?.leverage || 5) || 5;
+    const brokerageRate = await tradingService.getBrokerageRate(trade.user_id);
+    const nextMargin = (nextOpenPrice * nextQuantity * lotSize) / leverage;
+    const nextBuyBrokerage = nextOpenPrice * nextQuantity * lotSize * brokerageRate;
+    const direction = trade.trade_type === 'buy' ? 1 : -1;
+    const nextProfit = ((nextCurrentPrice - nextOpenPrice) * direction * nextQuantity * lotSize) - nextBuyBrokerage;
+    const updatedAt = new Date().toISOString();
+
+    const updates = {
+      quantity: nextQuantity,
+      open_price: nextOpenPrice,
+      current_price: nextCurrentPrice,
+      margin: nextMargin,
+      buy_brokerage: nextBuyBrokerage,
+      brokerage: nextBuyBrokerage,
+      profit: nextProfit,
+      updated_at: updatedAt,
+    };
+
+    if (stopLoss !== undefined) updates.stop_loss = Number(stopLoss) || 0;
+    if (takeProfit !== undefined) updates.take_profit = Number(takeProfit) || 0;
+    if (comment !== undefined) updates.comment = fitTradeComment(comment);
+
+    const { data: updatedTrade, error: updateError } = await supabase
+      .from('trades')
+      .update(updates)
+      .eq('id', tradeId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    await recalculateAccountSnapshot(trade.account_id, updatedAt);
+
+    res.json({
+      success: true,
+      data: updatedTrade,
+      message: `Position ${trade.symbol} updated successfully`,
+    });
+  } catch (error) {
+    console.error('adminUpdatePosition error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.adminDeletePosition = async (req, res) => {
+  try {
+    const { tradeId } = req.params;
+
+    if (!tradeId) {
+      return res.status(400).json({ success: false, message: 'Trade ID is required' });
+    }
+
+    const { data: trade, error: tradeError } = await supabase
+      .from('trades')
+      .select('id, symbol, account_id')
+      .eq('id', tradeId)
+      .eq('status', 'open')
+      .single();
+
+    if (tradeError || !trade) {
+      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
+    }
+
+    const { error: deleteError } = await supabase
+      .from('trades')
+      .delete()
+      .eq('id', tradeId);
+
+    if (deleteError) throw deleteError;
+
+    await recalculateAccountSnapshot(trade.account_id);
+
+    res.json({
+      success: true,
+      message: `Position ${trade.symbol} deleted successfully`,
+    });
+  } catch (error) {
+    console.error('adminDeletePosition error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

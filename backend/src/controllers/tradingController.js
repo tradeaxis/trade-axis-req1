@@ -5,6 +5,7 @@ const { isMarketOpen, getHolidayStatus, isCommoditySymbol } = require('../servic
 const {
   buildTradeEntryEvent,
   ensureTradeEntryHistory,
+  fitTradeComment,
   mergeTradeCommentEvents,
 } = require('../utils/tradeCommentEvents');
 
@@ -70,6 +71,10 @@ async function settleAccount(accountId, netProfit, marginFreed, now) {
     .eq('id', accountId);
 }
 
+const buildPartialCloseComment = (closedQty, totalQty, remainingQty) => (
+  fitTradeComment(`Partial close: ${closedQty} of ${totalQty}. Remaining: ${remainingQty}`)
+);
+
 // ─────────────────────────────────────────────
 //  GET POSITIONS
 // ─────────────────────────────────────────────
@@ -132,6 +137,7 @@ exports.placeOrder = async (req, res) => {
       accountId, symbol, type, orderType = 'market', quantity,
       price = 0, stopLoss = 0, takeProfit = 0, slippage = 3, comment = '',
     } = req.body;
+    const sanitizedComment = fitTradeComment(comment);
 
     if (!accountId || !symbol || !type || !quantity)
       return res.status(400).json({ success: false, message: 'Missing required fields: accountId, symbol, type, quantity' });
@@ -217,7 +223,7 @@ exports.placeOrder = async (req, res) => {
           exchange: symbolData.exchange || 'NSE', order_type: orderType, trade_type: type,
           quantity: parseFloat(quantity), price: parseFloat(price),
           stop_loss: parseFloat(stopLoss) || 0, take_profit: parseFloat(takeProfit) || 0,
-          status: 'pending', comment, created_at: new Date().toISOString(),
+          status: 'pending', comment: sanitizedComment, created_at: new Date().toISOString(),
         };
         const { data: pendingOrder, error: poError } = await supabase
           .from('pending_orders').insert(pendingOrderData).select().single();
@@ -365,14 +371,7 @@ exports.placeOrder = async (req, res) => {
         const remainingMargin = (parseFloat(existing.margin || 0) / existingQty) * remainingQty;
         const closedMargin = parseFloat(existing.margin || 0) - remainingMargin;
 
-        // Update existing (reduce qty)
-        await supabase.from('trades').update({
-          quantity: remainingQty, margin: remainingMargin,
-          buy_brokerage: remainingBuyBrok, brokerage: remainingBuyBrok, updated_at: now,
-        }).eq('id', existing.id);
-
-        // Create closed partial record
-        await supabase.from('trades').insert({
+        const partialReduceRecord = {
           user_id: userId, account_id: accountId, symbol: existing.symbol,
           exchange: existing.exchange, trade_type: existing.trade_type,
           quantity: incomingQty, original_quantity: existingQty,
@@ -381,8 +380,32 @@ exports.placeOrder = async (req, res) => {
           margin: closedMargin, buy_brokerage: closedBuyBrok, sell_brokerage: exitBrokerage,
           brokerage: totalBrokerage, profit: netProfit, status: 'closed',
           open_time: existing.open_time, close_time: now, updated_at: now,
-          comment: `Partial close: ${incomingQty} of ${existingQty} ${existing.trade_type}. Remaining: ${remainingQty}`,
-        });
+          comment: buildPartialCloseComment(incomingQty, existingQty, remainingQty),
+        };
+
+        const { data: partialReduceTrade, error: partialReduceInsertError } = await supabase
+          .from('trades')
+          .insert(partialReduceRecord)
+          .select('id')
+          .single();
+
+        if (partialReduceInsertError) throw partialReduceInsertError;
+
+        const { error: reduceUpdateError } = await supabase
+          .from('trades')
+          .update({
+            quantity: remainingQty,
+            margin: remainingMargin,
+            buy_brokerage: remainingBuyBrok,
+            brokerage: remainingBuyBrok,
+            updated_at: now,
+          })
+          .eq('id', existing.id);
+
+        if (reduceUpdateError) {
+          await supabase.from('trades').delete().eq('id', partialReduceTrade.id);
+          throw reduceUpdateError;
+        }
 
         await settleAccount(accountId, netProfit, closedMargin, now);
 
@@ -435,7 +458,7 @@ exports.placeOrder = async (req, res) => {
           stop_loss: parseFloat(stopLoss) || parseFloat(existing.stop_loss) || 0,
           take_profit: parseFloat(takeProfit) || parseFloat(existing.take_profit) || 0,
           comment: mergeTradeCommentEvents(
-            `${existing.comment || ''} [+${addQty}@${openPrice.toFixed(2)}]`.trim(),
+            existing.comment || '',
             updatedEntryEvents,
           ),
           updated_at: now,
@@ -463,7 +486,7 @@ exports.placeOrder = async (req, res) => {
       stop_loss: parseFloat(stopLoss) || 0, take_profit: parseFloat(takeProfit) || 0,
       margin: marginRequired, brokerage: entryBrokerage, buy_brokerage: entryBrokerage,
       sell_brokerage: 0, profit: -entryBrokerage, status: 'open',
-      comment: mergeTradeCommentEvents(comment, [
+      comment: mergeTradeCommentEvents(sanitizedComment, [
         buildTradeEntryEvent({
           action: 'entry',
           time: now,
@@ -624,13 +647,6 @@ exports.closePosition = async (req, res) => {
       parseFloat(trade.buy_brokerage || trade.brokerage || 0) - buyBrokerageProportional;
     const remainingMargin    = (parseFloat(trade.margin || 0) / tradeQuantity) * remainingQuantity;
 
-    // Update existing open trade (reduced qty)
-    await supabase.from('trades').update({
-      quantity: remainingQuantity, margin: remainingMargin,
-      buy_brokerage: remainingBuyBrokerage, brokerage: remainingBuyBrokerage, updated_at: closeTime,
-    }).eq('id', tradeId);
-
-    // Create closed record for the partial close
     const closedPartialRecord = {
       user_id:           trade.user_id,
       account_id:        trade.account_id,
@@ -653,13 +669,33 @@ exports.closePosition = async (req, res) => {
       open_time:         trade.open_time,
       close_time:        closeTime,
       updated_at:        closeTime,
-      comment:           `Partial close: ${quantityToClose} of ${tradeQuantity}. Remaining: ${remainingQuantity}. ${trade.comment || ''}`.trim(),
+      comment:           buildPartialCloseComment(quantityToClose, tradeQuantity, remainingQuantity),
     };
 
-    try {
-      await supabase.from('trades').insert(closedPartialRecord);
-    } catch (insertErr) {
-      console.warn('Could not insert partial close record:', insertErr.message);
+    const { data: partialCloseTrade, error: partialCloseInsertError } = await supabase
+      .from('trades')
+      .insert(closedPartialRecord)
+      .select('id')
+      .single();
+
+    if (partialCloseInsertError) {
+      throw partialCloseInsertError;
+    }
+
+    const { error: partialReduceUpdateError } = await supabase
+      .from('trades')
+      .update({
+        quantity: remainingQuantity,
+        margin: remainingMargin,
+        buy_brokerage: remainingBuyBrokerage,
+        brokerage: remainingBuyBrokerage,
+        updated_at: closeTime,
+      })
+      .eq('id', tradeId);
+
+    if (partialReduceUpdateError) {
+      await supabase.from('trades').delete().eq('id', partialCloseTrade.id);
+      throw partialReduceUpdateError;
     }
 
     await settleAccount(accountId, netProfit, closedMargin, closeTime);
@@ -889,7 +925,7 @@ exports.addQuantity = async (req, res) => {
         brokerage: newBuyBrokerage, buy_brokerage: newBuyBrokerage,
         profit: newProfit, current_price: currentPrice,
         comment: mergeTradeCommentEvents(
-          `${trade.comment || ''} [+${addQty}@${addPrice.toFixed(2)}]`.trim(),
+          trade.comment || '',
           updatedEntryEvents,
         ),
         updated_at: now,

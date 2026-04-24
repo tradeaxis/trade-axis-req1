@@ -4581,6 +4581,9 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                       : '∞'}
                   </span>
                 </div>
+                <div className="text-[10px] text-right" style={{ color: '#787b86' }}>
+                  Formula: (Equity / Total Margin) × 100
+                </div>
                 <div className="flex justify-between text-sm">
                   <span style={{ color: '#787b86' }}>Leverage</span>
                   <span style={{ color: '#2962ff' }}>
@@ -5345,7 +5348,7 @@ const renderOrderConfirmation = () => {
                           </div>
                           <div className="text-[10px] mt-1" style={{ color: textMuted }}>
                             {isEntryDeal
-                              ? 'Entry impact'
+                              ? 'Trade entry'
                               : d.source === 'trade' && d.side === 'exit'
                               ? 'Net result'
                               : 'Account movement'}
