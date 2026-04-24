@@ -350,8 +350,8 @@ const startServer = async () => {
   const dbConnected = await testConnection();
 
   if (!dbConnected) {
-    console.error('❌ Database connection failed');
-    process.exit(1);
+    console.error('⚠️ Database connection failed at startup');
+    console.error('⚠️ Starting server in degraded mode so health/errors can still be returned');
   }
 
   server.listen(PORT, '0.0.0.0', async () => {
@@ -365,6 +365,11 @@ const startServer = async () => {
     console.log('   ✅ CORS: open (origin: true)');
     console.log('══════════════════════════════════════════════════════════════');
     console.log('');
+
+    if (!dbConnected) {
+      console.warn('⚠️ Skipping DB-dependent startup jobs until the database is healthy again.');
+      return;
+    }
 
     // ✅ CATCHUP SETTLEMENT - Run immediately if we missed Saturday 1 AM
     const needsCatchup = await shouldRunCatchupSettlement();

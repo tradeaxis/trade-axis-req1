@@ -26,9 +26,6 @@ const getPreferredContractRow = (rows = [], now = new Date()) => {
   if (!rows.length) return null;
 
   const today = now.toISOString().slice(0, 10);
-  const rollToNextMonth = now.getDate() >= 20;
-  const currentMonth = now.getMonth();
-  const currentYear = now.getFullYear();
 
   const sorted = [...rows].sort((a, b) => {
     const aExpiry = String(a.expiry_date || '9999-12-31');
@@ -44,16 +41,7 @@ const getPreferredContractRow = (rows = [], now = new Date()) => {
 
   const upcoming = sorted.filter((row) => !row.expiry_date || row.expiry_date >= today);
   if (upcoming.length === 0) return sorted[0];
-
-  if (!rollToNextMonth) return upcoming[0];
-
-  const nextMonthRow = upcoming.find((row) => {
-    if (!row.expiry_date) return false;
-    const expiry = new Date(row.expiry_date);
-    return expiry.getFullYear() > currentYear || expiry.getMonth() > currentMonth;
-  });
-
-  return nextMonthRow || upcoming[0];
+  return upcoming[0];
 };
 
 class KiteStreamService {

@@ -2,6 +2,46 @@
 const { supabase } = require('../config/supabase');
 const jwt = require('jsonwebtoken');
 const { hashPassword, comparePassword, generateToken, generateAccountNumber, generateLoginId } = require('../utils/auth');
+
+const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 8000);
+
+const withDbTimeout = async (operationPromise, label = 'Database request') => {
+  let timeoutId;
+
+  try {
+    return await Promise.race([
+      operationPromise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const error = new Error(`${label} timed out`);
+          error.code = 'DB_TIMEOUT';
+          reject(error);
+        }, DB_QUERY_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const isDatabaseUnavailableError = (error) => {
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    error?.code === 'DB_TIMEOUT' ||
+    message.includes('fetch failed') ||
+    message.includes('etimedout') ||
+    message.includes('econnreset') ||
+    message.includes('timeout')
+  );
+};
+
+const sendDatabaseUnavailable = (res, error) => {
+  console.error('Database unavailable during auth request:', error?.message || error);
+  return res.status(503).json({
+    success: false,
+    message: 'Database is temporarily unavailable. Please try again shortly.',
+  });
+};
 const register = async (req, res) => {
   try {
     const { email, password, firstName, lastName, phone } = req.body;
@@ -103,15 +143,25 @@ const login = async (req, res) => {
     const isLoginId = /^TA\d+$/i.test(normalizedInput);
     
     if (isLoginId) {
-      const { data, error } = await supabase
-        .from('users').select('*')
-        .eq('login_id', normalizedInput.toUpperCase()).single();
+      const { data, error } = await withDbTimeout(
+        supabase
+          .from('users')
+          .select('*')
+          .eq('login_id', normalizedInput.toUpperCase())
+          .single(),
+        'Login user lookup',
+      );
       user = data;
       if (error && error.code !== 'PGRST116') console.error(error);
     } else {
-      const { data, error } = await supabase
-        .from('users').select('*')
-        .eq('email', normalizedInput.toLowerCase()).single();
+      const { data, error } = await withDbTimeout(
+        supabase
+          .from('users')
+          .select('*')
+          .eq('email', normalizedInput.toLowerCase())
+          .single(),
+        'Login email lookup',
+      );
       user = data;
       if (error && error.code !== 'PGRST116') console.error(error);
     }
@@ -129,10 +179,22 @@ const login = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Your account has been deactivated' });
     }
 
-    await supabase.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
+    await withDbTimeout(
+      supabase
+        .from('users')
+        .update({ last_login: new Date().toISOString() })
+        .eq('id', user.id),
+      'Login timestamp update',
+    );
 
-    const { data: accounts } = await supabase
-      .from('accounts').select('*').eq('user_id', user.id).eq('is_active', true);
+    const { data: accounts } = await withDbTimeout(
+      supabase
+        .from('accounts')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('is_active', true),
+      'Login accounts lookup',
+    );
 
     const token = generateToken(user.id, user.login_id);
 
@@ -153,24 +215,32 @@ const login = async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
+    if (isDatabaseUnavailableError(error)) {
+      return sendDatabaseUnavailable(res, error);
+    }
     res.status(500).json({ success: false, message: 'Login failed', error: error.message });
   }
 };
 
 const getMe = async (req, res) => {
   try {
-    const { data: accounts } = await supabase
-      .from('accounts').select('*').eq('user_id', req.user.id).eq('is_active', true);
+    const { data: accounts } = await withDbTimeout(
+      supabase
+        .from('accounts')
+        .select('*')
+        .eq('user_id', req.user.id)
+        .eq('is_active', true),
+      'Account list lookup',
+    );
 
-    const { data: userData } = await supabase
-      .from('users')
-      .select('login_id, max_saved_accounts, closing_mode, brokerage_rate')
-      .eq('id', req.user.id).single();
-
-    const { data: fullUser } = await supabase
-      .from('users')
-      .select('login_id, max_saved_accounts, closing_mode, brokerage_rate, must_change_password, first_name, last_name')
-      .eq('id', req.user.id).single();
+    const { data: fullUser } = await withDbTimeout(
+      supabase
+        .from('users')
+        .select('login_id, max_saved_accounts, closing_mode, brokerage_rate, must_change_password, first_name, last_name')
+        .eq('id', req.user.id)
+        .single(),
+      'User profile lookup',
+    );
 
     res.status(200).json({
       success: true,
@@ -189,6 +259,9 @@ const getMe = async (req, res) => {
       }
     });
   } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return sendDatabaseUnavailable(res, error);
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 };

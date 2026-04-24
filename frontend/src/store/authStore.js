@@ -24,7 +24,7 @@ const loginRequest = (loginId, password) => {
 
   return api.post('/auth/login', body, {
     skipAuth: true,
-    timeout: 45000,
+    timeout: 12000,
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
@@ -85,7 +85,9 @@ const useAuthStore = create((set, get) => ({
       let message = error.response?.data?.message;
 
       if (!message) {
-        if (error.code === 'ERR_NETWORK') {
+        if (error.code === 'ECONNABORTED') {
+          message = 'Server timed out. Backend or database may be unavailable right now.';
+        } else if (error.code === 'ERR_NETWORK') {
           message = `Network error. Could not reach ${api.defaults.baseURL}`;
         } else {
           message = error.message || 'Login failed';
@@ -147,6 +149,11 @@ const useAuthStore = create((set, get) => ({
         console.warn('⚠️ Socket reconnect failed during checkAuth:', socketError);
       }
     } catch (error) {
+      if (error.response?.status === 503) {
+        set({ isLoading: false });
+        return;
+      }
+
       localStorage.removeItem('token');
       set({
         user: null,

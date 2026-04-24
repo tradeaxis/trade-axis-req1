@@ -207,13 +207,30 @@ const normalizeLiveUnderlyingKey = (value) =>
     .replace(/FUT$/i, '')
     .replace(/[^A-Z0-9]/g, '');
 
+const findScrollableParent = (element) => {
+  let node = element;
+
+  while (node && node !== document.body) {
+    if (node instanceof HTMLElement) {
+      const style = window.getComputedStyle(node);
+      const overflowY = style.overflowY;
+      const isScrollable = overflowY === 'auto' || overflowY === 'scroll';
+
+      if (isScrollable && node.scrollHeight > node.clientHeight) {
+        return node;
+      }
+    }
+
+    node = node.parentElement;
+  }
+
+  return null;
+};
+
 const getPreferredLiveContractRow = (rows = [], now = new Date()) => {
   if (!rows.length) return null;
 
   const today = now.toISOString().slice(0, 10);
-  const rollToNextMonth = now.getDate() >= 20;
-  const currentMonth = now.getMonth();
-  const currentYear = now.getFullYear();
 
   const sorted = [...rows].sort((a, b) => {
     const aExpiry = String(a?.expiry_date || '9999-12-31');
@@ -231,15 +248,7 @@ const getPreferredLiveContractRow = (rows = [], now = new Date()) => {
 
   const upcoming = sorted.filter((row) => !row?.expiry_date || String(row.expiry_date) >= today);
   if (upcoming.length === 0) return sorted[0];
-  if (!rollToNextMonth) return upcoming[0];
-
-  const nextMonthRow = upcoming.find((row) => {
-    if (!row?.expiry_date) return false;
-    const expiry = new Date(row.expiry_date);
-    return expiry.getFullYear() > currentYear || expiry.getMonth() > currentMonth;
-  });
-
-  return nextMonthRow || upcoming[0];
+  return upcoming[0];
 };
 
 const pickLiveContractRows = (symbolsList = []) => {
@@ -380,6 +389,7 @@ const Dashboard = () => {
   const {
     user,
     accounts,
+    setAccounts,
     logout,
     savedAccounts,
     addAccount,
@@ -411,7 +421,7 @@ const Dashboard = () => {
     updateTradesPnLBatch,
   } = useTradingStore();
 
-  const { symbols, quotes, fetchSymbols, getQuote, updatePrice } = useMarketStore();
+  const { symbols, quotes, refreshSymbols, getQuote, updatePrice } = useMarketStore();
 
   const {
     watchlists,
@@ -438,6 +448,7 @@ const Dashboard = () => {
   const symbolsFetchedRef = useRef(false);
   const quotesSearchInputRef = useRef(null);
   const refreshingRef = useRef(false);
+  const mobilePullRef = useRef({ startY: 0, eligible: false, triggered: false });
 
   // Theme
   const theme = useSettingsStore((s) => s.interface.theme);
@@ -1728,21 +1739,22 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       // Refresh account data
       try {
         const { data: authRes } = await api.get('/auth/me');
-        if (authRes?.success && authRes?.accounts) {
-          const refreshed = authRes.accounts.find((a) => a.id === selectedAccount?.id);
+        const refreshedAccounts = authRes?.data?.accounts || [];
+        if (authRes?.success && refreshedAccounts.length > 0) {
+          setAccounts(refreshedAccounts);
+          const refreshed = refreshedAccounts.find((a) => a.id === selectedAccount?.id);
           if (refreshed) setSelectedAccount(refreshed);
         }
       } catch (_) {}
 
-      await fetchMarketStatus();
-
-      // Refresh trades and deals
-      await refreshAccountActivity(selectedAccount?.id);
-
-      // Refresh watchlist
-      if (activeWatchlistId) {
-        await fetchWatchlistSymbols(activeWatchlistId);
-      }
+      await Promise.allSettled([
+        fetchMarketStatus(),
+        refreshAccountActivity(selectedAccount?.id),
+        refreshSymbols(),
+        fetchAllFuturesSymbols(),
+        activeWatchlistId ? fetchWatchlistSymbols(activeWatchlistId) : Promise.resolve(),
+        selectedSymbol ? getQuote(selectedSymbol) : Promise.resolve(),
+      ]);
 
       toast.success('Refreshed', { duration: 1200, icon: '🔄' });
     } catch (err) {
@@ -1752,7 +1764,72 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       setIsRefreshing(false);
       refreshingRef.current = false;
     }
-  }, [selectedAccount?.id, activeWatchlistId, fetchWatchlistSymbols, fetchMarketStatus, refreshAccountActivity]);
+  }, [
+    selectedAccount?.id,
+    activeWatchlistId,
+    selectedSymbol,
+    setAccounts,
+    fetchWatchlistSymbols,
+    fetchMarketStatus,
+    refreshAccountActivity,
+    refreshSymbols,
+    fetchAllFuturesSymbols,
+    getQuote,
+  ]);
+
+  useEffect(() => {
+    const refreshOnResume = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      handleRefreshData();
+    };
+
+    document.addEventListener('visibilitychange', refreshOnResume);
+    window.addEventListener('focus', refreshOnResume);
+
+    return () => {
+      document.removeEventListener('visibilitychange', refreshOnResume);
+      window.removeEventListener('focus', refreshOnResume);
+    };
+  }, [handleRefreshData]);
+
+  const handleMobileTouchStart = useCallback((event) => {
+    const touchY = event.touches?.[0]?.clientY;
+    if (touchY == null) return;
+
+    const scrollParent = findScrollableParent(event.target);
+    const scrollTop = scrollParent
+      ? scrollParent.scrollTop
+      : window.scrollY || document.documentElement.scrollTop || 0;
+
+    mobilePullRef.current = {
+      startY: touchY,
+      eligible: scrollTop <= 0,
+      triggered: false,
+    };
+  }, []);
+
+  const handleMobileTouchMove = useCallback((event) => {
+    const touchY = event.touches?.[0]?.clientY;
+    if (touchY == null) return;
+
+    const state = mobilePullRef.current;
+    if (!state.eligible || refreshingRef.current) return;
+
+    if (touchY - state.startY >= 90) {
+      mobilePullRef.current = {
+        ...state,
+        triggered: true,
+      };
+    }
+  }, []);
+
+  const handleMobileTouchEnd = useCallback(async () => {
+    const state = mobilePullRef.current;
+    mobilePullRef.current = { startY: 0, eligible: false, triggered: false };
+
+    if (!state.eligible || !state.triggered || refreshingRef.current) return;
+    await handleRefreshData();
+  }, [handleRefreshData]);
 
   // ════════════════════════════════════════
   //  RENDER FUNCTIONS (not components — no hooks, no remount cycles)
@@ -6016,6 +6093,10 @@ const renderOrderConfirmation = () => {
       <div
         className="lg:hidden flex-1 overflow-hidden relative"
         style={{ paddingBottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))' }}
+        onTouchStart={handleMobileTouchStart}
+        onTouchMove={handleMobileTouchMove}
+        onTouchEnd={handleMobileTouchEnd}
+        onTouchCancel={handleMobileTouchEnd}
       >
         {/* Pull-to-refresh indicator */}
         {isRefreshing && (

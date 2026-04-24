@@ -602,8 +602,28 @@ exports.closePosition = async (req, res) => {
         message: `Cannot determine close price for ${trade.symbol}. Market data unavailable.`,
       });
 
-    const tradeQuantity  = parseFloat(trade.quantity);
-    const quantityToClose = closeQuantity ? Math.min(parseFloat(closeQuantity), tradeQuantity) : tradeQuantity;
+    const tradeQuantity = parseFloat(trade.quantity);
+    const requestedCloseQuantity =
+      closeQuantity === undefined || closeQuantity === null || closeQuantity === ''
+        ? tradeQuantity
+        : Number(closeQuantity);
+
+    if (!Number.isFinite(requestedCloseQuantity) || requestedCloseQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Close quantity must be greater than 0',
+      });
+    }
+
+    const quantityToClose = Math.min(requestedCloseQuantity, tradeQuantity);
+
+    if (!Number.isFinite(quantityToClose) || quantityToClose <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid close quantity',
+      });
+    }
+
     const isFullClose    = quantityToClose >= tradeQuantity;
 
     const direction      = trade.trade_type === 'buy' ? 1 : -1;
