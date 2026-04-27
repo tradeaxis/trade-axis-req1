@@ -14,58 +14,112 @@ if (!supabaseUrl || !supabaseKey) {
   process.exit(1);
 }
 
+// ─── Single singleton client ─────────────────────────────────────────────────
+// Pro plan: 120 direct connections, 10k pooled via PgBouncer
+// We still use a singleton — no need to create multiple clients
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    autoRefreshToken: false,
-    persistSession: false,
+    autoRefreshToken:  false,
+    persistSession:    false,
+    detectSessionInUrl: false,
+  },
+  global: {
+    headers: { 'x-application-name': 'trade-axis-backend' },
+    fetch: (url, options = {}) => {
+      const controller = new AbortController();
+      // Pro plan is faster — 20s timeout is enough
+      const id = setTimeout(() => controller.abort(), 20000);
+      return fetch(url, { ...options, signal: controller.signal })
+        .finally(() => clearTimeout(id));
+    },
+  },
+  db: {
+    schema: 'public',
+  },
+  realtime: {
+    params: { eventsPerSecond: 10 }, // Pro allows more realtime events
   },
 });
 
-// ── Retry wrapper for flaky connections ──
-const withRetry = async (operation, maxRetries = 3, delayMs = 1000) => {
+// ─── Retry wrapper ───────────────────────────────────────────────────────────
+const RETRYABLE = [
+  'timeout',
+  'upstream connect',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'Connection pool',
+  'PGRST003',
+  'fetch failed',
+  'AbortError',
+];
+
+const withRetry = async (operation, maxRetries = 3, baseDelayMs = 500) => {
+  // Pro plan: shorter base delay since infra is more reliable
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const result = await operation();
-      
-      // Check for connection pool errors
+
       if (result?.error?.code === 'PGRST003') {
-        throw new Error('Connection pool exhausted');
+        const err  = new Error('Connection pool exhausted (PGRST003)');
+        err.code   = 'PGRST003';
+        throw err;
       }
-      
+
       return result;
     } catch (error) {
       lastError = error;
-      const isRetryable =
-        error.message?.includes('timeout') ||
-        error.message?.includes('upstream connect') ||
-        error.message?.includes('ECONNRESET') ||
-        error.message?.includes('ETIMEDOUT') ||
-        error.message?.includes('Connection pool') ||
-        error.message?.includes('PGRST003');
 
-      if (isRetryable && attempt < maxRetries) {
-        const waitTime = delayMs * attempt * (1 + Math.random() * 0.5); // Add jitter
-        console.warn(`⚠️ DB attempt ${attempt}/${maxRetries} failed. Retrying in ${Math.round(waitTime)}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
-        continue;
-      }
-      throw error;
+      const isRetryable = RETRYABLE.some(
+        (keyword) =>
+          error.message?.includes(keyword) ||
+          error.code === 'PGRST003'
+      );
+
+      if (!isRetryable || attempt >= maxRetries) throw error;
+
+      // Shorter backoff on Pro — infra recovers faster
+      const wait = baseDelayMs * Math.pow(2, attempt - 1) * (1 + Math.random() * 0.2);
+      console.warn(
+        `⚠️  DB attempt ${attempt}/${maxRetries} failed ` +
+        `(${error.code || error.message}). Retrying in ${Math.round(wait)}ms…`
+      );
+      await new Promise((r) => setTimeout(r, wait));
     }
   }
+
   throw lastError;
 };
 
-// ── Test connection (non-blocking) ──
-const testConnection = async () => {
+// ─── Health check — cached 30s ───────────────────────────────────────────────
+// Pro plan never auto-pauses so this is mostly for monitoring
+let _healthCache = { ok: false, checkedAt: 0 };
+
+const testConnection = async (forceRefresh = false) => {
+  const now       = Date.now();
+  const CACHE_TTL = 30_000; // 30 seconds
+
+  if (!forceRefresh && now - _healthCache.checkedAt < CACHE_TTL) {
+    return _healthCache.ok;
+  }
+
   try {
-    const { error } = await supabase.from('symbols').select('symbol').limit(1);
-    if (error) throw error;
-    console.log('✅ Supabase connection verified');
-    return true;
+    const { error } = await supabase
+      .from('symbols')
+      .select('symbol')
+      .limit(1);
+
+    const ok         = !error || error.code === 'PGRST116';
+    _healthCache     = { ok, checkedAt: now };
+
+    if (ok) console.log('✅ Supabase connection verified');
+    else    console.error('❌ Supabase connection error:', error?.message);
+
+    return ok;
   } catch (error) {
     console.error('❌ Supabase connection error:', error.message);
+    _healthCache = { ok: false, checkedAt: now };
     return false;
   }
 };

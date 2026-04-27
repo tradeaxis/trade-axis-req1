@@ -435,6 +435,64 @@ exports.updateUserLeverage = async (req, res) => {
   }
 };
 
+exports.updateAccountEquity = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { accountId, equity } = req.body;
+
+    if (!accountId) {
+      return res.status(400).json({ success: false, message: 'Account ID is required' });
+    }
+
+    if (equity === undefined || equity === null || Number.isNaN(Number(equity))) {
+      return res.status(400).json({ success: false, message: 'Valid equity value is required' });
+    }
+
+    const targetEquity = Number(equity);
+
+    const { data: account, error: accountError } = await supabase
+      .from('accounts')
+      .select('id, user_id')
+      .eq('id', accountId)
+      .eq('user_id', id)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+
+    const processedAt = new Date().toISOString();
+    const snapshot = await recalculateAccountSnapshot(account.id, processedAt);
+    const newCredit = targetEquity - snapshot.balance - snapshot.floatingProfit;
+
+    const { error: updateError } = await supabase
+      .from('accounts')
+      .update({
+        credit: newCredit,
+        updated_at: processedAt,
+      })
+      .eq('id', account.id);
+
+    if (updateError) throw updateError;
+
+    const updatedSnapshot = await recalculateAccountSnapshot(account.id, processedAt);
+
+    res.json({
+      success: true,
+      message: `Equity updated to ${targetEquity.toFixed(2)}`,
+      data: {
+        equity: updatedSnapshot.equity,
+        freeMargin: updatedSnapshot.freeMargin,
+        margin: updatedSnapshot.totalMargin,
+        credit: updatedSnapshot.credit,
+      },
+    });
+  } catch (error) {
+    console.error('updateAccountEquity error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.updateBrokerageRate = async (req, res) => {
   try {
     const { id } = req.params;

@@ -31,6 +31,11 @@ export default function AdminUsers() {
   const [addMoneyAmount, setAddMoneyAmount] = useState('');
   const [addMoneyNote, setAddMoneyNote] = useState('');
   const [addMoneyLoading, setAddMoneyLoading] = useState(false);
+  const [equityModal, setEquityModal] = useState(null);
+  const [equityAmount, setEquityAmount] = useState('');
+  const [equityLoading, setEquityLoading] = useState(false);
+  const [leverageModal, setLeverageModal] = useState(null);
+  const [selectedLeverage, setSelectedLeverage] = useState(DEFAULT_LEVERAGE_OPTIONS[0]);
 
   // Create user form — Name is OPTIONAL, only Unique ID + Pass required
   // ✅ FIX 6a: Added liquidationType field
@@ -246,8 +251,26 @@ export default function AdminUsers() {
       });
       toast.success(`Leverage updated to 1:${leverage}`);
       loadUsers();
+      return true;
     } catch (e) {
       toast.error(e.response?.data?.message || 'Update leverage failed');
+      return false;
+    }
+  };
+
+  const updateEquity = async (userId, accountId, equity) => {
+    try {
+      const numericEquity = Number(equity);
+      await api.patch(`/admin/users/${userId}/equity`, {
+        accountId,
+        equity: numericEquity,
+      });
+      toast.success(`Equity updated to ${numericEquity.toLocaleString('en-IN')}`);
+      loadUsers();
+      return true;
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Update equity failed');
+      return false;
     }
   };
 
@@ -293,6 +316,54 @@ export default function AdminUsers() {
       toast.error(e.response?.data?.message || 'Failed to add money');
     } finally {
       setAddMoneyLoading(false);
+    }
+  };
+
+  const openEquityModal = (user, account) => {
+    setEquityAmount(String(Number(account.equity || 0)));
+    setEquityModal({ user, account });
+  };
+
+  const openLeverageModal = (user, account) => {
+    setSelectedLeverage(Number(account.leverage || leverageOptions[0] || 1));
+    setLeverageModal({ user, account });
+  };
+
+  const handleUpdateEquity = async () => {
+    if (!equityModal || equityAmount === '' || Number.isNaN(Number(equityAmount))) {
+      return toast.error('Enter a valid equity value');
+    }
+
+    setEquityLoading(true);
+    try {
+      const success = await updateEquity(
+        equityModal.user.id,
+        equityModal.account.id,
+        equityAmount,
+      );
+
+      if (success) {
+        setEquityModal(null);
+        setEquityAmount('');
+      }
+    } finally {
+      setEquityLoading(false);
+    }
+  };
+
+  const handleUpdateLeverage = async () => {
+    if (!leverageModal || !selectedLeverage) {
+      return toast.error('Select leverage');
+    }
+
+    const success = await updateLeverage(
+      leverageModal.user.id,
+      leverageModal.account.id,
+      selectedLeverage,
+    );
+
+    if (success) {
+      setLeverageModal(null);
     }
   };
 
@@ -741,29 +812,49 @@ export default function AdminUsers() {
                               className="p-2 rounded"
                               style={{ background: '#1e222d' }}
                             >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-medium" style={{ color: '#d1d4dc' }}>
-                                    {acc.account_number}
-                                  </span>
-                                  <span 
-                                    className="px-1.5 py-0.5 rounded text-[10px]"
-                                    style={{ 
-                                      background: acc.is_demo ? '#f5c54220' : '#26a69a20',
-                                      color: acc.is_demo ? '#f5c542' : '#26a69a'
-                                    }}
-                                  >
-                                    {acc.is_demo ? 'DEMO' : 'LIVE'}
-                                  </span>
-                                  <span className="text-[10px]" style={{ color: '#787b86' }}>
-                                    {parseFloat(acc.balance || 0).toLocaleString('en-IN')}
-                                  </span>
+                              <div className="flex flex-col gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs font-medium" style={{ color: '#d1d4dc' }}>
+                                      {acc.account_number}
+                                    </span>
+                                    <span 
+                                      className="px-1.5 py-0.5 rounded text-[10px]"
+                                      style={{ 
+                                        background: acc.is_demo ? '#f5c54220' : '#26a69a20',
+                                        color: acc.is_demo ? '#f5c542' : '#26a69a'
+                                      }}
+                                    >
+                                      {acc.is_demo ? 'DEMO' : 'LIVE'}
+                                    </span>
+                                    <span
+                                      className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                                      style={{ background: '#2962ff20', color: '#2962ff' }}
+                                    >
+                                      1:{acc.leverage || 5}
+                                    </span>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-[10px]">
+                                    <div style={{ color: '#787b86' }}>
+                                      Balance:{' '}
+                                      <span style={{ color: '#d1d4dc' }}>
+                                        {parseFloat(acc.balance || 0).toLocaleString('en-IN')}
+                                      </span>
+                                    </div>
+                                    <div style={{ color: '#787b86' }}>
+                                      Equity:{' '}
+                                      <span style={{ color: '#d1d4dc' }}>
+                                        {parseFloat(acc.equity || 0).toLocaleString('en-IN')}
+                                      </span>
+                                    </div>
+                                  </div>
                                 </div>
-                                
-                                <div className="flex items-center gap-2">
+
+                                <div className="flex flex-wrap gap-2">
                                   <button
                                     onClick={() => setAddMoneyModal({ user: u, account: acc, mode: 'add' })}
-                                    className="px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1"
+                                    className="px-2.5 py-1.5 rounded text-[10px] font-medium flex items-center gap-1"
                                     style={{ 
                                       background: '#26a69a20', 
                                       border: '1px solid #26a69a50', 
@@ -776,7 +867,7 @@ export default function AdminUsers() {
                                   </button>
                                   <button
                                     onClick={() => setAddMoneyModal({ user: u, account: acc, mode: 'reduce' })}
-                                    className="px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1"
+                                    className="px-2.5 py-1.5 rounded text-[10px] font-medium flex items-center gap-1"
                                     style={{ 
                                       background: '#ef535020', 
                                       border: '1px solid #ef535050', 
@@ -787,22 +878,32 @@ export default function AdminUsers() {
                                     <Trash2 size={12} />
                                     Reduce
                                   </button>
-
-                                  <span className="text-xs" style={{ color: '#787b86' }}>Leverage:</span>
-                                  <select
-                                    value={acc.leverage || 5}
-                                    onChange={(e) => updateLeverage(u.id, acc.id, e.target.value)}
-                                    className="px-2 py-1 rounded text-xs font-medium"
-                                    style={{ 
-                                      background: '#2962ff20', 
-                                      border: '1px solid #2962ff50', 
-                                      color: '#2962ff' 
+                                  <button
+                                    onClick={() => openEquityModal(u, acc)}
+                                    className="px-2.5 py-1.5 rounded text-[10px] font-medium flex items-center gap-1"
+                                    style={{
+                                      background: '#f5c54220',
+                                      border: '1px solid #f5c54250',
+                                      color: '#f5c542',
                                     }}
+                                    title="Edit equity"
                                   >
-                                    {leverageOptions.map((lev) => (
-                                      <option key={lev} value={lev}>1:{lev}</option>
-                                    ))}
-                                  </select>
+                                    <Wallet size={12} />
+                                    Equity
+                                  </button>
+                                  <button
+                                    onClick={() => openLeverageModal(u, acc)}
+                                    className="px-2.5 py-1.5 rounded text-[10px] font-medium flex items-center gap-1"
+                                    style={{
+                                      background: '#2962ff20',
+                                      border: '1px solid #2962ff50',
+                                      color: '#2962ff',
+                                    }}
+                                    title="Set leverage"
+                                  >
+                                    <Settings size={12} />
+                                    Lvrg
+                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -979,6 +1080,153 @@ export default function AdminUsers() {
                       {isReduce ? 'Reduce' : 'Add'} {Number(addMoneyAmount || 0).toLocaleString('en-IN')} {isReduce ? 'from' : 'to'} Account
                     </>
                   )}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {equityModal && (() => {
+        const { user: mUser, account: mAccount } = equityModal;
+
+        return (
+          <div
+            className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+            onClick={() => setEquityModal(null)}
+          >
+            <div
+              className="w-full max-w-sm rounded-xl"
+              style={{ background: '#1e222d', border: '1px solid #363a45' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+                <div className="flex items-center gap-2">
+                  <Wallet size={20} color="#f5c542" />
+                  <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                    Edit Equity
+                  </h3>
+                </div>
+                <button onClick={() => setEquityModal(null)}>
+                  <X size={22} color="#787b86" />
+                </button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+                  <div className="text-sm" style={{ color: '#787b86' }}>User</div>
+                  <div className="font-bold" style={{ color: '#d1d4dc' }}>
+                    {mUser.login_id || 'N/A'} - {mUser.first_name} {mUser.last_name}
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                    Account {mAccount.account_number}
+                  </div>
+                  <div className="text-sm mt-3" style={{ color: '#787b86' }}>
+                    Current Equity:{' '}
+                    <span style={{ color: '#f5c542' }}>
+                      {Number(mAccount.equity || 0).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
+                    New Equity
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={equityAmount}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/[^0-9.-]/g, '');
+                      const parts = val.split('.');
+                      const sanitized = parts.length > 2
+                        ? parts[0] + '.' + parts.slice(1).join('')
+                        : val;
+                      setEquityAmount(sanitized);
+                    }}
+                    className="w-full px-4 py-3 rounded-lg text-lg font-bold text-center"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    autoFocus
+                  />
+                </div>
+
+                <div className="text-xs leading-5" style={{ color: '#787b86' }}>
+                  This updates the account equity snapshot for this user account.
+                </div>
+
+                <button
+                  onClick={handleUpdateEquity}
+                  disabled={equityLoading || equityAmount === '' || Number.isNaN(Number(equityAmount))}
+                  className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50"
+                  style={{ background: '#f5c542', color: '#111827' }}
+                >
+                  {equityLoading ? 'Updating...' : 'Update Equity'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {leverageModal && (() => {
+        const { user: mUser, account: mAccount } = leverageModal;
+
+        return (
+          <div
+            className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+            onClick={() => setLeverageModal(null)}
+          >
+            <div
+              className="w-full max-w-sm rounded-xl"
+              style={{ background: '#1e222d', border: '1px solid #363a45' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+                <div className="flex items-center gap-2">
+                  <Settings size={20} color="#2962ff" />
+                  <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                    Set Leverage
+                  </h3>
+                </div>
+                <button onClick={() => setLeverageModal(null)}>
+                  <X size={22} color="#787b86" />
+                </button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+                  <div className="text-sm" style={{ color: '#787b86' }}>User</div>
+                  <div className="font-bold" style={{ color: '#d1d4dc' }}>
+                    {mUser.login_id || 'N/A'} - {mUser.first_name} {mUser.last_name}
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                    Account {mAccount.account_number}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
+                    Select Leverage
+                  </label>
+                  <select
+                    value={selectedLeverage}
+                    onChange={(e) => setSelectedLeverage(Number(e.target.value))}
+                    className="w-full px-4 py-3 rounded-lg text-base font-semibold"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#2962ff' }}
+                  >
+                    {leverageOptions.map((lev) => (
+                      <option key={lev} value={lev}>1:{lev}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleUpdateLeverage}
+                  className="w-full py-3.5 rounded-lg font-semibold text-base"
+                  style={{ background: '#2962ff', color: '#fff' }}
+                >
+                  Update to 1:{selectedLeverage}
                 </button>
               </div>
             </div>

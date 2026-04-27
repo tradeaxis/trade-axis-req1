@@ -4233,7 +4233,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 text-center">
+        <div className="grid grid-cols-2 gap-2 text-center">
           <div
             className="p-2 rounded-lg"
             style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
@@ -4249,6 +4249,33 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               style={{ color: '#f5c542' }}
             >
               {formatINR(accountStats.margin)}
+            </div>
+          </div>
+          <div
+            className="p-2 rounded-lg"
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
+          >
+            <div
+              className="text-xs font-medium"
+              style={{ color: '#787b86' }}
+            >
+              Margin Level
+            </div>
+            <div
+              className="font-semibold text-sm"
+              style={{
+                color:
+                  accountStats.margin > 0
+                    ? (accountStats.marginLevel >= 100 ? '#26a69a' : '#ef5350')
+                    : '#787b86',
+              }}
+            >
+              {accountStats.margin > 0
+                ? `${accountStats.marginLevel.toFixed(2)}%`
+                : '0.00%'}
+            </div>
+            <div className="text-[10px] mt-1 leading-4" style={{ color: '#787b86' }}>
+              Formula: Equity / Total Margin x 100
             </div>
           </div>
           <div
@@ -5059,21 +5086,21 @@ const renderOrderConfirmation = () => {
                               style={{ background: bgAlt2 }}
                             >
                               <div>
-                                <div style={{ color: textMuted }}>Buy</div>
-                                <div className="font-semibold" style={{ color: '#26a69a' }}>
+                                <div style={{ color: '#f5c542' }}>Buy</div>
+                                <div className="font-semibold" style={{ color: '#f5c542' }}>
                                   {group.buyQty || 0}
                                 </div>
                                 {group.buyPrice > 0 && (
-                                  <div style={{ color: textMuted }}>@ {group.buyPrice.toFixed(2)}</div>
+                                  <div style={{ color: '#f5c542' }}>@ {group.buyPrice.toFixed(2)}</div>
                                 )}
                               </div>
                               <div>
-                                <div style={{ color: textMuted }}>Sell</div>
-                                <div className="font-semibold" style={{ color: '#ef5350' }}>
+                                <div style={{ color: '#f5c542' }}>Sell</div>
+                                <div className="font-semibold" style={{ color: '#f5c542' }}>
                                   {group.sellQty || 0}
                                 </div>
                                 {group.sellPrice > 0 && (
-                                  <div style={{ color: textMuted }}>@ {group.sellPrice.toFixed(2)}</div>
+                                  <div style={{ color: '#f5c542' }}>@ {group.sellPrice.toFixed(2)}</div>
                                 )}
                               </div>
                               <div>
@@ -5081,7 +5108,7 @@ const renderOrderConfirmation = () => {
                                 <div className="font-semibold" style={{ color: textPrimary }}>
                                   {group.remainingQty}
                                 </div>
-                                <div style={{ color: '#f5c542' }}>
+                                <div style={{ color: textMuted }}>
                                   Comm {formatINR(group.totalCommission)}
                                 </div>
                               </div>
@@ -5162,7 +5189,7 @@ const renderOrderConfirmation = () => {
                                         {Number(trade.open_price || 0).toFixed(2)} to{' '}
                                         {Number(trade.close_price || 0).toFixed(2)}
                                       </div>
-                                      <div className="text-[11px] mt-1" style={{ color: '#f5c542' }}>
+                                      <div className="text-[11px] mt-1" style={{ color: textMuted }}>
                                         Commission {formatINR(tradeCommission)}
                                       </div>
                                     </div>
@@ -5303,7 +5330,7 @@ const renderOrderConfirmation = () => {
                       <span style={{ color: textMuted }}>
                         Commission{dealsSymbolFilter ? ` (${formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)})` : ''}:
                       </span>
-                      <span className="font-bold" style={{ color: '#f5c542' }}>{formatINR(
+                      <span className="font-bold" style={{ color: textMuted }}>{formatINR(
                         dealsSymbolFilter
                           ? filteredDeals.reduce((s, d) => s + Number(d.commission || 0), 0)
                           : dealsSummary.totalCommission

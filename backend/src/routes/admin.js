@@ -13,6 +13,7 @@ router.post('/users', adminAuth, adminController.createUser);
 router.patch('/users/:id/active', adminAuth, adminController.setUserActive);
 router.post('/users/:id/reset-password', adminAuth, adminController.resetPassword);
 router.patch('/users/:id/leverage', adminAuth, adminController.updateUserLeverage);
+router.patch('/users/:id/equity', adminAuth, adminController.updateAccountEquity);
 router.patch('/users/:id/brokerage', adminAuth, adminController.updateBrokerageRate);
 router.patch('/users/:id/max-saved-accounts', adminAuth, adminController.updateMaxSavedAccounts);
 router.patch('/users/:id/closing-mode', adminAuth, adminController.toggleClosingMode);
