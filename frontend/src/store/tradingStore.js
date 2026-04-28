@@ -123,6 +123,18 @@ const useTradingStore = create((set, get) => ({
       return { success: false, message: 'Quantity must be greater than 0' };
     }
 
+    // ✅ NEW: Check if symbol price is stale (>10s without update)
+    const useMarketStore = (await import('./marketStore')).default;
+    const isStale = useMarketStore.getState().isQuoteStale(symbol, 10000);
+    
+    if (isStale && (orderType === 'market' || orderType === 'instant')) {
+      return {
+        success: false,
+        code: 'OFF_QUOTES',
+        message: `${symbol} is off quotes. Prices have not updated for more than 10 seconds. Please wait for live quotes before placing orders.`,
+      };
+    }
+
     set({ loading: true, error: null });
 
     try {

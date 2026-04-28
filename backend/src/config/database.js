@@ -1,17 +1,9 @@
-const mongoose = require('mongoose');
+// MongoDB is not used — this app runs on Supabase (PostgreSQL).
+// Calling mongoose.connect() was consuming connection slots and calling process.exit(1) on failure.
 
 const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI);
-    
-    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
-    console.log(`📊 Database Name: ${conn.connection.name}`);
-    
-    return conn;
-  } catch (error) {
-    console.error(`❌ MongoDB Connection Error: ${error.message}`);
-    process.exit(1);
-  }
+  console.log('ℹ️  MongoDB disabled — using Supabase (PostgreSQL) only.');
+  return null;
 };
 
 module.exports = connectDB;

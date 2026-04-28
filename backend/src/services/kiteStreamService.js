@@ -86,8 +86,8 @@ class KiteStreamService {
     // Dirty symbols for DB flush
     this.dirtySymbols   = new Set();
     this.dbFlushInterval= null;
-    this.DB_FLUSH_MS    = 3000;
-    this.EMIT_INTERVAL_MS = 3000;
+    this.DB_FLUSH_MS      = 8000;   // flush every 8s instead of 3s — reduces DB load by 62%
+    this.EMIT_INTERVAL_MS = 3000;   // keep socket emit at 3s for live feel
   }
 
   isRunning() { return this.running; }
@@ -477,43 +477,57 @@ class KiteStreamService {
   }
 
   async flushToDB() {
-    if (this.dirtySymbols.size === 0) return;
+      if (this.dirtySymbols.size === 0) return;
 
-    const toFlush = [...this.dirtySymbols];
-    this.dirtySymbols.clear();
-    const now = new Date().toISOString();
+      const toFlush = [...this.dirtySymbols];
+      this.dirtySymbols.clear();
+      const now = new Date().toISOString();
 
-    // Batch by identical price data to minimise DB round-trips
-    const groups = new Map();
-    for (const sym of toFlush) {
-      const p = this.priceCache.get(sym);
-      if (!p) continue;
-      const key = `${p.last}|${p.bid}|${p.ask}`;
-      if (!groups.has(key)) groups.set(key, { price: p, symbols: [] });
-      groups.get(key).symbols.push(sym);
+      // Collect all symbols into one flat update list
+      const updates = [];
+      for (const sym of toFlush) {
+        const p = this.priceCache.get(sym);
+        if (!p) continue;
+        updates.push({ sym, price: p });
+      }
+
+      if (updates.length === 0) return;
+
+      // Chunk into groups of 50 — single .in() call per chunk, serialized (not parallel)
+      // This keeps connection usage to 1 at a time instead of N simultaneous
+      const CHUNK_SIZE = 50;
+      for (let i = 0; i < updates.length; i += CHUNK_SIZE) {
+        const chunk = updates.slice(i, i + CHUNK_SIZE);
+        const symbols = chunk.map(u => u.sym);
+
+        // Use the first price in chunk for the update (they're all near-identical within 3s)
+        // For per-symbol accuracy, use upsert with array of rows instead
+        try {
+          const rows = chunk.map(({ sym, price }) => ({
+            symbol:         sym,
+            last_price:     price.last,
+            bid:            price.bid,
+            ask:            price.ask,
+            open_price:     price.open,
+            high_price:     price.high,
+            low_price:      price.low,
+            previous_close: price.prevClose,
+            change_value:   price.change,
+            change_percent: price.changePct,
+            volume:         price.volume,
+            last_update:    now,
+          }));
+
+          await supabase
+            .from('symbols')
+            .upsert(rows, { onConflict: 'symbol', ignoreDuplicates: false });
+
+        } catch (err) {
+          // Non-fatal — live prices still flowing via socket
+          console.warn(`[FlushToDB] chunk ${i}-${i + CHUNK_SIZE} failed (non-fatal):`, err.message);
+        }
+      }
     }
-
-    const promises = [];
-    for (const [, { price, symbols }] of groups) {
-      promises.push(
-        supabase.from('symbols').update({
-          last_price:     price.last,
-          bid:            price.bid,
-          ask:            price.ask,
-          open_price:     price.open,
-          high_price:     price.high,
-          low_price:      price.low,
-          previous_close: price.prevClose,
-          change_value:   price.change,
-          change_percent: price.changePct,
-          volume:         price.volume,
-          last_update:    now,
-        }).in('symbol', symbols)
-      );
-    }
-
-    await Promise.all(promises);
-  }
 
   status() {
     const now = Date.now();

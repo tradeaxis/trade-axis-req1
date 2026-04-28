@@ -3,6 +3,7 @@
   "appName": "Trade Axis",
   "webDir": "dist",
   "android": {
-    "allowMixedContent": true
+    "allowMixedContent": true,
+    "handleExitOnBackPress": false
   }
 }

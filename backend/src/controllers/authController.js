@@ -3,7 +3,7 @@ const { supabase } = require('../config/supabase');
 const jwt = require('jsonwebtoken');
 const { hashPassword, comparePassword, generateToken, generateAccountNumber, generateLoginId } = require('../utils/auth');
 
-const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 8000);
+const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 15000);
 
 const withDbTimeout = async (operationPromise, label = 'Database request') => {
   let timeoutId;

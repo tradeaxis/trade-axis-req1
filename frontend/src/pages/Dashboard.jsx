@@ -532,7 +532,7 @@ const Dashboard = () => {
   const [entryPrice, setEntryPrice] = useState('');
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [tradeTabSection, setTradeTabSection] = useState('positions');
-  const [modifyModal, setModifyModal] = useState(null);
+  // const [modifyModal, setModifyModal] = useState(null);
   const [expandedTradeId, setExpandedTradeId] = useState(null);
   const [closeConfirmTrade, setCloseConfirmTrade] = useState(null);
   const [partialCloseQty, setPartialCloseQty] = useState('');
@@ -1401,14 +1401,21 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         // ignore, use what we have
       }
     }
+    
+    // ✅ CHANGED: Check both price data AND staleness (>10s = off quotes)
     const quoteTs = Number(currentQ?.timestamp || 0);
+    const quoteAgeMs = Date.now() - quoteTs;
     const hasPriceData = currentQ && (Number(currentQ.bid) > 0 || Number(currentQ.ask) > 0 || Number(currentQ.last) > 0);
-    const isOffQuotes = !hasPriceData;
+    const isStalePrice = quoteAgeMs > 10000; // 10 seconds threshold
+    const isOffQuotes = !hasPriceData || isStalePrice;
 
     if (isOffQuotes) {
       setOrderConfirmation({
         phase: 'offquotes',
         symbol: selectedSymbol,
+        message: isStalePrice 
+          ? `Prices have not updated for ${Math.round(quoteAgeMs / 1000)} seconds. Please wait for live quotes.`
+          : 'No price data available. Please wait for live quotes.',
       });
       setTimeout(() => setOrderConfirmation(null), 3000);
       return;
@@ -3642,396 +3649,396 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     );
   };
 
-  // ============ MODIFY POSITION MODAL ============
-  const renderModifyPositionModal = () => {
-    if (!modifyModal) return null;
+  // // ============ MODIFY POSITION MODAL ============
+  // const renderModifyPositionModal = () => {
+  //   if (!modifyModal) return null;
 
-    const trade = modifyModal;
-    const currentPrice = Number(
-      trade.current_price || trade.open_price || 0
-    );
-    const leverage = accountStats.leverage || 5;
-    const estimatedMargin =
-      addQty > 0 ? (currentPrice * addQty) / leverage : 0;
+  //   const trade = modifyModal;
+  //   const currentPrice = Number(
+  //     trade.current_price || trade.open_price || 0
+  //   );
+  //   const leverage = accountStats.leverage || 5;
+  //   const estimatedMargin =
+  //     addQty > 0 ? (currentPrice * addQty) / leverage : 0;
 
-    const handleAddQuantity = async () => {
-      if (!addQty || addQty <= 0) {
-        return toast.error('Enter a valid quantity');
-      }
+  //   const handleAddQuantity = async () => {
+  //     if (!addQty || addQty <= 0) {
+  //       return toast.error('Enter a valid quantity');
+  //     }
 
-      setAddQtyLoading(true);
-      const result = await addQuantity(
-        trade.id,
-        selectedAccount?.id,
-        addQty
-      );
-      setAddQtyLoading(false);
+  //     setAddQtyLoading(true);
+  //     const result = await addQuantity(
+  //       trade.id,
+  //       selectedAccount?.id,
+  //       addQty
+  //     );
+  //     setAddQtyLoading(false);
 
-      if (result.success) {
-        toast.success(result.message);
-        setModifyModal(null);
-        fetchOpenTrades(selectedAccount.id);
-      } else {
-        toast.error(result.message || 'Failed to add quantity');
-      }
-    };
+  //     if (result.success) {
+  //       toast.success(result.message);
+  //       setModifyModal(null);
+  //       fetchOpenTrades(selectedAccount.id);
+  //     } else {
+  //       toast.error(result.message || 'Failed to add quantity');
+  //     }
+  //   };
 
-    return (
-      <div
-        className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
-        onClick={() => setModifyModal(null)}
-      >
-        <div
-          className="w-full max-w-sm rounded-xl"
-          style={{
-            background: '#1e222d',
-            border: '1px solid #363a45',
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div
-            className="flex items-center justify-between p-4 border-b"
-            style={{ borderColor: '#363a45' }}
-          >
-            <h3
-              className="font-bold text-lg"
-              style={{ color: '#d1d4dc' }}
-            >
-              Modify Position
-            </h3>
-            <button onClick={() => setModifyModal(null)}>
-              <X size={22} color="#787b86" />
-            </button>
-          </div>
+  //   return (
+  //     <div
+  //       className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
+  //       onClick={() => setModifyModal(null)}
+  //     >
+  //       <div
+  //         className="w-full max-w-sm rounded-xl"
+  //         style={{
+  //           background: '#1e222d',
+  //           border: '1px solid #363a45',
+  //         }}
+  //         onClick={(e) => e.stopPropagation()}
+  //       >
+  //         <div
+  //           className="flex items-center justify-between p-4 border-b"
+  //           style={{ borderColor: '#363a45' }}
+  //         >
+  //           <h3
+  //             className="font-bold text-lg"
+  //             style={{ color: '#d1d4dc' }}
+  //           >
+  //             Modify Position
+  //           </h3>
+  //           <button onClick={() => setModifyModal(null)}>
+  //             <X size={22} color="#787b86" />
+  //           </button>
+  //         </div>
 
-          <div className="p-4 pb-0">
-            <div
-              className="p-3 rounded-lg"
-              style={{ background: '#2a2e39' }}
-            >
-              <div className="text-sm" style={{ color: '#787b86' }}>
-                Symbol
-              </div>
-              <div
-                className="font-bold text-lg"
-                style={{ color: '#d1d4dc' }}
-              >
-                {trade.symbol}
-              </div>
-              <div className="flex items-center justify-between mt-1">
-                <span
-                  className="text-sm"
-                  style={{
-                    color:
-                      trade.trade_type === 'buy'
-                        ? '#26a69a'
-                        : '#ef5350',
-                  }}
-                >
-                  {trade.trade_type?.toUpperCase()} • Qty:{' '}
-                  {trade.quantity}
-                </span>
-                <span
-                  className="text-sm"
-                  style={{ color: '#787b86' }}
-                >
-                  @ {formatINR(trade.open_price)}
-                </span>
-              </div>
-            </div>
-          </div>
+  //         <div className="p-4 pb-0">
+  //           <div
+  //             className="p-3 rounded-lg"
+  //             style={{ background: '#2a2e39' }}
+  //           >
+  //             <div className="text-sm" style={{ color: '#787b86' }}>
+  //               Symbol
+  //             </div>
+  //             <div
+  //               className="font-bold text-lg"
+  //               style={{ color: '#d1d4dc' }}
+  //             >
+  //               {trade.symbol}
+  //             </div>
+  //             <div className="flex items-center justify-between mt-1">
+  //               <span
+  //                 className="text-sm"
+  //                 style={{
+  //                   color:
+  //                     trade.trade_type === 'buy'
+  //                       ? '#26a69a'
+  //                       : '#ef5350',
+  //                 }}
+  //               >
+  //                 {trade.trade_type?.toUpperCase()} • Qty:{' '}
+  //                 {trade.quantity}
+  //               </span>
+  //               <span
+  //                 className="text-sm"
+  //                 style={{ color: '#787b86' }}
+  //               >
+  //                 @ {formatINR(trade.open_price)}
+  //               </span>
+  //             </div>
+  //           </div>
+  //         </div>
 
-          <div
-            className="flex mx-4 mt-3 rounded-lg overflow-hidden"
-            style={{ border: '1px solid #363a45' }}
-          >
-            <button
-              type="button"
-              onClick={() => setModifyTab('sltp')}
-              className="flex-1 py-2.5 text-sm font-medium transition-colors"
-              style={{
-                background:
-                  modifyTab === 'sltp' ? '#2962ff' : '#2a2e39',
-                color: modifyTab === 'sltp' ? '#fff' : '#787b86',
-              }}
-            >
-              SL / TP
-            </button>
-            <button
-              type="button"
-              onClick={() => setModifyTab('addqty')}
-              className="flex-1 py-2.5 text-sm font-medium transition-colors"
-              style={{
-                background:
-                  modifyTab === 'addqty' ? '#2962ff' : '#2a2e39',
-                color: modifyTab === 'addqty' ? '#fff' : '#787b86',
-              }}
-            >
-              + Add Quantity
-            </button>
-          </div>
+  //         <div
+  //           className="flex mx-4 mt-3 rounded-lg overflow-hidden"
+  //           style={{ border: '1px solid #363a45' }}
+  //         >
+  //           <button
+  //             type="button"
+  //             onClick={() => setModifyTab('sltp')}
+  //             className="flex-1 py-2.5 text-sm font-medium transition-colors"
+  //             style={{
+  //               background:
+  //                 modifyTab === 'sltp' ? '#2962ff' : '#2a2e39',
+  //               color: modifyTab === 'sltp' ? '#fff' : '#787b86',
+  //             }}
+  //           >
+  //             SL / TP
+  //           </button>
+  //           <button
+  //             type="button"
+  //             onClick={() => setModifyTab('addqty')}
+  //             className="flex-1 py-2.5 text-sm font-medium transition-colors"
+  //             style={{
+  //               background:
+  //                 modifyTab === 'addqty' ? '#2962ff' : '#2a2e39',
+  //               color: modifyTab === 'addqty' ? '#fff' : '#787b86',
+  //             }}
+  //           >
+  //             + Add Quantity
+  //           </button>
+  //         </div>
 
-          <div className="p-4 space-y-4">
-            {modifyTab === 'sltp' && (
-              <>
-                <div>
-                  <label
-                    className="block text-sm mb-2"
-                    style={{ color: '#787b86' }}
-                  >
-                    Stop Loss
-                  </label>
-                  <input
-                    type="number"
-                    value={modifySL}
-                    onChange={(e) => setModifySL(e.target.value)}
-                    className="w-full px-4 py-3 rounded-lg text-base"
-                    style={{
-                      background: '#2a2e39',
-                      border: '1px solid #363a45',
-                      color: '#d1d4dc',
-                    }}
-                    placeholder="0.00"
-                  />
-                </div>
-                <div>
-                  <label
-                    className="block text-sm mb-2"
-                    style={{ color: '#787b86' }}
-                  >
-                    Take Profit
-                  </label>
-                  <input
-                    type="number"
-                    value={modifyTP}
-                    onChange={(e) => setModifyTP(e.target.value)}
-                    className="w-full px-4 py-3 rounded-lg text-base"
-                    style={{
-                      background: '#2a2e39',
-                      border: '1px solid #363a45',
-                      color: '#d1d4dc',
-                    }}
-                    placeholder="0.00"
-                  />
-                </div>
-                <button
-                  onClick={() =>
-                    handleModifyTrade(trade.id, modifySL, modifyTP)
-                  }
-                  className="w-full py-3.5 rounded-lg font-semibold text-base"
-                  style={{ background: '#2962ff', color: '#fff' }}
-                >
-                  Modify SL / TP
-                </button>
-              </>
-            )}
+  //         <div className="p-4 space-y-4">
+  //           {modifyTab === 'sltp' && (
+  //             <>
+  //               <div>
+  //                 <label
+  //                   className="block text-sm mb-2"
+  //                   style={{ color: '#787b86' }}
+  //                 >
+  //                   Stop Loss
+  //                 </label>
+  //                 <input
+  //                   type="number"
+  //                   value={modifySL}
+  //                   onChange={(e) => setModifySL(e.target.value)}
+  //                   className="w-full px-4 py-3 rounded-lg text-base"
+  //                   style={{
+  //                     background: '#2a2e39',
+  //                     border: '1px solid #363a45',
+  //                     color: '#d1d4dc',
+  //                   }}
+  //                   placeholder="0.00"
+  //                 />
+  //               </div>
+  //               <div>
+  //                 <label
+  //                   className="block text-sm mb-2"
+  //                   style={{ color: '#787b86' }}
+  //                 >
+  //                   Take Profit
+  //                 </label>
+  //                 <input
+  //                   type="number"
+  //                   value={modifyTP}
+  //                   onChange={(e) => setModifyTP(e.target.value)}
+  //                   className="w-full px-4 py-3 rounded-lg text-base"
+  //                   style={{
+  //                     background: '#2a2e39',
+  //                     border: '1px solid #363a45',
+  //                     color: '#d1d4dc',
+  //                   }}
+  //                   placeholder="0.00"
+  //                 />
+  //               </div>
+  //               <button
+  //                 onClick={() =>
+  //                   handleModifyTrade(trade.id, modifySL, modifyTP)
+  //                 }
+  //                 className="w-full py-3.5 rounded-lg font-semibold text-base"
+  //                 style={{ background: '#2962ff', color: '#fff' }}
+  //               >
+  //                 Modify SL / TP
+  //               </button>
+  //             </>
+  //           )}
 
-            {modifyTab === 'addqty' && (
-              <>
-                {closingMode && (
-                  <div
-                    className="p-3 rounded-lg flex items-center gap-2"
-                    style={{
-                      background: '#ff980020',
-                      border: '1px solid #ff980050',
-                    }}
-                  >
-                    <AlertTriangle size={18} color="#ff9800" />
-                    <div
-                      className="text-sm"
-                      style={{ color: '#ff9800' }}
-                    >
-                      Closing mode is active. You cannot add quantity.
-                    </div>
-                  </div>
-                )}
+  //           {modifyTab === 'addqty' && (
+  //             <>
+  //               {closingMode && (
+  //                 <div
+  //                   className="p-3 rounded-lg flex items-center gap-2"
+  //                   style={{
+  //                     background: '#ff980020',
+  //                     border: '1px solid #ff980050',
+  //                   }}
+  //                 >
+  //                   <AlertTriangle size={18} color="#ff9800" />
+  //                   <div
+  //                     className="text-sm"
+  //                     style={{ color: '#ff9800' }}
+  //                   >
+  //                     Closing mode is active. You cannot add quantity.
+  //                   </div>
+  //                 </div>
+  //               )}
 
-                {!closingMode && (
-                  <>
-                    <div>
-                      <label
-                        className="block text-sm mb-2"
-                        style={{ color: '#787b86' }}
-                      >
-                        Additional Quantity
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAddQty(Math.max(1, addQty - 1))
-                          }
-                          className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
-                          style={{
-                            background: '#2a2e39',
-                            border: '1px solid #363a45',
-                            color: '#d1d4dc',
-                          }}
-                        >
-                          −
-                        </button>
-                        <input
-                          type="number"
-                          value={addQty}
-                          onChange={(e) =>
-                            setAddQty(
-                              Math.max(
-                                1,
-                                Number(e.target.value || 1)
-                              )
-                            )
-                          }
-                          className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center"
-                          style={{
-                            background: '#2a2e39',
-                            border: '1px solid #363a45',
-                            color: '#d1d4dc',
-                          }}
-                          min="1"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setAddQty(addQty + 1)}
-                          className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
-                          style={{
-                            background: '#2a2e39',
-                            border: '1px solid #363a45',
-                            color: '#d1d4dc',
-                          }}
-                        >
-                          +
-                        </button>
-                      </div>
-                    </div>
+  //               {!closingMode && (
+  //                 <>
+  //                   <div>
+  //                     <label
+  //                       className="block text-sm mb-2"
+  //                       style={{ color: '#787b86' }}
+  //                     >
+  //                       Additional Quantity
+  //                     </label>
+  //                     <div className="flex items-center gap-2">
+  //                       <button
+  //                         type="button"
+  //                         onClick={() =>
+  //                           setAddQty(Math.max(1, addQty - 1))
+  //                         }
+  //                         className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
+  //                         style={{
+  //                           background: '#2a2e39',
+  //                           border: '1px solid #363a45',
+  //                           color: '#d1d4dc',
+  //                         }}
+  //                       >
+  //                         −
+  //                       </button>
+  //                       <input
+  //                         type="number"
+  //                         value={addQty}
+  //                         onChange={(e) =>
+  //                           setAddQty(
+  //                             Math.max(
+  //                               1,
+  //                               Number(e.target.value || 1)
+  //                             )
+  //                           )
+  //                         }
+  //                         className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center"
+  //                         style={{
+  //                           background: '#2a2e39',
+  //                           border: '1px solid #363a45',
+  //                           color: '#d1d4dc',
+  //                         }}
+  //                         min="1"
+  //                       />
+  //                       <button
+  //                         type="button"
+  //                         onClick={() => setAddQty(addQty + 1)}
+  //                         className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
+  //                         style={{
+  //                           background: '#2a2e39',
+  //                           border: '1px solid #363a45',
+  //                           color: '#d1d4dc',
+  //                         }}
+  //                       >
+  //                         +
+  //                       </button>
+  //                     </div>
+  //                   </div>
 
-                    <div className="flex gap-2">
-                      {[1, 5, 10, 25, 50].map((q) => (
-                        <button
-                          key={q}
-                          type="button"
-                          onClick={() => setAddQty(q)}
-                          className="flex-1 py-2 rounded-lg text-sm font-medium"
-                          style={{
-                            background:
-                              addQty === q ? '#2962ff' : '#2a2e39',
-                            color:
-                              addQty === q ? '#fff' : '#787b86',
-                            border: '1px solid #363a45',
-                          }}
-                        >
-                          {q}
-                        </button>
-                      ))}
-                    </div>
+  //                   <div className="flex gap-2">
+  //                     {[1, 5, 10, 25, 50].map((q) => (
+  //                       <button
+  //                         key={q}
+  //                         type="button"
+  //                         onClick={() => setAddQty(q)}
+  //                         className="flex-1 py-2 rounded-lg text-sm font-medium"
+  //                         style={{
+  //                           background:
+  //                             addQty === q ? '#2962ff' : '#2a2e39',
+  //                           color:
+  //                             addQty === q ? '#fff' : '#787b86',
+  //                           border: '1px solid #363a45',
+  //                         }}
+  //                       >
+  //                         {q}
+  //                       </button>
+  //                     ))}
+  //                   </div>
 
-                    <div
-                      className="p-3 rounded-lg space-y-2"
-                      style={{
-                        background: '#252832',
-                        border: '1px solid #363a45',
-                      }}
-                    >
-                      <div className="flex justify-between text-sm">
-                        <span style={{ color: '#787b86' }}>
-                          Current Price
-                        </span>
-                        <span style={{ color: '#d1d4dc' }}>
-                          {formatINR(currentPrice)}
-                        </span>
-                      </div>
-                      <div className="flex justify-between text-sm">
-                        <span style={{ color: '#787b86' }}>
-                          Add Quantity
-                        </span>
-                        <span style={{ color: '#d1d4dc' }}>
-                          {addQty}
-                        </span>
-                      </div>
-                      <div className="flex justify-between text-sm">
-                        <span style={{ color: '#787b86' }}>
-                          Est. Additional Margin
-                        </span>
-                        <span style={{ color: '#f5c542' }}>
-                          {formatINR(estimatedMargin)}
-                        </span>
-                      </div>
-                      <div
-                        className="flex justify-between text-sm pt-2 border-t"
-                        style={{ borderColor: '#363a45' }}
-                      >
-                        <span style={{ color: '#787b86' }}>
-                          New Total Qty
-                        </span>
-                        <span
-                          className="font-bold"
-                          style={{ color: '#d1d4dc' }}
-                        >
-                          {Number(trade.quantity) + addQty}
-                        </span>
-                      </div>
-                      <div className="flex justify-between text-sm">
-                        <span style={{ color: '#787b86' }}>
-                          Free Margin
-                        </span>
-                        <span
-                          style={{
-                            color:
-                              accountStats.freeMargin >=
-                              estimatedMargin
-                                ? '#26a69a'
-                                : '#ef5350',
-                          }}
-                        >
-                          {formatINR(accountStats.freeMargin)}
-                        </span>
-                      </div>
-                    </div>
+  //                   <div
+  //                     className="p-3 rounded-lg space-y-2"
+  //                     style={{
+  //                       background: '#252832',
+  //                       border: '1px solid #363a45',
+  //                     }}
+  //                   >
+  //                     <div className="flex justify-between text-sm">
+  //                       <span style={{ color: '#787b86' }}>
+  //                         Current Price
+  //                       </span>
+  //                       <span style={{ color: '#d1d4dc' }}>
+  //                         {formatINR(currentPrice)}
+  //                       </span>
+  //                     </div>
+  //                     <div className="flex justify-between text-sm">
+  //                       <span style={{ color: '#787b86' }}>
+  //                         Add Quantity
+  //                       </span>
+  //                       <span style={{ color: '#d1d4dc' }}>
+  //                         {addQty}
+  //                       </span>
+  //                     </div>
+  //                     <div className="flex justify-between text-sm">
+  //                       <span style={{ color: '#787b86' }}>
+  //                         Est. Additional Margin
+  //                       </span>
+  //                       <span style={{ color: '#f5c542' }}>
+  //                         {formatINR(estimatedMargin)}
+  //                       </span>
+  //                     </div>
+  //                     <div
+  //                       className="flex justify-between text-sm pt-2 border-t"
+  //                       style={{ borderColor: '#363a45' }}
+  //                     >
+  //                       <span style={{ color: '#787b86' }}>
+  //                         New Total Qty
+  //                       </span>
+  //                       <span
+  //                         className="font-bold"
+  //                         style={{ color: '#d1d4dc' }}
+  //                       >
+  //                         {Number(trade.quantity) + addQty}
+  //                       </span>
+  //                     </div>
+  //                     <div className="flex justify-between text-sm">
+  //                       <span style={{ color: '#787b86' }}>
+  //                         Free Margin
+  //                       </span>
+  //                       <span
+  //                         style={{
+  //                           color:
+  //                             accountStats.freeMargin >=
+  //                             estimatedMargin
+  //                               ? '#26a69a'
+  //                               : '#ef5350',
+  //                         }}
+  //                       >
+  //                         {formatINR(accountStats.freeMargin)}
+  //                       </span>
+  //                     </div>
+  //                   </div>
 
-                    {estimatedMargin > accountStats.freeMargin && (
-                      <div
-                        className="p-2 rounded-lg flex items-center gap-2"
-                        style={{ background: '#ef535020' }}
-                      >
-                        <AlertTriangle size={16} color="#ef5350" />
-                        <span
-                          className="text-xs"
-                          style={{ color: '#ef5350' }}
-                        >
-                          Insufficient free margin
-                        </span>
-                      </div>
-                    )}
+  //                   {estimatedMargin > accountStats.freeMargin && (
+  //                     <div
+  //                       className="p-2 rounded-lg flex items-center gap-2"
+  //                       style={{ background: '#ef535020' }}
+  //                     >
+  //                       <AlertTriangle size={16} color="#ef5350" />
+  //                       <span
+  //                         className="text-xs"
+  //                         style={{ color: '#ef5350' }}
+  //                       >
+  //                         Insufficient free margin
+  //                       </span>
+  //                     </div>
+  //                   )}
 
-                    <button
-                      type="button"
-                      onClick={handleAddQuantity}
-                      disabled={
-                        addQtyLoading ||
-                        addQty <= 0 ||
-                        estimatedMargin > accountStats.freeMargin
-                      }
-                      className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50"
-                      style={{
-                        background:
-                          trade.trade_type === 'buy'
-                            ? '#26a69a'
-                            : '#ef5350',
-                        color: '#fff',
-                      }}
-                    >
-                      {addQtyLoading
-                        ? 'Adding...'
-                        : `Add ${addQty} to ${trade.trade_type?.toUpperCase()} Position`}
-                    </button>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
+  //                   <button
+  //                     type="button"
+  //                     onClick={handleAddQuantity}
+  //                     disabled={
+  //                       addQtyLoading ||
+  //                       addQty <= 0 ||
+  //                       estimatedMargin > accountStats.freeMargin
+  //                     }
+  //                     className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50"
+  //                     style={{
+  //                       background:
+  //                         trade.trade_type === 'buy'
+  //                           ? '#26a69a'
+  //                           : '#ef5350',
+  //                       color: '#fff',
+  //                     }}
+  //                   >
+  //                     {addQtyLoading
+  //                       ? 'Adding...'
+  //                       : `Add ${addQty} to ${trade.trade_type?.toUpperCase()} Position`}
+  //                   </button>
+  //                 </>
+  //               )}
+  //             </>
+  //           )}
+  //         </div>
+  //       </div>
+  //     </div>
+  //   );
+  // };
 
     // ============ MODIFY PENDING ORDER MODAL (MT5 Style) ============
   const renderModifyPendingOrderModal = () => {
@@ -4275,7 +4282,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                 : '0.00%'}
             </div>
             <div className="text-[10px] mt-1 leading-4" style={{ color: '#787b86' }}>
-              Formula: Equity / Total Margin x 100
+              ..
             </div>
           </div>
           <div
@@ -4520,18 +4527,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                             Close
                           </button>
                         </div>
-                        {/* Modify Position (SL/TP) */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setModifyModal(trade);
-                          }}
-                          className="w-full mt-2 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
-                          style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
-                        >
-                          <Edit3 size={16} />
-                          Modify Position
-                        </button>
 
                         {(trade.stop_loss > 0 ||
                           trade.take_profit > 0) && (
@@ -4771,7 +4766,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         )} */}
       </div>
 
-      {renderModifyPositionModal()}
       {renderModifyPendingOrderModal()}
       {renderCloseConfirmModal()}
     </div>

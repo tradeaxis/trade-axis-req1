@@ -165,6 +165,7 @@ exports.placeOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Account not found' });
 
     // ── Fetch symbol data (MUST be before market hours check) ──
+    // ── Fetch symbol data (MUST be before market hours check) ──
     const { data: symbolData, error: symbolError } = await supabase
       .from('symbols').select('*').eq('symbol', symbol.toUpperCase()).single();
     if (symbolError || !symbolData)
@@ -175,6 +176,25 @@ exports.placeOrder = async (req, res) => {
         success: false,
         message: `Trading is disabled for ${symbolData.symbol}. ${symbolData.ban_reason || 'Contact admin.'}`,
       });
+
+    // ✅ NEW: Check if symbol prices are stale (both live stream and DB)
+    const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
+    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
+    const dbAgeMs = symbolData.last_update 
+      ? Date.now() - new Date(symbolData.last_update).getTime() 
+      : Infinity;
+
+    const STALE_THRESHOLD_MS = 15000; // 15 seconds
+    const isLiveStale = liveAgeMs > STALE_THRESHOLD_MS;
+    const isDBStale = dbAgeMs > STALE_THRESHOLD_MS;
+
+    if (isLiveStale && isDBStale && (orderType === 'market' || orderType === 'instant')) {
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: `${symbolData.symbol} is off quotes. No price update in the last ${Math.round(Math.min(liveAgeMs, dbAgeMs) / 1000)}s. Kite session may have expired. Contact admin to re-authenticate.`,
+      });
+    }
 
     // ── Market hours check (NOW symbolData is defined) ──
     if (!isMarketOpen(symbolData.symbol, symbolData.exchange)) {

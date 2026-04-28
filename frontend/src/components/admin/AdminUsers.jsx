@@ -17,7 +17,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
-const DEFAULT_LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000];
+const DEFAULT_LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 30, 40, 50, 100, 200, 300, 500, 1000];
 
 export default function AdminUsers() {
   const [loading, setLoading] = useState(false);

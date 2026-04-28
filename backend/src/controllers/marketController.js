@@ -12,11 +12,27 @@ const ALLOWED_CATEGORIES = [
   'commodity_futures',
 ];
 
-/** Get all futures symbols */
+// In-memory symbol list cache — avoids repeated full-table scans
+let _symbolCache     = null;
+let _symbolCacheTime = 0;
+const SYMBOL_CACHE_TTL_MS = 60_000; // refresh every 60 seconds
+
 /** Get all futures symbols */
 exports.getSymbols = async (req, res) => {
   try {
     const { category, search, limit = 5000 } = req.query;
+
+    // Serve from cache for unfiltered requests (most common case)
+    const now = Date.now();
+    const useCache = !search && !category && _symbolCache && (now - _symbolCacheTime < SYMBOL_CACHE_TTL_MS);
+    if (useCache) {
+      return res.json({
+        success: true,
+        symbols: _symbolCache.slice(0, parseInt(limit)),
+        source: 'cache',
+        total: _symbolCache.length,
+      });
+    }
 
     let allSymbols = [];
     const batchSize = 1000;
@@ -83,6 +99,12 @@ exports.getSymbols = async (req, res) => {
 
     if (allSymbols.length > parseInt(limit)) {
       allSymbols = allSymbols.slice(0, parseInt(limit));
+    }
+
+// Store in cache only for unfiltered full fetches
+    if (!search && !category) {
+      _symbolCache     = allSymbols;
+      _symbolCacheTime = Date.now();
     }
 
     res.json({

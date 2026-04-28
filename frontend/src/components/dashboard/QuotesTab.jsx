@@ -83,9 +83,25 @@ export default function QuotesTab({
   }, []);
 
   const filteredSymbols = useMemo(() => {
-    let list = symbols.filter(s => matchesSelectedCategory(s, selectedCategory));
-    // ... existing filtering logic
-    return list.filter(s => wl.has(String(s.symbol).toUpperCase()));
+    // 1. Build a Set of exactly the symbols in the active watchlist
+    const wl = new Set((activeSymbols || []).map(s => String(s).toUpperCase()));
+
+    // 2. Start with only symbols that are in the active watchlist
+    let list = symbols.filter(s => wl.has(String(s.symbol).toUpperCase()));
+
+    // 3. Apply category filter
+    list = list.filter(s => matchesSelectedCategory(s, selectedCategory));
+
+    // 4. Apply search filter
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(s =>
+        String(s.symbol).toLowerCase().includes(q) ||
+        String(s.display_name || '').toLowerCase().includes(q)
+      );
+    }
+
+    return list;
   }, [symbols, selectedCategory, search, activeSymbols, tick]);
 
   // ✅ ADD THIS: Auto-subscribe to visible symbols for live price updates

@@ -3,7 +3,7 @@
 // Increased from 8 → 15 concurrent operations
 
 class DBQueue {
-  constructor(maxConcurrent = 15) {
+  constructor(maxConcurrent = 3) {  // Nano: 15 total conns, leave room for auth/trades
     this.maxConcurrent = maxConcurrent;
     this.running       = 0;
     this.queue         = [];
@@ -16,7 +16,7 @@ class DBQueue {
     if (statsInterval.unref) statsInterval.unref();
   }
 
-  run(operation, priority = 0, timeoutMs = 20_000) {
+  run(operation, priority = 0, timeoutMs = 30_000) {
     this._total++;
 
     return new Promise((resolve, reject) => {
@@ -119,7 +119,7 @@ class DBQueue {
 // ─── Singleton ────────────────────────────────────────────────────────────────
 // Pro plan: 15 concurrent is safe (well within 120 connection limit)
 const dbQueue = new DBQueue(
-  parseInt(process.env.DB_QUEUE_CONCURRENCY, 10) || 15
+  parseInt(process.env.DB_QUEUE_CONCURRENCY, 10) || 3  // override via env on Pro plan
 );
 
 const queueDB = (operation, priority = 0) => dbQueue.run(operation, priority);
