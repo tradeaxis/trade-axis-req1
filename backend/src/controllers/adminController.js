@@ -73,10 +73,26 @@ const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toIS
 exports.listUsers = async (req, res) => {
   try {
     const { q, limit = 500 } = req.query;
+    const userSelect = [
+      'id',
+      'login_id',
+      'email',
+      'first_name',
+      'last_name',
+      'phone',
+      'role',
+      'is_active',
+      'leverage',
+      'brokerage_rate',
+      'max_saved_accounts',
+      'closing_mode',
+      'liquidation_type',
+      'created_at',
+    ].join(', ');
 
     let query = supabase
       .from('users')
-      .select('*')
+      .select(userSelect)
       .order('created_at', { ascending: false })
       .limit(parseInt(limit));
 
@@ -92,32 +108,54 @@ exports.listUsers = async (req, res) => {
       throw error;
     }
 
-    const usersWithAccounts = await Promise.all(
-      (users || []).map(async (user) => {
-        const { data: accounts } = await supabase
-          .from('accounts')
-          .select('id, account_number, is_demo, balance, equity, margin, free_margin, leverage')
-          .eq('user_id', user.id);
+    const userIds = (users || []).map((user) => user.id).filter(Boolean);
+    let accountsByUserId = new Map();
 
-        return {
-          id: user.id,
-          login_id: user.login_id,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name,
-          phone: user.phone,
-          role: user.role || 'user',
-          is_active: user.is_active !== false,
-          leverage: user.leverage || 5,
-          brokerage_rate: user.brokerage_rate || 0.0003,
-          max_saved_accounts: user.max_saved_accounts || 3,
-          closing_mode: user.closing_mode || false,
-          liquidation_type: user.liquidation_type || 'liquidate',
-          created_at: user.created_at,
-          accounts: accounts || [],
-        };
-      })
-    );
+    if (userIds.length > 0) {
+      const { data: accounts, error: accountsError } = await supabase
+        .from('accounts')
+        .select('id, user_id, account_number, is_demo, balance, equity, margin, free_margin, leverage')
+        .in('user_id', userIds);
+
+      if (accountsError) {
+        console.error('listUsers accounts query error:', accountsError);
+        throw accountsError;
+      }
+
+      accountsByUserId = (accounts || []).reduce((map, account) => {
+        const userAccountId = account.user_id;
+        if (!map.has(userAccountId)) map.set(userAccountId, []);
+        map.get(userAccountId).push({
+          id: account.id,
+          account_number: account.account_number,
+          is_demo: account.is_demo,
+          balance: account.balance,
+          equity: account.equity,
+          margin: account.margin,
+          free_margin: account.free_margin,
+          leverage: account.leverage,
+        });
+        return map;
+      }, new Map());
+    }
+
+    const usersWithAccounts = (users || []).map((user) => ({
+      id: user.id,
+      login_id: user.login_id,
+      email: user.email,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      phone: user.phone,
+      role: user.role || 'user',
+      is_active: user.is_active !== false,
+      leverage: user.leverage || 5,
+      brokerage_rate: user.brokerage_rate || 0.0003,
+      max_saved_accounts: user.max_saved_accounts || 3,
+      closing_mode: user.closing_mode || false,
+      liquidation_type: user.liquidation_type || 'liquidate',
+      created_at: user.created_at,
+      accounts: accountsByUserId.get(user.id) || [],
+    }));
 
     res.json({ success: true, data: usersWithAccounts });
   } catch (error) {

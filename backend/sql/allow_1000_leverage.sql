@@ -6,4 +6,4 @@ alter table if exists public.accounts
 
 alter table if exists public.accounts
   add constraint accounts_leverage_check
-  check (leverage in (1, 2, 5, 10, 20, 25, 50, 100, 200, 300, 500, 1000));
+  check (leverage in (1, 2, 5, 10, 20, 25, 30, 40, 50, 100, 200, 300, 500, 1000));

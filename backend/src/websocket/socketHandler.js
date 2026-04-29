@@ -6,6 +6,11 @@ const marketDataService  = require('../services/marketDataService');
 const kiteStreamService  = require('../services/kiteStreamService');
 const tradingService     = require('../services/tradingService');
 const { isMarketOpen, isAnyMarketOpen } = require('../services/marketStatus');
+const {
+  QUOTE_FRESHNESS_MS,
+  getAgeMs,
+  resolveTradeablePrice,
+} = require('../services/quoteGuard');
 
 const STOP_OUT_LEVEL            = Number(process.env.STOP_OUT_LEVEL || 10);
 const AUTO_CLOSE_VANISH_PERCENT = Math.min(
@@ -234,7 +239,7 @@ class SocketHandler {
     const { data: openTrades, error } = await queueDB(() =>
       supabase
         .from('trades')
-        .select('*, accounts!inner(user_id, balance, credit, margin)')
+        .select('id, account_id, symbol, exchange, trade_type, open_price, current_price, quantity, buy_brokerage, brokerage, stop_loss, take_profit, profit, margin, accounts!inner(user_id, balance, credit, margin)')
         .eq('status', 'open')
     );
 
@@ -245,22 +250,22 @@ class SocketHandler {
     // Reduces socket emissions and CPU work significantly
     const connectedUserIds = new Set(this.connectedUsers.keys());
 
-    const activeTrades = openTrades.filter((t) =>
-      connectedUserIds.has(t.accounts.user_id)
-    );
-
     // Still write ALL trades to DB (for accuracy), but only emit connected users
     const allTradesForDB = openTrades;
 
     // ── 3. Resolve prices ─────────────────────────────────────────────────────
     const uniqueSymbols = [...new Set(allTradesForDB.map((t) => t.symbol))];
-    const prices        = {};
+    const priceSources  = {};
     const missing       = [];
 
     for (const sym of uniqueSymbols) {
       const c = kiteStreamService.getPrice(sym);
-      if (c) prices[sym] = { bid: c.bid, ask: c.ask, last: c.last };
-      else   missing.push(sym);
+      if (c) {
+        priceSources[sym] = { liveQuote: c, symbolRow: null };
+      }
+      if (!c || getAgeMs(c.timestamp) > QUOTE_FRESHNESS_MS) {
+        missing.push(sym);
+      }
     }
 
     // ONE query for all missing symbols
@@ -268,15 +273,14 @@ class SocketHandler {
       const { data: rows } = await queueDB(() =>
         supabase
           .from('symbols')
-          .select('symbol, bid, ask, last_price')
+          .select('symbol, bid, ask, last_price, last_update')
           .in('symbol', missing)
       );
 
       for (const r of rows || []) {
-        prices[r.symbol] = {
-          bid:  Number(r.bid        || r.last_price || 0),
-          ask:  Number(r.ask        || r.last_price || 0),
-          last: Number(r.last_price || 0),
+        priceSources[r.symbol] = {
+          liveQuote: priceSources[r.symbol]?.liveQuote || null,
+          symbolRow: r,
         };
       }
     }
@@ -288,13 +292,24 @@ class SocketHandler {
     const slTpTriggers     = [];
 
     for (const trade of allTradesForDB) {
-      const p = prices[trade.symbol];
-      if (!p) continue;
+      const isTradeMarketOpen = isMarketOpen(trade.symbol, trade.exchange);
+      const priceSource = priceSources[trade.symbol] || {};
+      const currentPriceState = isTradeMarketOpen
+        ? resolveTradeablePrice({
+          symbol: trade.symbol,
+          side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+          liveQuote: priceSource.liveQuote || null,
+          symbolRow: priceSource.symbolRow || null,
+        })
+        : { price: 0, isOffQuotes: true };
+      const hasFreshTradablePrice =
+        isTradeMarketOpen &&
+        !currentPriceState.isOffQuotes &&
+        currentPriceState.price > 0;
 
-      const currentPrice =
-        trade.trade_type === 'buy'
-          ? (p.bid || p.last)
-          : (p.ask || p.last);
+      const currentPrice = hasFreshTradablePrice
+        ? currentPriceState.price
+        : Number(trade.current_price || trade.open_price || 0);
 
       if (!currentPrice || currentPrice <= 0) continue;
 
@@ -302,23 +317,27 @@ class SocketHandler {
       const openPrice    = parseFloat(trade.open_price    || 0);
       const quantity     = parseFloat(trade.quantity      || 0);
       const buyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0);
-      const floatingPnL  = (currentPrice - openPrice) * direction * quantity - buyBrokerage;
+      const floatingPnL  = hasFreshTradablePrice
+        ? (currentPrice - openPrice) * direction * quantity - buyBrokerage
+        : Number(trade.profit || 0);
 
       // Always add to DB update list
-      allTradeUpdates.push({
-        id:           trade.id,
-        currentPrice,
-        profit:       floatingPnL,
-        userId:       trade.accounts.user_id,
-        accountId:    trade.account_id,
-        symbol:       trade.symbol,
-        tradeType:    trade.trade_type,
-        openPrice,
-        quantity,
-      });
+      if (hasFreshTradablePrice) {
+        allTradeUpdates.push({
+          id:           trade.id,
+          currentPrice,
+          profit:       floatingPnL,
+          userId:       trade.accounts.user_id,
+          accountId:    trade.account_id,
+          symbol:       trade.symbol,
+          tradeType:    trade.trade_type,
+          openPrice,
+          quantity,
+        });
+      }
 
       // Only add to emit list if user is connected
-      if (connectedUserIds.has(trade.accounts.user_id)) {
+      if (hasFreshTradablePrice && connectedUserIds.has(trade.accounts.user_id)) {
         // ── Smart emit: only send if value changed by > ₹0.01 ─────────────
         const lastPnL  = this._lastEmittedPnL.get(trade.id) ?? null;
         const changed  = lastPnL === null || Math.abs(floatingPnL - lastPnL) >= 0.01;
@@ -358,7 +377,7 @@ class SocketHandler {
       });
 
       // SL / TP check
-      if (this.closingTrades.has(trade.id)) continue;
+      if (!hasFreshTradablePrice || this.closingTrades.has(trade.id)) continue;
       const sl = parseFloat(trade.stop_loss   || 0);
       const tp = parseFloat(trade.take_profit || 0);
 

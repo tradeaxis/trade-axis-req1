@@ -1,9 +1,11 @@
 // frontend/src/store/marketStore.js  ── FIXED VERSION
 // Key fix: every price update stamps a timestamp so QuotesTab can detect
-// symbols that haven't ticked for >10 s and mark them "off quotes".
+// symbols that haven't ticked for >15 s and mark them "off quotes".
 
 import { create } from 'zustand';
 import api from '../services/api';
+
+const QUOTE_STALE_THRESHOLD_MS = 15000;
 
 const useMarketStore = create((set, get) => ({
   symbols:     [],
@@ -179,6 +181,9 @@ const useMarketStore = create((set, get) => ({
       const res = await api.get(`/market/quote/${sym}`);
       if (res.data.success && res.data.quote) {
         const q = res.data.quote;
+        const quoteTimestamp = q.timestamp
+          ? Number(q.timestamp)
+          : (q.last_update ? new Date(q.last_update).getTime() : Date.now());
         const quote = {
           symbol:         sym,
           bid:            Number(q.bid        || q.lastPrice || q.last_price || 0),
@@ -191,9 +196,9 @@ const useMarketStore = create((set, get) => ({
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume:         Number(q.volume     || 0),
           display_name:   q.displayName || q.display_name,
-          timestamp:      Date.now(),
+          timestamp:      quoteTimestamp,
           source:         q.source || 'api',
-          off_quotes:     false,
+          off_quotes:     Boolean(q.off_quotes),
         };
 
         set(state => ({ quotes: { ...state.quotes, [sym]: quote } }));
@@ -211,8 +216,8 @@ const useMarketStore = create((set, get) => ({
     return get().quotes[String(symbol).toUpperCase()] || null;
   },
 
-  // ── Utility: is a quote stale? (>10 s without a live tick) ──────
-  isQuoteStale: (symbol, thresholdMs = 10000) => {
+  // ── Utility: is a quote stale? (>15 s without a live tick) ──────
+  isQuoteStale: (symbol, thresholdMs = QUOTE_STALE_THRESHOLD_MS) => {
     if (!symbol) return true;
     const q = get().quotes[String(symbol).toUpperCase()];
     if (!q || !q.timestamp) return true;

@@ -4,6 +4,7 @@ const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
 const { getHolidayStatus, isAnyMarketOpen } = require('../services/marketStatus');
 const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
+const { QUOTE_FRESHNESS_MS, getDbFreshness } = require('../services/quoteGuard');
 
 const ALLOWED_CATEGORIES = [
   'index_futures',
@@ -11,6 +12,30 @@ const ALLOWED_CATEGORIES = [
   'sensex_futures',
   'commodity_futures',
 ];
+
+const SYMBOL_SELECT_FIELDS = [
+  'symbol',
+  'display_name',
+  'underlying',
+  'category',
+  'segment',
+  'instrument_type',
+  'series',
+  'expiry_date',
+  'exchange',
+  'bid',
+  'ask',
+  'last_price',
+  'open_price',
+  'high_price',
+  'low_price',
+  'change_value',
+  'change_percent',
+  'volume',
+  'lot_size',
+  'tick_size',
+  'last_update',
+].join(', ');
 
 // In-memory symbol list cache — avoids repeated full-table scans
 let _symbolCache     = null;
@@ -42,7 +67,7 @@ exports.getSymbols = async (req, res) => {
     while (hasMore) {
       let query = supabase
         .from('symbols')
-        .select('*')
+        .select(SYMBOL_SELECT_FIELDS)
         .eq('is_active', true)
         .eq('instrument_type', 'FUT')
         .order('underlying', { ascending: true })
@@ -82,7 +107,7 @@ exports.getSymbols = async (req, res) => {
     // Always include Gift Nifty if present in DB
     const { data: giftRows } = await supabase
       .from('symbols')
-      .select('*')
+      .select(SYMBOL_SELECT_FIELDS)
       .eq('is_active', true)
       .or('symbol.ilike.%GIFT%NIFTY%,display_name.ilike.%GIFT%NIFTY%,underlying.ilike.%GIFT%NIFTY%')
       .limit(10);
@@ -139,7 +164,9 @@ exports.getQuote = async (req, res) => {
     }
 
     const live = kiteStreamService.getPrice(sym);
-    const hasLive = !!live && live.last > 0;
+    const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
+    const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
+    const dbFreshness = getDbFreshness(dbSym);
 
     const quote = {
       ...dbSym,
@@ -151,8 +178,10 @@ exports.getQuote = async (req, res) => {
       low_price: hasLive ? live.low : Number(dbSym.low_price || 0),
       change_value: hasLive ? live.change : Number(dbSym.change_value || 0),
       change_percent: hasLive ? live.changePct : Number(dbSym.change_percent || 0),
-      timestamp: Date.now(),
-      off_quotes: false,
+      timestamp: hasLive
+        ? Number(live.timestamp || Date.now())
+        : (dbSym.last_update ? new Date(dbSym.last_update).getTime() : 0),
+      off_quotes: !hasLive && !dbFreshness.isFresh,
     };
 
     res.json({
@@ -201,7 +230,7 @@ exports.searchSymbols = async (req, res) => {
 
     const { data: symbols, error } = await supabase
       .from('symbols')
-      .select('*')
+      .select(SYMBOL_SELECT_FIELDS)
       .eq('is_active', true)
       .eq('instrument_type', 'FUT')
       .in('category', ALLOWED_CATEGORIES)

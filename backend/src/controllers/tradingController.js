@@ -1,7 +1,10 @@
 // backend/src/controllers/tradingController.js  ── FIXED VERSION
 const { supabase } = require('../config/supabase');
-const kiteStreamService = require('../services/kiteStreamService');
 const { isMarketOpen, getHolidayStatus, isCommoditySymbol } = require('../services/marketStatus');
+const {
+  buildOffQuotesMessage,
+  resolveTradeablePrice,
+} = require('../services/quoteGuard');
 const {
   buildTradeEntryEvent,
   ensureTradeEntryHistory,
@@ -12,32 +15,6 @@ const {
 // ─────────────────────────────────────────────
 //  HELPERS
 // ─────────────────────────────────────────────
-
-/** Safely resolve a live-or-DB price for a symbol */
-async function resolvePrice(symbol, side = 'buy') {
-  const livePrice = kiteStreamService.getPrice(symbol);
-  const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-  const isFresh = !!livePrice && livePrice.last > 0 && liveAgeMs <= 120000;
-
-  if (isFresh) {
-    return side === 'buy'
-      ? Number(livePrice.ask || livePrice.last || 0)
-      : Number(livePrice.bid || livePrice.last || 0);
-  }
-
-  // DB fallback
-  const { data: rows } = await supabase
-    .from('symbols')
-    .select('bid, ask, last_price')
-    .eq('symbol', symbol)
-    .limit(1);
-
-  const sym = rows?.[0];
-  if (!sym) return 0;
-  return side === 'buy'
-    ? Number(sym.ask || sym.last_price || 0)
-    : Number(sym.bid || sym.last_price || 0);
-}
 
 /** Recalculate account fields after a trade close and persist */
 async function settleAccount(accountId, netProfit, marginFreed, now) {
@@ -177,25 +154,6 @@ exports.placeOrder = async (req, res) => {
         message: `Trading is disabled for ${symbolData.symbol}. ${symbolData.ban_reason || 'Contact admin.'}`,
       });
 
-    // ✅ NEW: Check if symbol prices are stale (both live stream and DB)
-    const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
-    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-    const dbAgeMs = symbolData.last_update 
-      ? Date.now() - new Date(symbolData.last_update).getTime() 
-      : Infinity;
-
-    const STALE_THRESHOLD_MS = 15000; // 15 seconds
-    const isLiveStale = liveAgeMs > STALE_THRESHOLD_MS;
-    const isDBStale = dbAgeMs > STALE_THRESHOLD_MS;
-
-    if (isLiveStale && isDBStale && (orderType === 'market' || orderType === 'instant')) {
-      return res.status(409).json({
-        success: false,
-        code: 'OFF_QUOTES',
-        message: `${symbolData.symbol} is off quotes. No price update in the last ${Math.round(Math.min(liveAgeMs, dbAgeMs) / 1000)}s. Kite session may have expired. Contact admin to re-authenticate.`,
-      });
-    }
-
     // ── Market hours check (NOW symbolData is defined) ──
     if (!isMarketOpen(symbolData.symbol, symbolData.exchange)) {
       const holiday = getHolidayStatus();
@@ -213,6 +171,21 @@ exports.placeOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: reason });
     }
 
+    const orderSide = type === 'buy' ? 'buy' : 'sell';
+    const currentQuoteState = resolveTradeablePrice({
+      symbol: symbolData.symbol,
+      side: orderSide,
+      symbolRow: symbolData,
+    });
+
+    if (currentQuoteState.isOffQuotes && (orderType === 'market' || orderType === 'instant')) {
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: buildOffQuotesMessage(symbolData.symbol, currentQuoteState),
+      });
+    }
+
     // ── Pending order types ───────────────────────────────────────
     if (orderType !== 'market' && orderType !== 'instant') {
       const validPendingTypes = ['buy_limit', 'sell_limit', 'buy_stop', 'sell_stop'];
@@ -221,9 +194,27 @@ exports.placeOrder = async (req, res) => {
       if (!price || price <= 0)
         return res.status(400).json({ success: false, message: 'Price is required for limit/stop orders' });
 
-      const livePrice = kiteStreamService.getPrice(symbol.toUpperCase());
-      const currentBid = livePrice?.bid || parseFloat(symbolData.bid || symbolData.last_price || 0);
-      const currentAsk = livePrice?.ask || parseFloat(symbolData.ask || symbolData.last_price || 0);
+      const currentBidState = resolveTradeablePrice({
+        symbol: symbolData.symbol,
+        side: 'sell',
+        symbolRow: symbolData,
+      });
+      const currentAskState = resolveTradeablePrice({
+        symbol: symbolData.symbol,
+        side: 'buy',
+        symbolRow: symbolData,
+      });
+
+      if (currentBidState.isOffQuotes || currentAskState.isOffQuotes) {
+        return res.status(409).json({
+          success: false,
+          code: 'OFF_QUOTES',
+          message: buildOffQuotesMessage(symbolData.symbol, currentAskState.isOffQuotes ? currentAskState : currentBidState),
+        });
+      }
+
+      const currentBid = currentBidState.price;
+      const currentAsk = currentAskState.price;
       const cmp = type === 'buy' ? currentAsk : currentBid;
 
       if (orderType === 'buy_limit' && price > cmp * 0.995)
@@ -262,29 +253,19 @@ exports.placeOrder = async (req, res) => {
     }
 
     // ── Market order — resolve price ──────────────────────────────
-    const liveP = kiteStreamService.getPrice(symbol.toUpperCase());
-    const liveAgeMs = liveP?.timestamp ? Date.now() - liveP.timestamp : Infinity;
-    const isFreshLive = !!liveP && liveP.last > 0 && liveAgeMs <= 120000;
-
-    let openPrice;
-    if (isFreshLive) {
-      openPrice = type === 'buy'
-        ? Number(liveP.ask || liveP.last || 0)
-        : Number(liveP.bid || liveP.last || 0);
-    } else {
-      const dbBid = Number(symbolData.bid || symbolData.last_price || 0);
-      const dbAsk = Number(symbolData.ask || symbolData.last_price || 0);
-      openPrice = type === 'buy' ? dbAsk : dbBid;
-      if (!openPrice || openPrice <= 0)
-        return res.status(409).json({
-          success: false, code: 'OFF_QUOTES',
-          message: `${symbolData.symbol} is off quotes. No price available. Please try again.`,
-        });
-      console.log(`⚠️ Using DB price for ${symbolData.symbol}: ${openPrice} (live tick age: ${Math.round(liveAgeMs / 1000)}s)`);
-    }
+    const openPriceState = resolveTradeablePrice({
+      symbol: symbolData.symbol,
+      side: orderSide,
+      symbolRow: symbolData,
+    });
+    const openPrice = openPriceState.price;
 
     if (!openPrice || openPrice <= 0)
-      return res.status(400).json({ success: false, message: 'Invalid price. Market may be closed.' });
+      return res.status(409).json({
+        success: false,
+        code: 'OFF_QUOTES',
+        message: buildOffQuotesMessage(symbolData.symbol, openPriceState),
+      });
 
     const lotSize = 1;
     const leverage = account.leverage || 5;
@@ -589,32 +570,28 @@ exports.closePosition = async (req, res) => {
     const { data: userData } = await supabase.from('users').select('brokerage_rate').eq('id', userId).single();
     const brokerageRate = userData?.brokerage_rate || 0.0003;
 
-    // Resolve close price
-    const liveP = kiteStreamService.getPrice(trade.symbol);
-    const liveAgeMs   = liveP?.timestamp ? Date.now() - liveP.timestamp : Infinity;
-    const isFreshLive = !!liveP && liveP.last > 0 && liveAgeMs <= 120000;
-    let closePrice;
+    const { data: symRows } = await supabase
+      .from('symbols')
+      .select('symbol, bid, ask, last_price, last_update')
+      .eq('symbol', trade.symbol)
+      .limit(1);
 
-    if (isFreshLive) {
-      closePrice = trade.trade_type === 'buy'
-        ? Number(liveP.bid || liveP.last || 0)
-        : Number(liveP.ask || liveP.last || 0);
-    } else {
-      const { data: symRows } = await supabase.from('symbols').select('bid, ask').eq('symbol', trade.symbol).limit(1);
-      const sym = symRows?.[0];
-      if (sym) {
-        closePrice = trade.trade_type === 'buy'
-          ? parseFloat(sym.bid || sym.ask || trade.current_price || trade.open_price)
-          : parseFloat(sym.ask || sym.bid || trade.current_price || trade.open_price);
-      } else {
-        closePrice = parseFloat(trade.current_price || trade.open_price);
-      }
+    const closePriceState = resolveTradeablePrice({
+      symbol: trade.symbol,
+      side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+      symbolRow: symRows?.[0] || null,
+      allowStaleDb: isAdminClose,
+    });
+    let closePrice = closePriceState.price;
+
+    if ((!closePrice || Number.isNaN(closePrice) || closePrice <= 0) && isAdminClose) {
+      closePrice = parseFloat(trade.current_price || trade.open_price || 0);
     }
 
     if ((!closePrice || isNaN(closePrice) || closePrice <= 0) && !isAdminClose)
       return res.status(409).json({
         success: false, code: 'OFF_QUOTES',
-        message: `${trade.symbol} is off quotes. Cannot close without valid price.`,
+        message: buildOffQuotesMessage(trade.symbol, closePriceState),
       });
     if (!closePrice || isNaN(closePrice) || closePrice <= 0)
       return res.status(400).json({
@@ -771,38 +748,10 @@ exports.partialClose = async (req, res) => {
 //  MODIFY POSITION  (SL / TP only — no commission change)
 // ─────────────────────────────────────────────
 exports.modifyPosition = async (req, res) => {
-  try {
-    const { tradeId } = req.params;
-    const { stopLoss, takeProfit } = req.body;
-    const userId = req.user.id;
-
-    if (!tradeId)
-      return res.status(400).json({ success: false, message: 'Trade ID is required' });
-
-    const { data: trade, error: tradeError } = await supabase
-      .from('trades')
-      .select('*, accounts!inner(user_id)')
-      .eq('id', tradeId).eq('status', 'open').single();
-    if (tradeError || !trade)
-      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
-    if (trade.accounts.user_id !== userId)
-      return res.status(403).json({ success: false, message: 'Unauthorized' });
-
-    // Modify only adjusts SL/TP — commission is NOT re-applied.
-    // Commission is captured at open and at close, not on modify.
-    const { data: updatedTrade, error: updateError } = await supabase
-      .from('trades').update({
-        stop_loss:  parseFloat(stopLoss)   || 0,
-        take_profit: parseFloat(takeProfit) || 0,
-        updated_at: new Date().toISOString(),
-      }).eq('id', tradeId).select().single();
-    if (updateError) throw updateError;
-
-    res.json({ success: true, data: updatedTrade, message: 'Position modified successfully' });
-  } catch (err) {
-    console.error('Modify position error:', err);
-    res.status(500).json({ success: false, message: 'Failed to modify position' });
-  }
+  return res.status(410).json({
+    success: false,
+    message: 'Position modification has been removed. Please close and reopen the trade if changes are needed.',
+  });
 };
 
 // ─────────────────────────────────────────────
@@ -842,19 +791,38 @@ exports.closeAllPositions = async (req, res) => {
     let totalProfit = 0;
     let totalMarginFreed = 0;
 
+    const symbolsToResolve = [...new Set(tradesToClose.map((trade) => String(trade.symbol || '').toUpperCase()).filter(Boolean))];
+    const { data: symbolRows, error: symbolRowsError } = await supabase
+      .from('symbols')
+      .select('symbol, bid, ask, last_price, last_update')
+      .in('symbol', symbolsToResolve);
+
+    if (symbolRowsError) throw symbolRowsError;
+
+    const symbolMap = new Map((symbolRows || []).map((row) => [String(row.symbol || '').toUpperCase(), row]));
+
     for (const trade of tradesToClose) {
-      const liveP = kiteStreamService.getPrice(trade.symbol);
-      let closePrice;
-      if (liveP) {
-        closePrice = trade.trade_type === 'buy' ? liveP.bid : liveP.ask;
-      } else {
-        const { data: symRows } = await supabase.from('symbols').select('bid, ask').eq('symbol', trade.symbol).limit(1);
-        const sym = symRows?.[0];
-        closePrice = sym
-          ? parseFloat(trade.trade_type === 'buy' ? sym.bid : sym.ask || trade.current_price || trade.open_price)
-          : parseFloat(trade.current_price || trade.open_price);
+      if (!isMarketOpen(trade.symbol, trade.exchange)) {
+        return res.status(400).json({
+          success: false,
+          message: `${trade.symbol} market is closed. Close all is available only during market hours.`,
+        });
       }
-      if (!closePrice || isNaN(closePrice)) continue;
+
+      const closePriceState = resolveTradeablePrice({
+        symbol: trade.symbol,
+        side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+        symbolRow: symbolMap.get(String(trade.symbol || '').toUpperCase()) || null,
+      });
+
+      const closePrice = closePriceState.price;
+      if (!closePrice || Number.isNaN(closePrice)) {
+        return res.status(409).json({
+          success: false,
+          code: 'OFF_QUOTES',
+          message: buildOffQuotesMessage(trade.symbol, closePriceState),
+        });
+      }
 
       const direction    = trade.trade_type === 'buy' ? 1 : -1;
       const priceDiff    = (closePrice - parseFloat(trade.open_price)) * direction;
@@ -890,108 +858,10 @@ exports.closeAllPositions = async (req, res) => {
 //  ADD QUANTITY TO EXISTING POSITION
 // ─────────────────────────────────────────────
 exports.addQuantity = async (req, res) => {
-  try {
-    const { tradeId } = req.params;
-    const { accountId, quantity } = req.body;
-    const userId = req.user.id;
-
-    if (!tradeId || !accountId || !quantity || quantity <= 0)
-      return res.status(400).json({ success: false, message: 'Trade ID, Account ID, and valid quantity are required' });
-
-    const { data: userData, error: userError } = await supabase
-      .from('users').select('closing_mode, brokerage_rate').eq('id', userId).single();
-    if (userError) throw userError;
-    if (userData?.closing_mode)
-      return res.status(403).json({ success: false, message: 'Your account is in closing mode. You cannot add to positions.' });
-
-    const brokerageRate = userData?.brokerage_rate || 0.0003;
-
-    const { data: trade, error: tradeError } = await supabase
-      .from('trades')
-      .select('*, accounts!inner(user_id, balance, credit, equity, profit, margin, free_margin, leverage)')
-      .eq('id', tradeId).eq('status', 'open').single();
-    if (tradeError || !trade)
-      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
-    if (trade.accounts.user_id !== userId)
-      return res.status(403).json({ success: false, message: 'Unauthorized' });
-
-    const addPrice = await resolvePrice(trade.symbol, trade.trade_type);
-    if (!addPrice || addPrice <= 0)
-      return res.status(409).json({
-        success: false, code: 'OFF_QUOTES',
-        message: `${trade.symbol} is off quotes. Cannot add quantity without valid price.`,
-      });
-
-    const addQty      = parseFloat(quantity);
-    const oldQty      = parseFloat(trade.quantity);
-    const oldPrice    = parseFloat(trade.open_price);
-    const leverage    = trade.accounts.leverage || 5;
-    const lotSize     = 1;
-    const now         = new Date().toISOString();
-
-    const additionalMargin    = (addPrice * addQty * lotSize) / leverage;
-    const freeMargin           = parseFloat(trade.accounts.free_margin || 0);
-    if (additionalMargin > freeMargin)
-      return res.status(400).json({
-        success: false,
-        message: `Insufficient margin. Required: ₹${additionalMargin.toFixed(2)}, Available: ₹${freeMargin.toFixed(2)}`,
-      });
-
-    const newQty        = oldQty + addQty;
-    const newAvgPrice   = ((oldPrice * oldQty) + (addPrice * addQty)) / newQty;
-    const additionalBrok= addPrice * addQty * lotSize * brokerageRate;
-    const newBuyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0) + additionalBrok;
-    const newTotalMargin  = parseFloat(trade.margin || 0) + additionalMargin;
-    const entryEvents = ensureTradeEntryHistory(trade);
-    const updatedEntryEvents = [
-      ...entryEvents,
-      buildTradeEntryEvent({
-        action: 'add',
-        time: now,
-        quantity: addQty,
-        price: addPrice,
-        commission: additionalBrok,
-      }),
-    ];
-
-    const currentPrice = parseFloat(trade.current_price || addPrice);
-    const direction    = trade.trade_type === 'buy' ? 1 : -1;
-    const newProfit    = ((currentPrice - newAvgPrice) * direction * newQty * lotSize) - newBuyBrokerage;
-
-    const { data: updatedTrade, error: updateError } = await supabase
-      .from('trades').update({
-        quantity: newQty, open_price: newAvgPrice, margin: newTotalMargin,
-        brokerage: newBuyBrokerage, buy_brokerage: newBuyBrokerage,
-        profit: newProfit, current_price: currentPrice,
-        comment: mergeTradeCommentEvents(
-          trade.comment || '',
-          updatedEntryEvents,
-        ),
-        updated_at: now,
-      }).eq('id', tradeId).select().single();
-    if (updateError) throw updateError;
-
-    const newAccountMargin = parseFloat(trade.accounts.margin || 0) + additionalMargin;
-    const accountEquityBase = Number(
-      trade.accounts.equity ?? (
-        Number(trade.accounts.balance || 0) +
-        Number(trade.accounts.credit || 0) +
-        Number(trade.accounts.profit || 0)
-      )
-    );
-    const newFreeMargin    = accountEquityBase - newAccountMargin;
-    await supabase.from('accounts').update({
-      margin: newAccountMargin, free_margin: newFreeMargin, updated_at: now,
-    }).eq('id', accountId);
-
-    res.json({
-      success: true, data: updatedTrade,
-      message: `Added ${addQty} to position at ₹${addPrice.toFixed(2)}. New qty: ${newQty}, Avg price: ₹${newAvgPrice.toFixed(2)}`,
-    });
-  } catch (err) {
-    console.error('Add quantity error:', err);
-    res.status(500).json({ success: false, message: err.message || 'Failed to add quantity' });
-  }
+  return res.status(410).json({
+    success: false,
+    message: 'Position add-quantity has been removed. Please place a new trade instead.',
+  });
 };
 
 // ─────────────────────────────────────────────
@@ -1016,11 +886,33 @@ exports.modifyPendingOrder = async (req, res) => {
       if (!parsedPrice || parsedPrice <= 0)
         return res.status(400).json({ success: false, message: 'Invalid price' });
 
-      const livePrice = kiteStreamService.getPrice(order.symbol);
-      const { data: symRows } = await supabase.from('symbols').select('bid, ask, last_price').eq('symbol', order.symbol).limit(1);
+      const { data: symRows } = await supabase
+        .from('symbols')
+        .select('symbol, bid, ask, last_price, last_update')
+        .eq('symbol', order.symbol)
+        .limit(1);
       const symbolData = symRows?.[0];
-      const currentBid = livePrice?.bid || parseFloat(symbolData?.bid || symbolData?.last_price || 0);
-      const currentAsk = livePrice?.ask || parseFloat(symbolData?.ask || symbolData?.last_price || 0);
+      const currentBidState = resolveTradeablePrice({
+        symbol: order.symbol,
+        side: 'sell',
+        symbolRow: symbolData || null,
+      });
+      const currentAskState = resolveTradeablePrice({
+        symbol: order.symbol,
+        side: 'buy',
+        symbolRow: symbolData || null,
+      });
+
+      if (currentBidState.isOffQuotes || currentAskState.isOffQuotes) {
+        return res.status(409).json({
+          success: false,
+          code: 'OFF_QUOTES',
+          message: buildOffQuotesMessage(order.symbol, currentAskState.isOffQuotes ? currentAskState : currentBidState),
+        });
+      }
+
+      const currentBid = currentBidState.price;
+      const currentAsk = currentAskState.price;
       const cmp = order.trade_type === 'buy' ? currentAsk : currentBid;
 
       if (order.order_type === 'buy_limit' && parsedPrice > cmp * 0.995)

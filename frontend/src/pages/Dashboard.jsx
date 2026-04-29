@@ -8,7 +8,6 @@ import useTradingStore from '../store/tradingStore';
 import useMarketStore from '../store/marketStore';
 import useWatchlistStore from '../store/watchlistStore';
 import useSettingsStore from '../store/settingsStore';
-import useMarketSocket from '../hooks/useMarketSocket'; // ✅ ADD THIS LINE
 import AdminPanelPage from '../pages/AdminPanel';
 import AdminWithdrawals from '../components/admin/AdminWithdrawals';
 
@@ -99,6 +98,49 @@ const HISTORY_PERIODS = [
   { id: 'month', label: 'Last Month' },
   { id: '3months', label: 'Last 3 Months' },
 ];
+
+const QUOTE_STALE_THRESHOLD_MS = 15000;
+const DASHBOARD_TABS = new Set([
+  'trade',
+  'quotes',
+  'chart',
+  'history',
+  'messages',
+  'wallet',
+  'settings',
+  'admin',
+]);
+
+const normalizeDashboardTab = (value) => {
+  const candidate = String(value || '').toLowerCase();
+  return DASHBOARD_TABS.has(candidate) ? candidate : 'trade';
+};
+
+const getDashboardTabFromLocation = () => {
+  if (typeof window === 'undefined') return 'trade';
+  return normalizeDashboardTab(new URL(window.location.href).searchParams.get('tab'));
+};
+
+const syncDashboardTabHistory = (tab, replace = false) => {
+  if (typeof window === 'undefined') return;
+
+  const normalizedTab = normalizeDashboardTab(tab);
+  const url = new URL(window.location.href);
+
+  if (!replace && url.searchParams.get('tab') === normalizedTab) {
+    return;
+  }
+
+  url.searchParams.set('tab', normalizedTab);
+  const nextState = { ...(window.history.state || {}), dashboardTab: normalizedTab };
+
+  if (replace) {
+    window.history.replaceState(nextState, '', url);
+    return;
+  }
+
+  window.history.pushState(nextState, '', url);
+};
 
 // ============ CATEGORY HELPERS ============
 const norm = (v) => String(v || '').toLowerCase().trim();
@@ -447,8 +489,6 @@ const Dashboard = () => {
     fetchDeals,
     placeOrder,
     closeTrade,
-    modifyTrade,
-    addQuantity,
     cancelOrder,
     updateTradePnL,
     updateTradesPnLBatch,
@@ -469,10 +509,6 @@ const Dashboard = () => {
     deleteWatchlist,
     renameWatchlist,
   } = useWatchlistStore();
-
-  // ✅ ADD THESE 2 LINES HERE:
-  // Socket connection for live price updates
-  const isSocketConnected = useMarketSocket();
 
   // ── All-symbols state (lifted from old QuotesTab) ──
   const [allFuturesSymbols, setAllFuturesSymbols] = useState([]);
@@ -498,7 +534,12 @@ const Dashboard = () => {
   });
 
   // Mobile tabs
-  const [activeTab, setActiveTab] = useState('trade');
+  const [activeTab, setActiveTabState] = useState(() => getDashboardTabFromLocation());
+  const setActiveTab = useCallback((nextTab, options = {}) => {
+    const normalizedTab = normalizeDashboardTab(nextTab);
+    setActiveTabState(normalizedTab);
+    syncDashboardTabHistory(normalizedTab, options.replace === true);
+  }, []);
 
   // Wallet intent
   const [walletIntent, setWalletIntent] = useState('deposit');
@@ -739,6 +780,21 @@ const Dashboard = () => {
     const interval = setInterval(fetchMarketStatus, 60000);
     return () => clearInterval(interval);
   }, [fetchMarketStatus]);
+
+  useEffect(() => {
+    syncDashboardTabHistory(activeTab, true);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handlePopState = () => {
+      setActiveTabState(getDashboardTabFromLocation());
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
     // ── Backend search fallback for QuotesTab ──
   const [backendSearchResults, setBackendSearchResults] = useState([]);
@@ -1198,16 +1254,23 @@ const accountStats = useMemo(() => {
       return pickLiveContractRows(results).slice(0, 200);
     }
 
-    // 4) Not searching → show the same live contracts that the backend streams
-    const wl = new Set((activeSymbols || []).map((x) => normalizeLiveUnderlyingKey(x)));
-    if (wl.size === 0) {
+    // 4) Not searching → show backend live contracts by default, or the exact
+    // watchlist symbols in watchlist order when a watchlist is active.
+    const watchlistSymbols = (activeSymbols || [])
+      .map((value) => String(value || '').toUpperCase())
+      .filter(Boolean);
+
+    if (watchlistSymbols.length === 0) {
       return pickLiveContractRows(list).slice(0, 20);
     }
 
-    const wlFiltered = list.filter((s) =>
-      wl.has(normalizeLiveUnderlyingKey(s.underlying || s.symbol)),
+    const symbolsByKey = new Map(
+      list.map((row) => [String(row.symbol || '').toUpperCase(), row]),
     );
-    return pickLiveContractRows(wlFiltered);
+
+    return watchlistSymbols
+      .map((symbolKey) => symbolsByKey.get(symbolKey))
+      .filter(Boolean);
   }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols, backendSearchResults]);
 
   const displayedQuoteSymbolSet = useMemo(
@@ -1402,11 +1465,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       }
     }
     
-    // ✅ CHANGED: Check both price data AND staleness (>10s = off quotes)
+    // ✅ CHANGED: Check both price data AND staleness (>15s = off quotes)
     const quoteTs = Number(currentQ?.timestamp || 0);
     const quoteAgeMs = Date.now() - quoteTs;
     const hasPriceData = currentQ && (Number(currentQ.bid) > 0 || Number(currentQ.ask) > 0 || Number(currentQ.last) > 0);
-    const isStalePrice = quoteAgeMs > 10000; // 10 seconds threshold
+    const isStalePrice = quoteAgeMs > QUOTE_STALE_THRESHOLD_MS;
     const isOffQuotes = !hasPriceData || isStalePrice;
 
     if (isOffQuotes) {
@@ -1560,20 +1623,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         message: result.message || 'Close failed',
       });
       setTimeout(() => setOrderConfirmation(null), 4000);
-    }
-  };
-
-  const handleModifyTrade = async (tradeId, newSL, newTP) => {
-    const result = await modifyTrade?.(tradeId, {
-      stopLoss: newSL,
-      takeProfit: newTP,
-    });
-    if (result?.success) {
-      toast.success('Modified');
-      setModifyModal(null);
-      fetchOpenTrades(selectedAccount.id);
-    } else {
-      toast.error(result?.message || 'Modify failed');
     }
   };
 
@@ -2798,7 +2847,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                 displayedQuoteSymbolSet.has(symbolKey) ||
                 (activeSymbols || []).includes(symbolKey);
               const quoteAgeMs = quoteTs > 0 ? (Date.now() - quoteTs) : Number.POSITIVE_INFINITY;
-              const isStale = marketOpen && isSubscribed && quoteAgeMs > 60000;
+              const isStale = marketOpen && isSubscribed && quoteAgeMs > QUOTE_STALE_THRESHOLD_MS;
               void staleTick;
 
               const staleColor = '#9aa0a6';
@@ -2944,17 +2993,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
   const [dealsSymbolFilter, setDealsSymbolFilter] = useState('');
   const [showDealsSymbolDropdown, setShowDealsSymbolDropdown] = useState(false);
   const dealsDropdownRef = useRef(null);
-
-  // Reset modify values when modal opens/changes
-  useEffect(() => {
-    if (modifyModal) {
-      setModifySL(modifyModal.stop_loss || '');
-      setModifyTP(modifyModal.take_profit || '');
-      setModifyTab('sltp');
-      setAddQty(1);
-      setAddQtyLoading(false);
-    }
-  }, [modifyModal]);
 
   // Reset modify-pending values when modal opens
   useEffect(() => {

@@ -1,6 +1,10 @@
 // backend/src/services/tradingService.js
 const { supabase } = require('../config/supabase');
 const { isMarketOpen } = require('./marketStatus');
+const {
+  buildOffQuotesMessage,
+  resolveTradeablePrice,
+} = require('./quoteGuard');
 
 class TradingService {
   async getBrokerageRate(userId) {
@@ -57,41 +61,45 @@ class TradingService {
       };
     }
 
-    const kiteStreamService = require('./kiteStreamService');
-    const livePrice = kiteStreamService.getPrice(trade.symbol);
-    const liveAgeMs = livePrice?.timestamp ? Date.now() - livePrice.timestamp : Infinity;
-
-    if (livePrice && livePrice.last > 0 && liveAgeMs <= 120000) {
-      const closePrice = trade.trade_type === 'buy'
-        ? Number(livePrice.bid || livePrice.last || 0)
-        : Number(livePrice.ask || livePrice.last || 0);
-
+    if (!isMarketOpen(trade.symbol, trade.exchange)) {
       return {
-        closePrice,
+        closePrice: 0,
         lotSize: Number(trade.lot_size || 1) || 1,
+        message: `${trade.symbol} market is closed. Positions can be closed only during market hours.`,
       };
     }
 
     const { data: symbolData, error } = await supabase
       .from('symbols')
-      .select('bid, ask, last_price, lot_size')
+      .select('symbol, bid, ask, last_price, last_update, lot_size')
       .eq('symbol', trade.symbol)
       .single();
 
     if (!error && symbolData) {
-      const closePrice = trade.trade_type === 'buy'
-        ? Number(symbolData.bid || symbolData.ask || symbolData.last_price || trade.current_price || trade.open_price || 0)
-        : Number(symbolData.ask || symbolData.bid || symbolData.last_price || trade.current_price || trade.open_price || 0);
+      const closePriceState = resolveTradeablePrice({
+        symbol: trade.symbol,
+        side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+        symbolRow: symbolData,
+      });
+
+      if (!closePriceState.isOffQuotes && closePriceState.price > 0) {
+        return {
+          closePrice: closePriceState.price,
+          lotSize: Number(trade.lot_size || symbolData.lot_size || 1) || 1,
+        };
+      }
 
       return {
-        closePrice,
+        closePrice: 0,
         lotSize: Number(trade.lot_size || symbolData.lot_size || 1) || 1,
+        message: buildOffQuotesMessage(trade.symbol, closePriceState),
       };
     }
 
     return {
-      closePrice: Number(trade.current_price || trade.open_price || 0),
+      closePrice: 0,
       lotSize: Number(trade.lot_size || 1) || 1,
+      message: `${trade.symbol} quote is unavailable right now.`,
     };
   }
 
@@ -102,10 +110,10 @@ class TradingService {
     }
 
     const brokerageRate = options.brokerageRate ?? await this.getBrokerageRate(trade.user_id);
-    const { closePrice, lotSize } = await this.resolveCloseMarketData(trade, options.closePrice);
+    const { closePrice, lotSize, message } = await this.resolveCloseMarketData(trade, options.closePrice);
 
     if (!closePrice || Number.isNaN(closePrice) || closePrice <= 0) {
-      return { success: false, message: `Cannot determine close price for ${trade.symbol}` };
+      return { success: false, message: message || `Cannot determine close price for ${trade.symbol}` };
     }
 
     const totalQuantity = Number(trade.quantity || 0);
@@ -153,11 +161,23 @@ class TradingService {
     magicNumber = 0,
   }) {
     try {
-      // Get current price
-      const openPrice = type === 'buy' ? parseFloat(symbolData.ask) : parseFloat(symbolData.bid);
+      if (!isMarketOpen(symbolData.symbol, symbolData.exchange)) {
+        return { success: false, message: `${symbolData.symbol} market is closed.` };
+      }
+
+      const openPriceState = resolveTradeablePrice({
+        symbol: symbolData.symbol,
+        side: type === 'buy' ? 'buy' : 'sell',
+        symbolRow: symbolData,
+      });
+      const openPrice = openPriceState.price;
 
       if (!openPrice || openPrice <= 0) {
-        return { success: false, message: 'Invalid price. Market may be closed.' };
+        return {
+          success: false,
+          code: 'OFF_QUOTES',
+          message: buildOffQuotesMessage(symbolData.symbol, openPriceState),
+        };
       }
 
       // Calculate margin required
@@ -513,8 +533,6 @@ class TradingService {
   // Check and trigger pending orders (called by background job)
   async checkPendingOrders() {
     try {
-      const { isMarketOpen } = require('./marketStatus');
-
       // Get all pending orders
       const { data: orders, error } = await supabase
         .from('pending_orders')
@@ -522,6 +540,18 @@ class TradingService {
         .eq('status', 'pending');
 
       if (error || !orders || orders.length === 0) return;
+
+      const symbolsToResolve = [...new Set(
+        (orders || [])
+          .map((order) => String(order.symbol || '').toUpperCase())
+          .filter(Boolean)
+      )];
+      const { data: symbolRows } = await supabase
+        .from('symbols')
+        .select('symbol, exchange, bid, ask, last_price, last_update, lot_size, tick_size, display_name')
+        .in('symbol', symbolsToResolve);
+
+      const symbolMap = new Map((symbolRows || []).map((row) => [String(row.symbol || '').toUpperCase(), row]));
 
       for (const order of orders) {
         // ── AUTO-EXPIRE when market is closed for this symbol/segment ──
@@ -542,17 +572,26 @@ class TradingService {
           continue;
         }
 
-        // Get current price
-        const { data: symbolData } = await supabase
-          .from('symbols')
-          .select('*')
-          .eq('symbol', order.symbol)
-          .single();
-
+        const symbolData = symbolMap.get(String(order.symbol || '').toUpperCase());
         if (!symbolData) continue;
 
-        const currentBid = parseFloat(symbolData.bid);
-        const currentAsk = parseFloat(symbolData.ask);
+        const currentBidState = resolveTradeablePrice({
+          symbol: order.symbol,
+          side: 'sell',
+          symbolRow: symbolData,
+        });
+        const currentAskState = resolveTradeablePrice({
+          symbol: order.symbol,
+          side: 'buy',
+          symbolRow: symbolData,
+        });
+
+        if (currentBidState.isOffQuotes || currentAskState.isOffQuotes) {
+          continue;
+        }
+
+        const currentBid = currentBidState.price;
+        const currentAsk = currentAskState.price;
         const orderPrice = parseFloat(order.price);
 
         let shouldTrigger = false;
@@ -644,19 +683,33 @@ class TradingService {
 
       if (error || !trades || trades.length === 0) return;
 
-      for (const trade of trades) {
-        // Get current price
-        const { data: symbolData } = await supabase
-          .from('symbols')
-          .select('bid, ask')
-          .eq('symbol', trade.symbol)
-          .single();
+      const symbolsToResolve = [...new Set(
+        (trades || [])
+          .map((trade) => String(trade.symbol || '').toUpperCase())
+          .filter(Boolean)
+      )];
+      const { data: symbolRows } = await supabase
+        .from('symbols')
+        .select('symbol, exchange, bid, ask, last_price, last_update')
+        .in('symbol', symbolsToResolve);
 
+      const symbolMap = new Map((symbolRows || []).map((row) => [String(row.symbol || '').toUpperCase(), row]));
+
+      for (const trade of trades) {
+        if (!isMarketOpen(trade.symbol, trade.exchange)) continue;
+
+        const symbolData = symbolMap.get(String(trade.symbol || '').toUpperCase());
         if (!symbolData) continue;
 
-        const currentPrice = trade.trade_type === 'buy' 
-          ? parseFloat(symbolData.bid) 
-          : parseFloat(symbolData.ask);
+        const currentPriceState = resolveTradeablePrice({
+          symbol: trade.symbol,
+          side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+          symbolRow: symbolData,
+        });
+
+        if (currentPriceState.isOffQuotes) continue;
+
+        const currentPrice = currentPriceState.price;
 
         const stopLoss = parseFloat(trade.stop_loss);
         const takeProfit = parseFloat(trade.take_profit);

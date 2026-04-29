@@ -18,6 +18,12 @@ public class MainActivity extends BridgeActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
+                if (getBridge() != null && getBridge().getWebView() != null && getBridge().getWebView().canGoBack()) {
+                    getBridge().getWebView().goBack();
+                    lastBackPressTime = 0;
+                    return;
+                }
+
                 long currentTime = System.currentTimeMillis();
 
                 if (currentTime - lastBackPressTime < BACK_PRESS_INTERVAL_MS) {

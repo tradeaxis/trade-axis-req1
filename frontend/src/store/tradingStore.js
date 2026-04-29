@@ -2,6 +2,8 @@
 import { create } from 'zustand';
 import api from '../services/api';
 
+const QUOTE_STALE_THRESHOLD_MS = 15000;
+
 const useTradingStore = create((set, get) => ({
   openTrades: [],
   pendingOrders: [],
@@ -123,15 +125,15 @@ const useTradingStore = create((set, get) => ({
       return { success: false, message: 'Quantity must be greater than 0' };
     }
 
-    // ✅ NEW: Check if symbol price is stale (>10s without update)
+    // Prevent market orders from using stale quotes.
     const useMarketStore = (await import('./marketStore')).default;
-    const isStale = useMarketStore.getState().isQuoteStale(symbol, 10000);
+    const isStale = useMarketStore.getState().isQuoteStale(symbol, QUOTE_STALE_THRESHOLD_MS);
     
     if (isStale && (orderType === 'market' || orderType === 'instant')) {
       return {
         success: false,
         code: 'OFF_QUOTES',
-        message: `${symbol} is off quotes. Prices have not updated for more than 10 seconds. Please wait for live quotes before placing orders.`,
+        message: `${symbol} is off quotes. Prices have not updated for more than 15 seconds. Please wait for live quotes before placing orders.`,
       };
     }
 
@@ -221,69 +223,22 @@ const useTradingStore = create((set, get) => ({
   },
 
   modifyTrade: async (tradeId, modifications) => {
-    if (!tradeId) {
-      return { success: false, message: 'Missing trade ID' };
-    }
-
-    const { stopLoss, takeProfit } = modifications;
-    set({ loading: true, error: null });
-
-    try {
-      const payload = { stopLoss: parseFloat(stopLoss) || 0, takeProfit: parseFloat(takeProfit) || 0 };
-      const response = await api.put(`/trading/modify/${tradeId}`, payload);
-
-      if (response.data.success) {
-        set((state) => ({
-          openTrades: state.openTrades.map((t) =>
-            t.id === tradeId ? { ...t, stop_loss: payload.stopLoss, take_profit: payload.takeProfit } : t
-          ),
-          loading: false,
-        }));
-        return { success: true, data: response.data.data, message: response.data.message || 'Position modified successfully' };
-      } else {
-        set({ error: response.data.message, loading: false });
-        return { success: false, message: response.data.message || 'Failed to modify position' };
-      }
-    } catch (error) {
-      console.error('Modify trade error:', error);
-      const errorMessage = error.response?.data?.message || 'Failed to modify position';
-      set({ error: errorMessage, loading: false });
-      return { success: false, message: errorMessage };
-    }
+    void tradeId;
+    void modifications;
+    return {
+      success: false,
+      message: 'Position modification has been removed. Please close and reopen the trade if changes are needed.',
+    };
   },
 
-  // ✅ NEW: Add quantity to existing position
   addQuantity: async (tradeId, accountId, quantity) => {
-    if (!tradeId || !accountId || !quantity || quantity <= 0) {
-      return { success: false, message: 'Trade ID, Account ID, and valid quantity are required' };
-    }
-
-    set({ loading: true, error: null });
-
-    try {
-      const response = await api.post(`/trading/add-quantity/${tradeId}`, {
-        accountId,
-        quantity: parseFloat(quantity),
-      });
-
-      if (response.data.success) {
-        await get().fetchOpenTrades(accountId);
-        set({ loading: false });
-        return {
-          success: true,
-          data: response.data.data,
-          message: response.data.message || 'Quantity added successfully',
-        };
-      } else {
-        set({ error: response.data.message, loading: false });
-        return { success: false, message: response.data.message || 'Failed to add quantity' };
-      }
-    } catch (error) {
-      console.error('Add quantity error:', error);
-      const errorMessage = error.response?.data?.message || 'Failed to add quantity';
-      set({ error: errorMessage, loading: false });
-      return { success: false, message: errorMessage };
-    }
+    void tradeId;
+    void accountId;
+    void quantity;
+    return {
+      success: false,
+      message: 'Position add-quantity has been removed. Please place a new trade instead.',
+    };
   },
 
   partialCloseTrade: async (tradeId, accountId, volume) => {

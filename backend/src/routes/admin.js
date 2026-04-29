@@ -41,8 +41,8 @@ router.post('/kite/start-stream', adminAuth, adminController.startKiteStream);
 router.post('/kite/stop-stream', adminAuth, adminController.stopKiteStream);
 router.get('/kite/status', adminAuth, adminController.kiteStatus);
 // Add these with the other admin routes
-router.post('/cleanup-data', adminController.cleanupOldData);
-router.post('/kite/delete-token', adminController.deleteExpiredToken);
+router.post('/cleanup-data', adminAuth, adminController.cleanupOldData);
+router.post('/kite/delete-token', adminAuth, adminController.deleteExpiredToken);
 
 // ================= HOLIDAY / MANUAL CLOSE =================
 router.get('/market-holiday', adminAuth, adminController.getMarketHoliday);
