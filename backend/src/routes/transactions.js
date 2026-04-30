@@ -10,6 +10,8 @@ const {
   getRazorpayKey,
   createDeposit,
   verifyDeposit,
+  getQrSettings,
+  createQrDepositRequest,
   withdraw,
   getTransactions,
   getTransaction,
@@ -24,6 +26,7 @@ router.use(protect);
 
 // ✅ NEW: Deals endpoint (must be before /:id)
 router.get('/deals', getDeals);
+router.get('/qr-settings', getQrSettings);
 
 router.post(
   '/deposit/create',
@@ -44,6 +47,18 @@ router.post(
   ],
   validate,
   verifyDeposit
+);
+
+router.post(
+  '/qr-deposit-request',
+  [
+    body('accountId').notEmpty().withMessage('accountId is required'),
+    body('amount').isFloat({ min: 100, max: 1000000 }).withMessage('amount must be between 100 and 1000000'),
+    body('paymentReference').trim().notEmpty().withMessage('paymentReference is required'),
+    body('note').optional().isString(),
+  ],
+  validate,
+  createQrDepositRequest
 );
 
 router.post(

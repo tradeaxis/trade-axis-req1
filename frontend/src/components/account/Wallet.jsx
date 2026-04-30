@@ -33,8 +33,16 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
 
   // Razorpay availability
   const [rzp, setRzp] = useState({ enabled: false, key: null });
+  const [qrSettings, setQrSettings] = useState(null);
+  const [isLoadingQr, setIsLoadingQr] = useState(false);
+  const [qrReference, setQrReference] = useState('');
+  const [qrNote, setQrNote] = useState('');
 
   const isDemo = !!selectedAccount?.is_demo;
+  const qrEnabled = !!(
+    qrSettings?.enabled &&
+    (qrSettings?.qrImage || qrSettings?.upiId || qrSettings?.accountNumber)
+  );
 
   const available = useMemo(
     () => parseFloat(selectedAccount?.free_margin || 0),
@@ -74,8 +82,22 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
     }
   };
 
+  const fetchQrSettings = async () => {
+    setIsLoadingQr(true);
+    try {
+      const res = await api.get('/transactions/qr-settings');
+      setQrSettings(res.data?.data || res.data?.settings || null);
+    } catch (e) {
+      console.error(e);
+      setQrSettings(null);
+    } finally {
+      setIsLoadingQr(false);
+    }
+  };
+
   useEffect(() => {
     fetchRazorpayKey();
+    fetchQrSettings();
   }, []);
 
   useEffect(() => {
@@ -192,6 +214,38 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
     }
   };
 
+  const handleQrDepositRequest = async () => {
+    if (!selectedAccount?.id) return toast.error('Select an account first');
+
+    const amount = Number(depositAmount);
+    if (!amount || amount < 100) return toast.error('Minimum deposit is INR 100');
+    if (amount > 1000000) return toast.error('Maximum deposit is INR 10,00,000');
+    if (isDemo) return toast.error('Cannot deposit to demo account');
+    if (!qrEnabled) return toast.error('QR deposit is not available right now');
+    if (!qrReference.trim()) return toast.error('Enter UTR / payment reference');
+
+    setIsProcessing(true);
+    try {
+      await api.post('/transactions/qr-deposit-request', {
+        accountId: selectedAccount.id,
+        amount,
+        paymentReference: qrReference.trim(),
+        note: qrNote.trim(),
+      });
+
+      toast.success('QR deposit request submitted. Admin approval is pending.');
+      setDepositAmount('');
+      setQrReference('');
+      setQrNote('');
+      await fetchTransactions();
+    } catch (e) {
+      console.error(e);
+      toast.error(e.response?.data?.message || 'Failed to submit QR deposit request');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const handleWithdraw = async () => {
     if (!selectedAccount?.id) return toast.error('Select an account first');
 
@@ -286,10 +340,28 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
         {activeTab === 'deposit' && (
           <div className="max-w-md mx-auto">
             <div className="mb-3 text-xs" style={{ color: '#787b86' }}>
-              Payment mode:{' '}
-              <span style={{ color: rzp.enabled ? '#26a69a' : '#ff9800', fontWeight: 700 }}>
-                {rzp.enabled ? 'Razorpay' : 'Mock'}
-              </span>
+              <div>
+                QR deposit:{' '}
+                <span
+                  style={{
+                    color: qrEnabled ? '#26a69a' : '#787b86',
+                    fontWeight: 700,
+                  }}
+                >
+                  {isLoadingQr ? 'Loading...' : qrEnabled ? 'Available' : 'Unavailable'}
+                </span>
+              </div>
+              <div className="mt-1">
+                Online deposit:{' '}
+                <span
+                  style={{
+                    color: rzp.enabled ? '#26a69a' : '#787b86',
+                    fontWeight: 700,
+                  }}
+                >
+                  {rzp.enabled ? 'Razorpay' : 'Unavailable'}
+                </span>
+              </div>
             </div>
 
             <div className="mb-4">
@@ -319,14 +391,101 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
             </div>
 
             {/* ✅ NOT faded unless demo/processing */}
-            <button
-              onClick={handleDeposit}
-              disabled={isProcessing || isDemo}
-              className="w-full py-4 rounded-lg font-semibold text-white text-lg disabled:opacity-50"
-              style={{ background: '#26a69a' }}
-            >
-              {isDemo ? 'Deposit disabled (Demo)' : isProcessing ? 'Processing...' : 'Deposit'}
-            </button>
+            {qrEnabled && (
+              <div
+                className="mb-4 p-4 rounded-lg border"
+                style={{ background: '#2a2e39', borderColor: '#363a45' }}
+              >
+                <div className="text-sm font-semibold mb-3" style={{ color: '#d1d4dc' }}>
+                  Scan QR and pay
+                </div>
+
+                {qrSettings?.qrImage && (
+                  <div className="mb-3">
+                    <img
+                      src={qrSettings.qrImage}
+                      alt="Deposit QR"
+                      className="w-full max-w-xs mx-auto rounded-lg"
+                      style={{ border: '1px solid #363a45', background: '#fff' }}
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-1 text-xs" style={{ color: '#d1d4dc' }}>
+                  {qrSettings?.upiId && <div>UPI ID: {qrSettings.upiId}</div>}
+                  {qrSettings?.accountName && <div>Account Name: {qrSettings.accountName}</div>}
+                  {qrSettings?.merchantName && qrSettings?.merchantName !== qrSettings?.accountName && (
+                    <div>Merchant: {qrSettings.merchantName}</div>
+                  )}
+                  {qrSettings?.bankName && <div>Bank: {qrSettings.bankName}</div>}
+                  {qrSettings?.accountNumber && <div>Account No: {qrSettings.accountNumber}</div>}
+                  {qrSettings?.ifscCode && <div>IFSC: {qrSettings.ifscCode}</div>}
+                </div>
+
+                {qrSettings?.instructions && (
+                  <div
+                    className="mt-3 p-2 rounded text-xs"
+                    style={{ background: '#1e222d', color: '#787b86' }}
+                  >
+                    {qrSettings.instructions}
+                  </div>
+                )}
+
+                <div className="mt-3 space-y-3">
+                  <input
+                    type="text"
+                    value={qrReference}
+                    onChange={(e) => setQrReference(e.target.value)}
+                    placeholder="UTR / payment reference"
+                    className="w-full px-4 py-3 rounded-lg border text-sm"
+                    style={{ background: '#1e222d', borderColor: '#363a45', color: '#d1d4dc' }}
+                  />
+                  <textarea
+                    value={qrNote}
+                    onChange={(e) => setQrNote(e.target.value)}
+                    placeholder="Optional note"
+                    rows={3}
+                    className="w-full px-4 py-3 rounded-lg border text-sm resize-none"
+                    style={{ background: '#1e222d', borderColor: '#363a45', color: '#d1d4dc' }}
+                  />
+                </div>
+
+                <button
+                  onClick={handleQrDepositRequest}
+                  disabled={isProcessing || isDemo}
+                  className="w-full py-3 mt-3 rounded-lg font-semibold text-white disabled:opacity-50"
+                  style={{ background: '#2962ff' }}
+                >
+                  {isDemo
+                    ? 'QR deposit disabled (Demo)'
+                    : isProcessing
+                    ? 'Submitting...'
+                    : 'Submit QR Deposit Request'}
+                </button>
+
+                <div className="text-xs mt-2" style={{ color: '#787b86' }}>
+                  Balance is credited only after admin approval.
+                </div>
+              </div>
+            )}
+
+            {rzp.enabled ? (
+              <button
+                onClick={handleDeposit}
+                disabled={isProcessing || isDemo}
+                className="w-full py-4 rounded-lg font-semibold text-white text-lg disabled:opacity-50"
+                style={{ background: '#26a69a' }}
+              >
+                {isDemo ? 'Deposit disabled (Demo)' : isProcessing ? 'Processing...' : 'Pay Online'}
+              </button>
+            ) : (
+              <div
+                className="p-3 rounded-lg text-sm text-center"
+                style={{ background: '#2a2e39', color: '#787b86' }}
+              >
+                Online deposit is unavailable right now.
+              </div>
+            )}
           </div>
         )}
 
@@ -428,6 +587,11 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
                         <div className="text-xs mt-1" style={{ color: '#787b86' }}>
                           Ref: {txn.reference}
                         </div>
+                        {(txn.description || txn.admin_note) && (
+                          <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                            {txn.description || txn.admin_note}
+                          </div>
+                        )}
                       </div>
                     </div>
 

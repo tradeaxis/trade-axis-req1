@@ -348,6 +348,24 @@ const pickLiveContractRows = (symbolsList = []) => {
   });
 };
 
+const inferHistoryOriginalQuantity = (trade) => {
+  const explicit = Number(trade?.original_quantity);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+
+  const comment = String(trade?.comment || '');
+  const partialMatch = comment.match(/partial close:\s*([\d.]+)\s+of\s+([\d.]+)/i);
+  if (partialMatch) {
+    const parsed = Number(partialMatch[2]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return Number(trade?.quantity || 0);
+};
+
 const buildHistoryPositionGroups = (closedTrades = []) => {
   const groups = new Map();
 
@@ -383,7 +401,7 @@ const buildHistoryPositionGroups = (closedTrades = []) => {
 
     const group = groups.get(key);
     const closedQty = Number(trade.quantity || 0);
-    const openQty = Number(trade.original_quantity || trade.quantity || 0);
+    const openQty = inferHistoryOriginalQuantity(trade);
     const openPrice = Number(trade.open_price || 0);
     const closePrice = Number(trade.close_price || 0);
     const closeTime = trade.close_time || trade.closeTime || null;
@@ -5181,9 +5199,7 @@ const renderOrderConfirmation = () => {
                           >
                             {group.trades.map((trade, idx) => {
                               const closeQty = Number(trade.quantity || 0);
-                              const openQty = Number(
-                                trade.original_quantity || trade.quantity || 0
-                              );
+                              const openQty = inferHistoryOriginalQuantity(trade);
                               const tradePnL = Number(trade.profit || 0);
                               const tradeCommission = Number(trade.brokerage || 0);
                               const closeTime = trade.close_time || trade.closeTime;
@@ -5369,6 +5385,28 @@ const renderOrderConfirmation = () => {
                       )}</span>
                     </div>
                     <div className="flex justify-between col-span-2">
+                      <span style={{ color: textMuted }}>Balance Settled:</span>
+                      <span
+                        className="font-bold"
+                        style={{
+                          color:
+                            dealsSymbolFilter
+                              ? textMuted
+                              : Number(dealsSummary.balanceSettled || 0) >= 0
+                              ? '#26a69a'
+                              : '#ef5350',
+                        }}
+                      >
+                        {!dealsSymbolFilter && Number(dealsSummary.balanceSettled || 0) > 0 ? '+' : ''}
+                        {!dealsSymbolFilter && Number(dealsSummary.balanceSettled || 0) < 0 ? '-' : ''}
+                        {formatINR(
+                          Math.abs(
+                            dealsSymbolFilter ? 0 : Number(dealsSummary.balanceSettled || 0)
+                          )
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex justify-between col-span-2">
                       <span style={{ color: textMuted }}>Balance:</span>
                       <span className="font-bold" style={{ color: textPrimary }}>{formatINR(dealsSummary.currentBalance)}</span>
                     </div>
@@ -5500,29 +5538,29 @@ const renderOrderConfirmation = () => {
                           )}
                         </div>
 
-                        <div className="text-right shrink-0">
-                          <div
-                            className="font-bold text-sm"
-                            style={{
-                              color:
-                                rawAmount > 0
-                                  ? '#26a69a'
-                                  : rawAmount < 0
-                                  ? '#ef5350'
-                                  : textPrimary,
-                            }}
-                          >
-                            {rawAmount > 0 ? '+' : rawAmount < 0 ? '-' : ''}
-                            {formatINR(Math.abs(rawAmount))}
+                        {!isEntryDeal && (
+                          <div className="text-right shrink-0">
+                            <div
+                              className="font-bold text-sm"
+                              style={{
+                                color:
+                                  rawAmount > 0
+                                    ? '#26a69a'
+                                    : rawAmount < 0
+                                    ? '#ef5350'
+                                    : textPrimary,
+                              }}
+                            >
+                              {rawAmount > 0 ? '+' : rawAmount < 0 ? '-' : ''}
+                              {formatINR(Math.abs(rawAmount))}
+                            </div>
+                            <div className="text-[10px] mt-1" style={{ color: textMuted }}>
+                              {d.source === 'trade' && d.side === 'exit'
+                                ? 'Net result'
+                                : 'Account movement'}
+                            </div>
                           </div>
-                          <div className="text-[10px] mt-1" style={{ color: textMuted }}>
-                            {isEntryDeal
-                              ? 'Trade entry'
-                              : d.source === 'trade' && d.side === 'exit'
-                              ? 'Net result'
-                              : 'Account movement'}
-                          </div>
-                        </div>
+                        )}
                       </div>
                     </div>
                   );

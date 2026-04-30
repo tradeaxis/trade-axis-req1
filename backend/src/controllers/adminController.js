@@ -23,6 +23,8 @@ const buildAdminTradeComment = (prefix, note) => (
 );
 
 const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
+const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
+const QR_DEPOSIT_DESCRIPTION_PREFIX = 'QR Deposit Request';
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
@@ -56,6 +58,16 @@ const parseAppSettingValue = (value) => {
   } catch (_) {
     return value;
   }
+};
+
+const isQrDepositTransaction = (txn = {}) => {
+  const reference = String(txn.reference || '').toUpperCase();
+  if (reference.startsWith(QR_DEPOSIT_REFERENCE_PREFIX)) {
+    return true;
+  }
+
+  const description = `${txn.description || ''} ${txn.note || ''}`.toLowerCase();
+  return description.includes(QR_DEPOSIT_DESCRIPTION_PREFIX.toLowerCase());
 };
 
 const normalizeQrSettings = (raw = {}, fallback = {}) => {
@@ -967,7 +979,7 @@ exports.listWithdrawals = async (req, res) => {
         users:user_id (email, first_name, last_name, login_id),
         accounts:account_id (account_number, is_demo)
       `)
-      .eq('type', 'withdrawal')
+      .or('type.eq.withdrawal,transaction_type.eq.withdrawal')
       .order('created_at', { ascending: false });
 
     if (status && status !== 'all') {
@@ -1100,18 +1112,17 @@ exports.listQrDeposits = async (req, res) => {
         users:user_id (email, first_name, last_name, login_id),
         accounts:account_id (account_number, is_demo)
       `)
-      .eq('type', 'deposit')
+      .or('type.eq.deposit,transaction_type.eq.deposit')
       .order('created_at', { ascending: false })
       .limit(500);
-
-    if (status && status !== 'all') {
-      query = query.eq('status', status);
-    }
 
     const { data, error } = await query;
     if (error) throw error;
 
-    const deposits = (data || []).map((txn) => ({
+    const deposits = (data || [])
+      .filter((txn) => isQrDepositTransaction(txn))
+      .filter((txn) => !status || status === 'all' || String(txn.status || '').toLowerCase() === String(status).toLowerCase())
+      .map((txn) => ({
       ...txn,
       user_email: txn.users?.email || '',
       user_name: txn.users
@@ -1154,6 +1165,117 @@ exports.saveQrSettings = async (req, res) => {
     });
   } catch (error) {
     console.error('saveQrSettings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.approveQrDeposit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNote } = req.body;
+
+    const { data: txn, error: findError } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (findError || !txn) {
+      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    }
+    if (!isQrDepositTransaction(txn)) {
+      return res.status(400).json({ success: false, message: 'Transaction is not a QR deposit request' });
+    }
+    if (txn.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Transaction is not pending' });
+    }
+
+    const { data: account, error: accountError } = await supabase
+      .from('accounts')
+      .select('*')
+      .eq('id', txn.account_id)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+
+    const currentBalance = Number(account.balance || 0);
+    const amount = Number(txn.amount || 0);
+    const newBalance = currentBalance + amount;
+    const processedAt = new Date().toISOString();
+
+    const { error: accountUpdateError } = await supabase
+      .from('accounts')
+      .update({
+        balance: newBalance,
+        updated_at: processedAt,
+      })
+      .eq('id', txn.account_id);
+
+    if (accountUpdateError) throw accountUpdateError;
+
+    await recalculateAccountSnapshot(txn.account_id, processedAt);
+
+    const { error: txnUpdateError } = await supabase
+      .from('transactions')
+      .update({
+        status: 'completed',
+        admin_note: adminNote || 'QR deposit approved by admin',
+        balance_before: currentBalance,
+        balance_after: newBalance,
+        processed_at: processedAt,
+      })
+      .eq('id', id);
+
+    if (txnUpdateError) throw txnUpdateError;
+
+    res.json({
+      success: true,
+      message: `QR deposit approved. New balance: INR ${newBalance.toFixed(2)}`,
+      newBalance,
+    });
+  } catch (error) {
+    console.error('approveQrDeposit error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.rejectQrDeposit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNote } = req.body;
+
+    const { data: txn, error: findError } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (findError || !txn) {
+      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    }
+    if (!isQrDepositTransaction(txn)) {
+      return res.status(400).json({ success: false, message: 'Transaction is not a QR deposit request' });
+    }
+    if (txn.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Transaction is not pending' });
+    }
+
+    const { error: updateError } = await supabase
+      .from('transactions')
+      .update({
+        status: 'rejected',
+        admin_note: adminNote || 'QR deposit rejected by admin',
+        processed_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true, message: 'QR deposit rejected' });
+  } catch (error) {
+    console.error('rejectQrDeposit error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

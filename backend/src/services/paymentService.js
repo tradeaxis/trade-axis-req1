@@ -58,6 +58,7 @@ class PaymentService {
           user_id: userId,
           account_id: accountId,
           transaction_type: 'deposit',
+          type: 'deposit',
           amount: amount,
           payment_method: 'bank_transfer', // keep compatible with your existing CHECK constraint
           status: 'completed',
@@ -129,6 +130,7 @@ class PaymentService {
           user_id: userId,
           account_id: accountId,
           transaction_type: 'deposit',
+          type: 'deposit',
           amount: amount,
           payment_method: 'bank_transfer',
           payment_transaction_id: order.id,
@@ -237,6 +239,7 @@ class PaymentService {
           user_id: userId,
           account_id: accountId,
           transaction_type: 'withdrawal',
+          type: 'withdrawal',
           amount,
           payment_method: 'bank_transfer',
           bank_name: bankDetails.bankName,

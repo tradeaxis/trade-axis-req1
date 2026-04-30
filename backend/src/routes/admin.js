@@ -34,6 +34,10 @@ router.post('/withdrawals/:id/approve', adminAuth, adminController.approveWithdr
 router.post('/withdrawals/:id/reject', adminAuth, adminController.rejectWithdrawal);
 router.get('/qr-deposits', adminAuth, adminController.listQrDeposits);
 router.get('/qr/deposits', adminAuth, adminController.listQrDeposits);
+router.post('/qr-deposits/:id/approve', adminAuth, adminController.approveQrDeposit);
+router.post('/qr-deposits/:id/reject', adminAuth, adminController.rejectQrDeposit);
+router.post('/qr/deposits/:id/approve', adminAuth, adminController.approveQrDeposit);
+router.post('/qr/deposits/:id/reject', adminAuth, adminController.rejectQrDeposit);
 router.get('/qr-settings', adminAuth, adminController.getQrSettings);
 router.get('/qr/settings', adminAuth, adminController.getQrSettings);
 router.post('/qr-settings', adminAuth, adminController.saveQrSettings);

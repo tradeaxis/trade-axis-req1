@@ -3,6 +3,269 @@ const { supabase } = require('../config/supabase');
 const paymentService = require('../services/paymentService');
 const { getTradeEntryEvents } = require('../utils/tradeCommentEvents');
 
+const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
+const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
+const QR_DEPOSIT_DESCRIPTION_PREFIX = 'QR Deposit Request';
+
+const firstNonEmptyString = (...values) => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return '';
+};
+
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on', 'enabled', 'active'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off', 'disabled', 'inactive'].includes(normalized)) return false;
+  }
+
+  return fallback;
+};
+
+const parseAppSettingValue = (value) => {
+  if (typeof value !== 'string') {
+    return value ?? null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return value;
+  }
+};
+
+const normalizeQrSettings = (raw = {}, fallback = {}) => {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const base = fallback && typeof fallback === 'object' && !Array.isArray(fallback)
+    ? fallback
+    : {};
+
+  const qrImage = firstNonEmptyString(
+    source.qrImage,
+    source.qr_image,
+    source.qrImageUrl,
+    source.qr_image_url,
+    source.image,
+    source.imageUrl,
+    source.image_url,
+    typeof raw === 'string' ? raw : '',
+    base.qrImage,
+    base.qr_image,
+    base.qrImageUrl,
+    base.qr_image_url,
+    base.image,
+  );
+  const upiId = firstNonEmptyString(source.upiId, source.upi_id, base.upiId, base.upi_id);
+  const merchantName = firstNonEmptyString(
+    source.merchantName,
+    source.merchant_name,
+    source.accountHolderName,
+    source.account_holder_name,
+    base.merchantName,
+    base.merchant_name,
+    base.accountHolderName,
+  );
+  const accountName = firstNonEmptyString(
+    source.accountName,
+    source.account_name,
+    source.accountHolderName,
+    source.account_holder_name,
+    base.accountName,
+    base.account_name,
+    base.accountHolderName,
+  );
+  const bankName = firstNonEmptyString(source.bankName, source.bank_name, base.bankName, base.bank_name);
+  const accountNumber = firstNonEmptyString(
+    source.accountNumber,
+    source.account_number,
+    base.accountNumber,
+    base.account_number,
+  );
+  const ifscCode = firstNonEmptyString(source.ifscCode, source.ifsc_code, base.ifscCode, base.ifsc_code);
+  const instructions = firstNonEmptyString(
+    source.instructions,
+    source.note,
+    source.notes,
+    source.description,
+    base.instructions,
+    base.note,
+    base.notes,
+  );
+  const phoneNumber = firstNonEmptyString(
+    source.phoneNumber,
+    source.phone_number,
+    source.whatsappNumber,
+    source.whatsapp_number,
+    base.phoneNumber,
+    base.phone_number,
+  );
+  const enabled = toBoolean(
+    source.enabled ?? source.isEnabled ?? source.active,
+    toBoolean(base.enabled ?? base.isEnabled ?? base.active, !!(qrImage || upiId)),
+  );
+
+  return {
+    ...base,
+    ...source,
+    enabled,
+    isEnabled: enabled,
+    active: enabled,
+    qrImage,
+    qr_image: qrImage,
+    qrImageUrl: qrImage,
+    qr_image_url: qrImage,
+    image: qrImage,
+    image_url: qrImage,
+    upiId,
+    upi_id: upiId,
+    merchantName,
+    merchant_name: merchantName,
+    accountName,
+    account_name: accountName,
+    accountHolderName: accountName,
+    account_holder_name: accountName,
+    bankName,
+    bank_name: bankName,
+    accountNumber,
+    account_number: accountNumber,
+    ifscCode,
+    ifsc_code: ifscCode,
+    instructions,
+    note: instructions,
+    notes: instructions,
+    phoneNumber,
+    phone_number: phoneNumber,
+  };
+};
+
+const readQrSettings = async () => {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('key, value')
+    .in('key', QR_SETTINGS_KEYS);
+
+  if (error) throw error;
+
+  const settingsByKey = new Map(
+    (data || []).map((row) => [row.key, parseAppSettingValue(row.value)]),
+  );
+
+  for (const key of QR_SETTINGS_KEYS) {
+    const value = settingsByKey.get(key);
+    if (value) {
+      return normalizeQrSettings(value);
+    }
+  }
+
+  return normalizeQrSettings({});
+};
+
+const buildQrDepositReference = () => {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `${QR_DEPOSIT_REFERENCE_PREFIX}${timestamp}${random}`;
+};
+
+const buildQrDepositDescription = ({ paymentReference = '', note = '' } = {}) => {
+  const parts = [QR_DEPOSIT_DESCRIPTION_PREFIX];
+  if (paymentReference) parts.push(`Ref: ${paymentReference}`);
+  if (note) parts.push(`Note: ${note}`);
+  return parts.join(' | ');
+};
+
+const buildSettlementTimestamp = (settlementDate, fallback = null) => (
+  fallback || (settlementDate ? `${settlementDate}T01:00:00+05:30` : null)
+);
+
+const buildSettlementDeals = (settlements = []) => {
+  const groups = new Map();
+
+  (settlements || []).forEach((row) => {
+    const settlementDate = firstNonEmptyString(
+      row.settlement_date,
+      row.created_at ? String(row.created_at).slice(0, 10) : '',
+    );
+    if (!settlementDate) return;
+
+    const accountId = row.account_id || 'unknown';
+    const key = `${accountId}::${settlementDate}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        settlementDate,
+        executedAt: row.created_at || row.updated_at || null,
+        balanceBefore: row.balance_before ?? null,
+        balanceAfter: row.balance_after ?? row.balance_before ?? null,
+        creditBefore: Number(row.credit_before || 0),
+        totalProfitLoss: 0,
+        totalCommission: 0,
+        tradeCount: 0,
+        symbols: new Set(),
+      });
+    }
+
+    const group = groups.get(key);
+    group.totalProfitLoss += Number(row.profit_loss || 0);
+    group.totalCommission += Number(row.commission || 0);
+    group.tradeCount += 1;
+
+    if (row.symbol) {
+      group.symbols.add(String(row.symbol).toUpperCase());
+    }
+    if (!group.executedAt && (row.created_at || row.updated_at)) {
+      group.executedAt = row.created_at || row.updated_at;
+    }
+    if (group.balanceBefore === null && row.balance_before !== undefined) {
+      group.balanceBefore = row.balance_before;
+    }
+    if (group.balanceAfter === null && row.balance_after !== undefined) {
+      group.balanceAfter = row.balance_after;
+    }
+  });
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const amount = Number((group.creditBefore + group.totalProfitLoss).toFixed(2));
+      const symbolCount = group.symbols.size;
+      const description = [
+        `${group.tradeCount} trade${group.tradeCount === 1 ? '' : 's'} settled`,
+        symbolCount > 0 ? `${symbolCount} symbol${symbolCount === 1 ? '' : 's'}` : '',
+      ]
+        .filter(Boolean)
+        .join(' | ');
+
+      return {
+        id: `settlement-${group.key}`,
+        source: 'settlement',
+        side: 'settlement',
+        type: 'settlement',
+        dealLabel: 'Balance Settled',
+        symbol: null,
+        quantity: null,
+        price: null,
+        amount,
+        profit: amount,
+        commission: Number(group.totalCommission || 0),
+        time: buildSettlementTimestamp(group.settlementDate, group.executedAt),
+        status: 'completed',
+        description,
+        balance_before: group.balanceBefore,
+        balance_after: group.balanceAfter,
+        settlement_date: group.settlementDate,
+        trade_count: group.tradeCount,
+      };
+    })
+    .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+};
+
 // GET /api/transactions/razorpay-key (public)
 const getRazorpayKey = (req, res) => {
   return res.status(200).json({
@@ -53,6 +316,21 @@ const verifyDeposit = async (req, res) => {
   }
 };
 
+// GET /api/transactions/qr-settings (protected)
+const getQrSettings = async (req, res) => {
+  try {
+    const settings = await readQrSettings();
+
+    return res.status(200).json({
+      success: true,
+      data: settings,
+      settings,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // POST /api/transactions/withdraw (protected)
 const withdraw = async (req, res) => {
   try {
@@ -68,6 +346,86 @@ const withdraw = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Withdrawal request submitted',
+      data: txn,
+    });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/transactions/qr-deposit-request (protected)
+const createQrDepositRequest = async (req, res) => {
+  try {
+    const { accountId, amount, paymentReference, note } = req.body;
+    const depositAmount = Number(amount);
+    const normalizedReference = String(paymentReference || '').trim();
+    const normalizedNote = String(note || '').trim();
+
+    if (!accountId) {
+      return res.status(400).json({ success: false, message: 'accountId is required' });
+    }
+    if (!depositAmount || depositAmount < 100 || depositAmount > 1000000) {
+      return res.status(400).json({
+        success: false,
+        message: 'amount must be between 100 and 1000000',
+      });
+    }
+    if (!normalizedReference) {
+      return res.status(400).json({
+        success: false,
+        message: 'paymentReference is required',
+      });
+    }
+
+    const qrSettings = await readQrSettings();
+    if (!qrSettings.enabled || !(qrSettings.qrImage || qrSettings.upiId || qrSettings.accountNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'QR deposit is not available right now',
+      });
+    }
+
+    const { data: account, error: accountError } = await supabase
+      .from('accounts')
+      .select('*')
+      .eq('id', accountId)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+    if (account.is_demo) {
+      return res.status(400).json({ success: false, message: 'Cannot deposit to demo account' });
+    }
+
+    const { data: txn, error: insertError } = await supabase
+      .from('transactions')
+      .insert([
+        {
+          user_id: req.user.id,
+          account_id: accountId,
+          transaction_type: 'deposit',
+          type: 'deposit',
+          amount: depositAmount,
+          payment_method: 'bank_transfer',
+          status: 'pending',
+          reference: buildQrDepositReference(),
+          balance_before: account.balance,
+          description: buildQrDepositDescription({
+            paymentReference: normalizedReference,
+            note: normalizedNote,
+          }),
+        },
+      ])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    return res.status(200).json({
+      success: true,
+      message: 'QR deposit request submitted. Balance will update after admin approval.',
       data: txn,
     });
   } catch (error) {
@@ -496,7 +854,7 @@ const getDeals = async (req, res) => {
       }
     });
 
-        // 3) Weekly settlements (if table exists)
+    // 3) Weekly settlements (grouped into one entry per settlement run)
     try {
       const { data: settlements } = await supabase
         .from('weekly_settlements')
@@ -505,26 +863,12 @@ const getDeals = async (req, res) => {
         .order('settlement_date', { ascending: false })
         .limit(100);
 
-      (settlements || []).forEach((s) => {
-        if (startDate && new Date(s.settlement_date) < startDate) return;
-        allDeals.push({
-          id: `settlement-${s.id}`,
-          source: 'settlement',
-          side: 'settlement',
-          type: 'settlement',
-          dealLabel: 'Weekly Settlement',
-          symbol: s.symbol,
-          quantity: s.quantity,
-          price: s.close_price,
-          amount: Number(s.profit_loss || 0),
-          profit: Number(s.profit_loss || 0),
-          commission: Number(s.commission || 0),
-          time: s.settlement_date,
-          status: 'completed',
-          balance_before: s.balance_before,
-          balance_after: s.balance_after,
-        });
+      const settlementDeals = buildSettlementDeals(settlements || []).filter((deal) => {
+        if (!startDate) return true;
+        return deal.time && new Date(deal.time) >= startDate;
       });
+
+      allDeals.push(...settlementDeals);
     } catch (e) {
       // weekly_settlements table may not exist — skip silently
     }
@@ -535,6 +879,7 @@ const getDeals = async (req, res) => {
     const deals = allDeals.slice(0, parseInt(limit, 10));
 
     const exitDeals = allDeals.filter((d) => d.source === 'trade' && d.side === 'exit');
+    const settlementDeals = allDeals.filter((d) => d.source === 'settlement');
 
     const summary = {
       totalProfit: exitDeals.filter((d) => d.amount > 0).reduce((s, d) => s + d.amount, 0),
@@ -542,6 +887,7 @@ const getDeals = async (req, res) => {
       totalDeposits: allDeals.filter((d) => d.type === 'deposit').reduce((s, d) => s + d.amount, 0),
       totalWithdrawals: Math.abs(allDeals.filter((d) => d.type === 'withdrawal').reduce((s, d) => s + d.amount, 0)),
       totalCommission: allDeals.reduce((s, d) => s + Number(d.commission || 0), 0),
+      balanceSettled: Number(settlementDeals[0]?.amount || 0),
       netPnL: exitDeals.reduce((s, d) => s + d.amount, 0),
       currentBalance: Number(account?.balance || 0),
     };
@@ -565,6 +911,8 @@ module.exports = {
   getRazorpayKey,
   createDeposit,
   verifyDeposit,
+  getQrSettings,
+  createQrDepositRequest,
   withdraw,
   getTransactions,
   getTransaction,

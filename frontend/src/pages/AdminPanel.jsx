@@ -5,6 +5,7 @@ import { Calendar, Edit3, Lock, RefreshCw, Search, Trash2 } from 'lucide-react';
 import AdminUsers      from '../components/admin/AdminUsers';
 import AdminWithdrawals from '../components/admin/AdminWithdrawals';
 import AdminKiteSetup  from '../components/admin/AdminKiteSetup';
+import AdminQrDeposits from '../components/admin/AdminQrDeposits';
 import AdminSymbolBan  from '../components/admin/AdminSymbolBan';   // ← NEW
 import api from '../services/api';
 
@@ -273,6 +274,7 @@ export default function AdminPanel() {
   const tabs = [
     { id: 'users',       label: 'Users' },
     { id: 'withdrawals', label: 'Withdrawals' },
+    { id: 'qrDeposits',  label: 'QR Deposits' },
     { id: 'settlement',  label: 'Settlement' },
     { id: 'market',      label: 'Market Holiday' },
     { id: 'manualClose', label: 'Manual Close' },
@@ -303,6 +305,7 @@ export default function AdminPanel() {
       <div className="flex-1 overflow-auto">
         {adminView === 'users'       && <AdminUsers />}
         {adminView === 'withdrawals' && <AdminWithdrawals />}
+        {adminView === 'qrDeposits'  && <AdminQrDeposits />}
         {adminView === 'kite'        && <AdminKiteSetup />}
         {adminView === 'symbolBan'   && <AdminSymbolBan />}   {/* ← NEW */}
 

@@ -12,10 +12,27 @@
 
 const { supabase } = require('../config/supabase');
 
+const SETTLEMENT_TIMEZONE = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
+
+const formatDateInTimezone = (date, timeZone = SETTLEMENT_TIMEZONE) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+
+  return `${year}-${month}-${day}`;
+};
+
 class WeeklySettlementService {
   async runSettlement() {
     const now = new Date();
-    const settlementWeek = now.toISOString().slice(0, 10);
+    const settlementWeek = formatDateInTimezone(now);
     const closeTime = now.toISOString();
 
     console.log('');

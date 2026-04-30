@@ -21,6 +21,24 @@ const getPeriodStart = (periodId) => {
   }
 };
 
+const inferOriginalQuantity = (trade) => {
+  const explicit = Number(trade?.original_quantity);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+
+  const comment = String(trade?.comment || '');
+  const partialMatch = comment.match(/partial close:\s*([\d.]+)\s+of\s+([\d.]+)/i);
+  if (partialMatch) {
+    const parsed = Number(partialMatch[2]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return Number(trade?.quantity || 0);
+};
+
 // ─── Build a grouped "position" from raw closed trade records ────────────────
 //
 // Backend stores:
@@ -74,7 +92,7 @@ function buildPositionGroups(closedTrades) {
 
     for (const t of g.trades) {
       const qty       = parseFloat(t.quantity || 0);
-      const origQty   = parseFloat(t.original_quantity || qty);  // original open qty if partial
+      const origQty   = inferOriginalQuantity(t);
       const openPrice = parseFloat(t.open_price  || 0);
       const closePrc  = parseFloat(t.close_price || 0);
       const comm      = parseFloat(t.brokerage   || 0);
