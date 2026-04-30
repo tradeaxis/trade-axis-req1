@@ -1,0 +1,195 @@
+const PDF_PAGE_WIDTH = 595;
+const PDF_PAGE_HEIGHT = 842;
+const PDF_MARGIN_LEFT = 40;
+const PDF_TOP = 804;
+const PDF_LINE_HEIGHT = 13;
+const PDF_MAX_LINES = 56;
+const PDF_WRAP_AT = 88;
+
+const textEncoder = new TextEncoder();
+
+const byteLength = (value) => textEncoder.encode(value).length;
+
+const escapePdfText = (value) =>
+  String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/[^\x20-\x7E]/g, ' ');
+
+const wrapText = (text, maxChars = PDF_WRAP_AT) => {
+  const source = String(text ?? '').trim();
+  if (!source) return [''];
+
+  const words = source.split(/\s+/);
+  const lines = [];
+  let current = '';
+
+  const pushCurrent = () => {
+    if (current) {
+      lines.push(current);
+      current = '';
+    }
+  };
+
+  words.forEach((word) => {
+    if (word.length > maxChars) {
+      pushCurrent();
+      for (let index = 0; index < word.length; index += maxChars) {
+        lines.push(word.slice(index, index + maxChars));
+      }
+      return;
+    }
+
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length > maxChars) {
+      pushCurrent();
+      current = word;
+      return;
+    }
+
+    current = candidate;
+  });
+
+  pushCurrent();
+  return lines.length ? lines : [''];
+};
+
+const buildContentStream = (lines) => {
+  let y = PDF_TOP;
+  const parts = ['BT', '/F1 10 Tf'];
+
+  lines.forEach((line) => {
+    parts.push(`1 0 0 1 ${PDF_MARGIN_LEFT} ${y} Tm`);
+    parts.push(`(${escapePdfText(line)}) Tj`);
+    y -= PDF_LINE_HEIGHT;
+  });
+
+  parts.push('ET');
+  return parts.join('\n');
+};
+
+const buildPdfDocument = (pages) => {
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(body);
+    return objects.length;
+  };
+
+  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const contentIds = pages.map((lines) => {
+    const content = buildContentStream(lines);
+    return addObject(`<< /Length ${byteLength(content)} >>\nstream\n${content}\nendstream`);
+  });
+
+  const pagesObjectId = objects.length + pages.length + 1;
+  const pageIds = pages.map((_, index) =>
+    addObject(
+      `<< /Type /Page /Parent ${pagesObjectId} 0 R /MediaBox [0 0 ${PDF_PAGE_WIDTH} ${PDF_PAGE_HEIGHT}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`,
+    ),
+  );
+  const pagesId = addObject(
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`,
+  );
+  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+
+  objects.forEach((objectBody, index) => {
+    offsets.push(byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${objectBody}\nendobj\n`;
+  });
+
+  const xrefOffset = byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+
+  for (let index = 1; index < offsets.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return pdf;
+};
+
+const paginateEntries = ({ headerLines, entries }) => {
+  const pages = [];
+  const baseLines = headerLines.flatMap((line) => wrapText(line));
+  let current = [...baseLines];
+  let remaining = PDF_MAX_LINES - current.length - 1;
+
+  const pushNewPage = () => {
+    pages.push(current);
+    current = [...baseLines];
+    remaining = PDF_MAX_LINES - current.length - 1;
+  };
+
+  const normalizedEntries = (entries || []).map((entry) =>
+    (entry?.lines || []).flatMap((line) => wrapText(line)),
+  );
+
+  if (!normalizedEntries.length) {
+    current.push('No records matched the selected filters.');
+    pages.push(current);
+    return pages;
+  }
+
+  normalizedEntries.forEach((entryLines) => {
+    const block = [...entryLines, ''];
+
+    block.forEach((line) => {
+      if (remaining <= 0) {
+        pushNewPage();
+      }
+
+      current.push(line);
+      remaining -= 1;
+    });
+  });
+
+  if (current.length) {
+    pages.push(current);
+  }
+
+  return pages;
+};
+
+export const exportDealsPdf = ({
+  fileName,
+  title,
+  subtitleLines = [],
+  summaryLines = [],
+  entries = [],
+}) => {
+  const pages = paginateEntries({
+    headerLines: [
+      title,
+      ...subtitleLines,
+      '',
+      ...summaryLines,
+      '',
+      'Records',
+      '',
+    ],
+    entries,
+  }).map((pageLines, index, pageList) => [
+    ...pageLines,
+    `Page ${index + 1} of ${pageList.length}`,
+  ]);
+
+  const pdf = buildPdfDocument(pages);
+  const blob = new Blob([pdf], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 1000);
+};

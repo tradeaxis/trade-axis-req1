@@ -51,12 +51,14 @@ import {
   FolderPlus,
   MoreVertical,
   CalendarDays,
+  Download,
 } from 'lucide-react';
 
 import PriceChart from '../components/charts/PriceChart';
 import WalletPage from '../components/account/Wallet';
 import AdminUsers from '../components/admin/AdminUsers';
 import AdminPanel from '../components/admin/AdminPanel';
+import { exportDealsPdf } from '../utils/dealsPdfExport';
 
 // Desktop components
 import DesktopTerminal from '../components/mt5/DesktopTerminal';
@@ -3076,6 +3078,156 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     return (deals || []).filter((d) => d.symbol === dealsSymbolFilter);
   }, [deals, dealsSymbolFilter]);
 
+  const currentDealsSummary = useMemo(() => {
+    if (!dealsSummary) {
+      return null;
+    }
+
+    if (!dealsSymbolFilter) {
+      return dealsSummary;
+    }
+
+    const exitDeals = filteredDeals.filter((deal) => deal.source === 'trade' && deal.side === 'exit');
+
+    return {
+      totalProfit: exitDeals
+        .filter((deal) => Number(deal.amount || 0) > 0)
+        .reduce((sum, deal) => sum + Number(deal.amount || 0), 0),
+      totalLoss: Math.abs(
+        exitDeals
+          .filter((deal) => Number(deal.amount || 0) < 0)
+          .reduce((sum, deal) => sum + Number(deal.amount || 0), 0),
+      ),
+      totalDeposits: 0,
+      totalWithdrawals: 0,
+      totalCommission: filteredDeals.reduce(
+        (sum, deal) => sum + Number(deal.commission || deal.brokerage || 0),
+        0,
+      ),
+      balanceSettled: 0,
+      currentBalance: Number(dealsSummary.currentBalance || 0),
+    };
+  }, [dealsSummary, filteredDeals, dealsSymbolFilter]);
+
+  const formatPdfCurrency = (value) => {
+    const numericValue = Number(value || 0);
+    return `INR ${Math.abs(numericValue).toLocaleString('en-IN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  };
+
+  const formatSignedPdfCurrency = (value) => {
+    const numericValue = Number(value || 0);
+    const prefix = numericValue > 0 ? '+' : numericValue < 0 ? '-' : '';
+    return `${prefix}${formatPdfCurrency(numericValue)}`;
+  };
+
+  const formatPdfDateTime = (value) => {
+    if (!value) {
+      return 'Unknown Time';
+    }
+
+    return new Date(value).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+  };
+
+  const handleExportDealsPdf = () => {
+    if (!filteredDeals.length) {
+      toast.error('No deals available for this filter');
+      return;
+    }
+
+    const periodLabel =
+      HISTORY_PERIODS.find((periodOption) => periodOption.id === historyPeriod)?.label ||
+      historyPeriod;
+    const symbolLabel = dealsSymbolFilter
+      ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)
+      : 'All Symbols';
+    const exportedAt = new Date().toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+
+    const entries = filteredDeals.map((deal) => {
+      const commission = Number(deal.commission || deal.brokerage || 0);
+      const isEntryDeal = deal.source === 'trade' && deal.side === 'entry';
+      const rawAmount = Number(isEntryDeal ? 0 : (deal.amount ?? deal.profit ?? 0));
+      const dealTime = deal.time || deal.close_time || deal.open_time || deal.created_at;
+      const dealPrice = Number(deal.price || deal.open_price || deal.close_price || 0);
+      const dealLabel =
+        deal.dealLabel ||
+        (deal.type ? String(deal.type).replace(/_/g, ' ').toUpperCase() : 'DEAL');
+      const symbolLabelText = deal.symbol
+        ? formatDisplaySymbol(deal.symbol, allFuturesSymbols)
+        : dealLabel;
+
+      const lines = [`${formatPdfDateTime(dealTime)} | ${symbolLabelText} | ${dealLabel}`];
+      const metaParts = [];
+
+      if (deal.quantity !== null && deal.quantity !== undefined) {
+        metaParts.push(`Qty: ${deal.quantity}`);
+      }
+      if (dealPrice > 0) {
+        metaParts.push(`Price: ${dealPrice.toFixed(2)}`);
+      }
+      if (!isEntryDeal) {
+        metaParts.push(`Amount: ${formatSignedPdfCurrency(rawAmount)}`);
+      }
+      if (metaParts.length) {
+        lines.push(metaParts.join(' | '));
+      }
+      if (commission > 0) {
+        lines.push(`Commission: ${formatPdfCurrency(commission)}`);
+      }
+      if (deal.balance_after !== undefined && deal.balance_after !== null) {
+        lines.push(`Balance After: ${formatPdfCurrency(Number(deal.balance_after || 0))}`);
+      }
+      if (deal.description) {
+        lines.push(`Note: ${deal.description}`);
+      }
+
+      return { lines };
+    });
+
+    exportDealsPdf({
+      fileName: `trade-axis-deals-${String(historyPeriod).toLowerCase().replace(/[^a-z0-9]+/g, '-')}${
+        dealsSymbolFilter
+          ? `-${String(dealsSymbolFilter).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+          : ''
+      }.pdf`,
+      title: 'Trade Axis Deals Report',
+      subtitleLines: [
+        `Period: ${periodLabel}`,
+        `Symbol Filter: ${symbolLabel}`,
+        `Exported At: ${exportedAt}`,
+      ],
+      summaryLines: currentDealsSummary
+        ? [
+            `Profit: ${formatPdfCurrency(currentDealsSummary.totalProfit || 0)} | Loss: ${formatPdfCurrency(currentDealsSummary.totalLoss || 0)}`,
+            `Deposits: ${formatPdfCurrency(currentDealsSummary.totalDeposits || 0)} | Withdrawals: ${formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)}`,
+            `Commission: ${formatPdfCurrency(currentDealsSummary.totalCommission || 0)} | Balance Settled: ${formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)}`,
+            `Current Balance: ${formatPdfCurrency(currentDealsSummary.currentBalance || 0)}`,
+          ]
+        : [],
+      entries,
+    });
+
+    toast.success('Deals PDF exported');
+  };
+
   // ── Position aggregates for history ──
   const positionAggregates = useMemo(() => {
     const totalBuyQty = historyPositionGroups.reduce(
@@ -4305,50 +4457,6 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               className="text-xs font-medium"
               style={{ color: '#787b86' }}
             >
-              Margin
-            </div>
-            <div
-              className="font-semibold text-sm"
-              style={{ color: '#f5c542' }}
-            >
-              {formatINR(accountStats.margin)}
-            </div>
-          </div>
-          <div
-            className="p-2 rounded-lg"
-            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
-          >
-            <div
-              className="text-xs font-medium"
-              style={{ color: '#787b86' }}
-            >
-              Margin Level
-            </div>
-            <div
-              className="font-semibold text-sm"
-              style={{
-                color:
-                  accountStats.margin > 0
-                    ? (accountStats.marginLevel >= 100 ? '#26a69a' : '#ef5350')
-                    : '#787b86',
-              }}
-            >
-              {accountStats.margin > 0
-                ? `${accountStats.marginLevel.toFixed(2)}%`
-                : '0.00%'}
-            </div>
-            <div className="text-[10px] mt-1 leading-4" style={{ color: '#787b86' }}>
-              ..
-            </div>
-          </div>
-          <div
-            className="p-2 rounded-lg"
-            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
-          >
-            <div
-              className="text-xs font-medium"
-              style={{ color: '#787b86' }}
-            >
               Free Margin
             </div>
             <div
@@ -4377,6 +4485,41 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               {accountStats.credit >= 0 ? '+' : ''}
               {formatINR(accountStats.credit)}
             </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <div
+            className="px-3 py-2 rounded-lg flex items-center justify-between"
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
+          >
+            <span className="text-[11px] font-medium" style={{ color: '#787b86' }}>
+              Margin
+            </span>
+            <span className="font-semibold text-xs" style={{ color: '#f5c542' }}>
+              {formatINR(accountStats.margin)}
+            </span>
+          </div>
+          <div
+            className="px-3 py-2 rounded-lg flex items-center justify-between"
+            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
+          >
+            <span className="text-[11px] font-medium" style={{ color: '#787b86' }}>
+              Margin Level
+            </span>
+            <span
+              className="font-semibold text-xs"
+              style={{
+                color:
+                  accountStats.margin > 0
+                    ? (accountStats.marginLevel >= 100 ? '#26a69a' : '#ef5350')
+                    : '#787b86',
+              }}
+            >
+              {accountStats.margin > 0
+                ? `${accountStats.marginLevel.toFixed(2)}%`
+                : '0.00%'}
+            </span>
           </div>
         </div>
       </div>
@@ -5016,43 +5159,58 @@ const renderOrderConfirmation = () => {
           </div>
 
           {(historyViewMode === 'positions' || historyViewMode === 'deals') && (
-            <div className="relative" ref={historyViewMode === 'deals' ? dealsDropdownRef : historyDropdownRef}>
-              <button
-                onClick={() => {
-                  if (historyViewMode === 'deals') setShowDealsSymbolDropdown(!showDealsSymbolDropdown);
-                  else setShowHistorySymbolDropdown(!showHistorySymbolDropdown);
-                }}
-                className="w-full px-3 py-2 rounded-lg text-sm text-left flex items-center justify-between"
-                style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
-              >
-                <span>
-                  {historyViewMode === 'deals'
-                    ? (dealsSymbolFilter ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols) : 'All Symbols')
-                    : (historyLocalSymbolFilter ? formatDisplaySymbol(historyLocalSymbolFilter, allFuturesSymbols) : 'All Symbols')}
-                </span>
-                <ChevronDown size={16} color={textMuted} />
-              </button>
+            <div className="space-y-2">
+              <div className="relative" ref={historyViewMode === 'deals' ? dealsDropdownRef : historyDropdownRef}>
+                <button
+                  onClick={() => {
+                    if (historyViewMode === 'deals') setShowDealsSymbolDropdown(!showDealsSymbolDropdown);
+                    else setShowHistorySymbolDropdown(!showHistorySymbolDropdown);
+                  }}
+                  className="w-full px-3 py-2 rounded-lg text-sm text-left flex items-center justify-between"
+                  style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
+                >
+                  <span>
+                    {historyViewMode === 'deals'
+                      ? (dealsSymbolFilter ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols) : 'All Symbols')
+                      : (historyLocalSymbolFilter ? formatDisplaySymbol(historyLocalSymbolFilter, allFuturesSymbols) : 'All Symbols')}
+                  </span>
+                  <ChevronDown size={16} color={textMuted} />
+                </button>
 
-              {historyViewMode === 'positions' && showHistorySymbolDropdown && (
-                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
-                  <button onClick={() => { setHistoryLocalSymbolFilter(''); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !historyLocalSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
-                  {historyUniqueSymbols.map((sym) => (
-                    <button key={sym} onClick={() => { setHistoryLocalSymbolFilter(sym); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : textPrimary }}>
-                      {formatDisplaySymbol(sym, allFuturesSymbols)}
-                    </button>
-                  ))}
-                </div>
-              )}
+                {historyViewMode === 'positions' && showHistorySymbolDropdown && (
+                  <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
+                    <button onClick={() => { setHistoryLocalSymbolFilter(''); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !historyLocalSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
+                    {historyUniqueSymbols.map((sym) => (
+                      <button key={sym} onClick={() => { setHistoryLocalSymbolFilter(sym); setShowHistorySymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : textPrimary }}>
+                        {formatDisplaySymbol(sym, allFuturesSymbols)}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-              {historyViewMode === 'deals' && showDealsSymbolDropdown && (
-                <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
-                  <button onClick={() => { setDealsSymbolFilter(''); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !dealsSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
-                  {dealsUniqueSymbols.map((sym) => (
-                    <button key={sym} onClick={() => { setDealsSymbolFilter(sym); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: dealsSymbolFilter === sym ? '#2962ff' : textPrimary }}>
-                      {formatDisplaySymbol(sym, allFuturesSymbols)}
-                    </button>
-                  ))}
-                </div>
+                {historyViewMode === 'deals' && showDealsSymbolDropdown && (
+                  <div className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto" style={{ background: bgAlt, border: `1px solid ${border}` }}>
+                    <button onClick={() => { setDealsSymbolFilter(''); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: !dealsSymbolFilter ? '#2962ff' : textPrimary }}>All Symbols</button>
+                    {dealsUniqueSymbols.map((sym) => (
+                      <button key={sym} onClick={() => { setDealsSymbolFilter(sym); setShowDealsSymbolDropdown(false); }} className="w-full px-3 py-2 text-left text-sm hover:bg-white/5" style={{ color: dealsSymbolFilter === sym ? '#2962ff' : textPrimary }}>
+                        {formatDisplaySymbol(sym, allFuturesSymbols)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {historyViewMode === 'deals' && (
+                <button
+                  type="button"
+                  onClick={handleExportDealsPdf}
+                  disabled={!filteredDeals.length}
+                  className="w-full px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
+                  style={{ background: bgAlt, border: `1px solid ${border}`, color: '#2962ff' }}
+                >
+                  <Download size={16} />
+                  Export PDF
+                </button>
               )}
             </div>
           )}
@@ -6042,6 +6200,29 @@ const renderOrderConfirmation = () => {
                 <UserPlus size={18} />
                 Add Another Account
               </button>
+            </div>
+          </div>
+
+          <div
+            className="p-4 rounded-xl border flex items-center gap-3"
+            style={{ background: bgAlt, border: `1px solid ${border}` }}
+          >
+            <img
+              src="/arisetech-logo.png"
+              alt="Arise Tech Services"
+              className="h-11 w-11 object-contain rounded-lg"
+              onError={(e) => { e.target.style.display = 'none'; }}
+            />
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.18em]" style={{ color: textMuted }}>
+                Developed By
+              </div>
+              <div className="text-sm font-semibold" style={{ color: textPrimary }}>
+                Arise Tech Services
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: textMuted }}>
+                Application delivery and technology support
+              </div>
             </div>
           </div>
 

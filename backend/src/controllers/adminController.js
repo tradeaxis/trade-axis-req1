@@ -25,6 +25,7 @@ const buildAdminTradeComment = (prefix, note) => (
 const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
 const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
 const QR_DEPOSIT_DESCRIPTION_PREFIX = 'QR Deposit Request';
+const REJECTED_TRANSACTION_STATUSES = ['rejected', 'failed'];
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
@@ -68,6 +69,84 @@ const isQrDepositTransaction = (txn = {}) => {
 
   const description = `${txn.description || ''} ${txn.note || ''}`.toLowerCase();
   return description.includes(QR_DEPOSIT_DESCRIPTION_PREFIX.toLowerCase());
+};
+
+const isCheckConstraintError = (error, expectedConstraint = '') => {
+  const message = [error?.message, error?.details, error?.hint]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (error?.code === '23514') {
+    return !expectedConstraint || message.includes(String(expectedConstraint).toLowerCase());
+  }
+
+  return (
+    message.includes('check constraint') &&
+    (!expectedConstraint || message.includes(String(expectedConstraint).toLowerCase()))
+  );
+};
+
+const getTransactionStatusAliases = (status) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized || normalized === 'all') {
+    return [];
+  }
+
+  if (REJECTED_TRANSACTION_STATUSES.includes(normalized)) {
+    return REJECTED_TRANSACTION_STATUSES;
+  }
+
+  return [normalized];
+};
+
+const applyTransactionStatusFilter = (query, status) => {
+  const statuses = getTransactionStatusAliases(status);
+  if (!statuses.length) {
+    return query;
+  }
+
+  if (statuses.length === 1) {
+    return query.eq('status', statuses[0]);
+  }
+
+  return query.in('status', statuses);
+};
+
+const matchesTransactionStatus = (candidateStatus, expectedStatus) => {
+  const expectedValues = getTransactionStatusAliases(expectedStatus);
+  if (!expectedValues.length) {
+    return true;
+  }
+
+  return expectedValues.includes(String(candidateStatus || '').trim().toLowerCase());
+};
+
+const updateTransactionAsRejected = async (id, payload = {}) => {
+  let lastError = null;
+  const processedAt = payload.processed_at || new Date().toISOString();
+
+  for (const status of REJECTED_TRANSACTION_STATUSES) {
+    const { error } = await supabase
+      .from('transactions')
+      .update({
+        ...payload,
+        status,
+        processed_at: processedAt,
+      })
+      .eq('id', id);
+
+    if (!error) {
+      return { status, processedAt };
+    }
+
+    lastError = error;
+    if (!isCheckConstraintError(error, 'transactions_status_check')) {
+      throw error;
+    }
+  }
+
+  throw lastError;
 };
 
 const normalizeQrSettings = (raw = {}, fallback = {}) => {
@@ -972,19 +1051,18 @@ exports.listWithdrawals = async (req, res) => {
   try {
     const { status } = req.query;
 
-    let query = supabase
-      .from('transactions')
-      .select(`
-        *,
-        users:user_id (email, first_name, last_name, login_id),
-        accounts:account_id (account_number, is_demo)
-      `)
-      .or('type.eq.withdrawal,transaction_type.eq.withdrawal')
-      .order('created_at', { ascending: false });
-
-    if (status && status !== 'all') {
-      query = query.eq('status', status);
-    }
+    const query = applyTransactionStatusFilter(
+      supabase
+        .from('transactions')
+        .select(`
+          *,
+          users:user_id (email, first_name, last_name, login_id),
+          accounts:account_id (account_number, is_demo)
+        `)
+        .or('type.eq.withdrawal,transaction_type.eq.withdrawal')
+        .order('created_at', { ascending: false }),
+      status,
+    );
 
     const { data, error } = await query;
 
@@ -1084,16 +1162,12 @@ exports.rejectWithdrawal = async (req, res) => {
         .eq('id', txn.account_id);
     }
 
-    const { error: updateError } = await supabase
-      .from('transactions')
-      .update({
-        status: 'rejected',
-        admin_note: adminNote || 'Rejected by admin',
-        processed_at: new Date().toISOString(),
-      })
-      .eq('id', id);
-
-    if (updateError) throw updateError;
+    await updateTransactionAsRejected(id, {
+      admin_note: adminNote || 'Rejected by admin',
+      balance_after: account
+        ? parseFloat(account.balance || 0) + parseFloat(txn.amount || 0)
+        : txn.balance_after,
+    });
 
     res.json({ success: true, message: 'Withdrawal rejected and amount refunded' });
   } catch (error) {
@@ -1121,7 +1195,7 @@ exports.listQrDeposits = async (req, res) => {
 
     const deposits = (data || [])
       .filter((txn) => isQrDepositTransaction(txn))
-      .filter((txn) => !status || status === 'all' || String(txn.status || '').toLowerCase() === String(status).toLowerCase())
+      .filter((txn) => matchesTransactionStatus(txn.status, status))
       .map((txn) => ({
       ...txn,
       user_email: txn.users?.email || '',
@@ -1262,16 +1336,9 @@ exports.rejectQrDeposit = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Transaction is not pending' });
     }
 
-    const { error: updateError } = await supabase
-      .from('transactions')
-      .update({
-        status: 'rejected',
-        admin_note: adminNote || 'QR deposit rejected by admin',
-        processed_at: new Date().toISOString(),
-      })
-      .eq('id', id);
-
-    if (updateError) throw updateError;
+    await updateTransactionAsRejected(id, {
+      admin_note: adminNote || 'QR deposit rejected by admin',
+    });
 
     res.json({ success: true, message: 'QR deposit rejected' });
   } catch (error) {
@@ -2002,7 +2069,7 @@ exports.cleanupOldData = async (req, res) => {
     const { data: txns, error: txnErr } = await supabase
       .from('transactions')
       .delete()
-      .in('status', ['completed', 'rejected'])
+      .in('status', ['completed', ...REJECTED_TRANSACTION_STATUSES])
       .lt('created_at', cutoff)
       .select('id');
 

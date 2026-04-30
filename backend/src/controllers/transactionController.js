@@ -6,6 +6,7 @@ const { getTradeEntryEvents } = require('../utils/tradeCommentEvents');
 const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
 const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
 const QR_DEPOSIT_DESCRIPTION_PREFIX = 'QR Deposit Request';
+const REJECTED_TRANSACTION_STATUSES = ['rejected', 'failed'];
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
@@ -266,6 +267,19 @@ const buildSettlementDeals = (settlements = []) => {
     .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
 };
 
+const getTransactionStatusAliases = (status) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+
+  if (REJECTED_TRANSACTION_STATUSES.includes(normalized)) {
+    return REJECTED_TRANSACTION_STATUSES;
+  }
+
+  return [normalized];
+};
+
 // GET /api/transactions/razorpay-key (public)
 const getRazorpayKey = (req, res) => {
   return res.status(200).json({
@@ -447,7 +461,13 @@ const getTransactions = async (req, res) => {
 
     if (accountId) query = query.eq('account_id', accountId);
     if (type) query = query.eq('transaction_type', type);
-    if (status) query = query.eq('status', status);
+
+    const statusValues = getTransactionStatusAliases(status);
+    if (statusValues.length === 1) {
+      query = query.eq('status', statusValues[0]);
+    } else if (statusValues.length > 1) {
+      query = query.in('status', statusValues);
+    }
 
     const { data, error } = await query;
     if (error) throw error;

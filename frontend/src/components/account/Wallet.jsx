@@ -125,6 +125,7 @@ const Wallet = ({ selectedAccount, user, intent = 'deposit' }) => {
       case 'pending':
       case 'processing':
         return <Clock size={16} style={{ color: '#ff9800' }} />;
+      case 'rejected':
       case 'failed':
       case 'cancelled':
         return <XCircle size={16} style={{ color: '#ef5350' }} />;

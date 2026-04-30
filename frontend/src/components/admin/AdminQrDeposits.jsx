@@ -51,15 +51,17 @@ const getStatusBadge = (status) => {
     processing: { bg: '#2962ff20', color: '#2962ff' },
     completed: { bg: '#26a69a20', color: '#26a69a' },
     rejected: { bg: '#ef535020', color: '#ef5350' },
+    failed: { bg: '#ef535020', color: '#ef5350' },
   };
   const style = styles[normalized] || styles.pending;
+  const label = normalized === 'failed' ? 'rejected' : normalized;
 
   return (
     <span
       className="px-2 py-1 rounded text-xs font-medium"
       style={{ background: style.bg, color: style.color }}
     >
-      {normalized.toUpperCase()}
+      {label.toUpperCase()}
     </span>
   );
 };

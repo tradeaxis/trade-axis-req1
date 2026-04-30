@@ -66,6 +66,7 @@ export default function AdminWithdrawals() {
   };
 
   const getStatusBadge = (status) => {
+    const normalized = String(status || 'pending').toLowerCase();
     const styles = {
       pending: { bg: '#f5c54220', color: '#f5c542' },
       processing: { bg: '#2962ff20', color: '#2962ff' },
@@ -73,14 +74,15 @@ export default function AdminWithdrawals() {
       rejected: { bg: '#ef535020', color: '#ef5350' },
       failed: { bg: '#ef535020', color: '#ef5350' },
     };
-    const style = styles[status] || styles.pending;
+    const style = styles[normalized] || styles.pending;
+    const label = normalized === 'failed' ? 'rejected' : normalized;
     
     return (
       <span 
         className="px-2 py-1 rounded text-xs font-medium"
         style={{ background: style.bg, color: style.color }}
       >
-        {status.toUpperCase()}
+        {label.toUpperCase()}
       </span>
     );
   };

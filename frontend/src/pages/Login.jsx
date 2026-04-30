@@ -142,6 +142,29 @@ const Login = () => {
           Don't have a Login ID?<br />
           Contact your administrator.
         </p>
+
+        <div
+          className="mt-5 pt-4 border-t flex items-center justify-center gap-3"
+          style={{ borderColor: '#363a45' }}
+        >
+          <img
+            src="/arisetech-logo.png"
+            alt="Arise Tech Services"
+            className="h-10 w-10 object-contain"
+            onError={(e) => { e.target.style.display = 'none'; }}
+          />
+          <div className="text-left">
+            <div
+              className="text-[10px] uppercase tracking-[0.18em]"
+              style={{ color: '#787b86' }}
+            >
+              Developed By
+            </div>
+            <div className="text-sm font-semibold" style={{ color: '#d1d4dc' }}>
+              Arise Tech Services
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
