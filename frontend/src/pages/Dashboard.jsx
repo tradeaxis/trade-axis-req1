@@ -3139,7 +3139,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     });
   };
 
-  const handleExportDealsPdf = () => {
+  const handleExportDealsPdf = async () => {
     if (!filteredDeals.length) {
       toast.error('No deals available for this filter');
       return;
@@ -3202,30 +3202,45 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       return { lines };
     });
 
-    exportDealsPdf({
-      fileName: `trade-axis-deals-${String(historyPeriod).toLowerCase().replace(/[^a-z0-9]+/g, '-')}${
-        dealsSymbolFilter
-          ? `-${String(dealsSymbolFilter).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
-          : ''
-      }.pdf`,
-      title: 'Trade Axis Deals Report',
-      subtitleLines: [
-        `Period: ${periodLabel}`,
-        `Symbol Filter: ${symbolLabel}`,
-        `Exported At: ${exportedAt}`,
-      ],
-      summaryLines: currentDealsSummary
-        ? [
-            `Profit: ${formatPdfCurrency(currentDealsSummary.totalProfit || 0)} | Loss: ${formatPdfCurrency(currentDealsSummary.totalLoss || 0)}`,
-            `Deposits: ${formatPdfCurrency(currentDealsSummary.totalDeposits || 0)} | Withdrawals: ${formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)}`,
-            `Commission: ${formatPdfCurrency(currentDealsSummary.totalCommission || 0)} | Balance Settled: ${formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)}`,
-            `Current Balance: ${formatPdfCurrency(currentDealsSummary.currentBalance || 0)}`,
-          ]
-        : [],
-      entries,
-    });
+    try {
+      const result = await exportDealsPdf({
+        fileName: `trade-axis-deals-${String(historyPeriod).toLowerCase().replace(/[^a-z0-9]+/g, '-')}${
+          dealsSymbolFilter
+            ? `-${String(dealsSymbolFilter).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+            : ''
+        }.pdf`,
+        title: 'Trade Axis Deals Report',
+        subtitleLines: [
+          `Period: ${periodLabel}`,
+          `Symbol Filter: ${symbolLabel}`,
+          `Exported At: ${exportedAt}`,
+        ],
+        summaryLines: currentDealsSummary
+          ? [
+              `Profit: ${formatPdfCurrency(currentDealsSummary.totalProfit || 0)} | Loss: ${formatPdfCurrency(currentDealsSummary.totalLoss || 0)}`,
+              `Deposits: ${formatPdfCurrency(currentDealsSummary.totalDeposits || 0)} | Withdrawals: ${formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)}`,
+              `Commission: ${formatPdfCurrency(currentDealsSummary.totalCommission || 0)} | Balance Settled: ${formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)}`,
+              `Current Balance: ${formatPdfCurrency(currentDealsSummary.currentBalance || 0)}`,
+            ]
+          : [],
+        entries,
+      });
 
-    toast.success('Deals PDF exported');
+      toast.success(
+        result?.method === 'share'
+          ? 'Deals PDF ready to share'
+          : result?.method === 'preview'
+          ? 'Deals PDF opened'
+          : 'Deals PDF download started',
+      );
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        return;
+      }
+
+      console.error('Deals PDF export failed:', error);
+      toast.error('Failed to export deals PDF');
+    }
   };
 
   // ── Position aggregates for history ──
@@ -5159,8 +5174,17 @@ const renderOrderConfirmation = () => {
           </div>
 
           {(historyViewMode === 'positions' || historyViewMode === 'deals') && (
-            <div className="space-y-2">
-              <div className="relative" ref={historyViewMode === 'deals' ? dealsDropdownRef : historyDropdownRef}>
+            <div
+              className={
+                historyViewMode === 'deals'
+                  ? 'flex items-stretch gap-2'
+                  : 'space-y-2'
+              }
+            >
+              <div
+                className={historyViewMode === 'deals' ? 'relative flex-1 min-w-0' : 'relative'}
+                ref={historyViewMode === 'deals' ? dealsDropdownRef : historyDropdownRef}
+              >
                 <button
                   onClick={() => {
                     if (historyViewMode === 'deals') setShowDealsSymbolDropdown(!showDealsSymbolDropdown);
@@ -5205,11 +5229,11 @@ const renderOrderConfirmation = () => {
                   type="button"
                   onClick={handleExportDealsPdf}
                   disabled={!filteredDeals.length}
-                  className="w-full px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
+                  className="px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60 shrink-0"
                   style={{ background: bgAlt, border: `1px solid ${border}`, color: '#2962ff' }}
                 >
                   <Download size={16} />
-                  Export PDF
+                  <span className="hidden sm:inline">Export PDF</span>
                 </button>
               )}
             </div>

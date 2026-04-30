@@ -9,6 +9,17 @@ const PDF_WRAP_AT = 88;
 const textEncoder = new TextEncoder();
 
 const byteLength = (value) => textEncoder.encode(value).length;
+const toBase64 = (value) => window.btoa(value);
+
+const isMobileLikeDevice = () => {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') {
+    return false;
+  }
+
+  const agent = String(navigator.userAgent || '').toLowerCase();
+  const touchCapable = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  return /android|iphone|ipad|ipod|mobile/i.test(agent) || (touchCapable && window.innerWidth < 1024);
+};
 
 const escapePdfText = (value) =>
   String(value ?? '')
@@ -155,7 +166,7 @@ const paginateEntries = ({ headerLines, entries }) => {
   return pages;
 };
 
-export const exportDealsPdf = ({
+export const exportDealsPdf = async ({
   fileName,
   title,
   subtitleLines = [],
@@ -180,11 +191,45 @@ export const exportDealsPdf = ({
 
   const pdf = buildPdfDocument(pages);
   const blob = new Blob([pdf], { type: 'application/pdf' });
+  const file = typeof File === 'function'
+    ? new File([blob], fileName, { type: 'application/pdf' })
+    : null;
+
+  if (
+    file &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function' &&
+    typeof navigator.canShare === 'function' &&
+    navigator.canShare({ files: [file] })
+  ) {
+    await navigator.share({
+      title,
+      files: [file],
+    });
+    return { method: 'share' };
+  }
+
+  const dataUrl = `data:application/pdf;base64,${toBase64(pdf)}`;
+
+  if (isMobileLikeDevice()) {
+    const previewLink = document.createElement('a');
+    previewLink.href = dataUrl;
+    previewLink.target = '_blank';
+    previewLink.rel = 'noopener noreferrer';
+    previewLink.download = fileName;
+    document.body.appendChild(previewLink);
+    previewLink.click();
+    document.body.removeChild(previewLink);
+    return { method: 'preview' };
+  }
+
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
 
   link.href = url;
   link.download = fileName;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -192,4 +237,6 @@ export const exportDealsPdf = ({
   window.setTimeout(() => {
     URL.revokeObjectURL(url);
   }, 1000);
+
+  return { method: 'download' };
 };
