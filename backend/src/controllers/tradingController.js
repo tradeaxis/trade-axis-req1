@@ -11,6 +11,7 @@ const {
   fitTradeComment,
   mergeTradeCommentEvents,
 } = require('../utils/tradeCommentEvents');
+const { buildOpenTradeSnapshots } = require('../services/openTradeSnapshot');
 
 // ─────────────────────────────────────────────
 //  HELPERS
@@ -70,7 +71,9 @@ exports.getPositions = async (req, res) => {
       .order('open_time', { ascending: false });
     if (error) throw error;
 
-    res.json({ success: true, data: trades || [] });
+    const liveTrades = await buildOpenTradeSnapshots(trades || []);
+
+    res.json({ success: true, data: liveTrades });
   } catch (err) {
     console.error('Get positions error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch positions' });

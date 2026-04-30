@@ -10,6 +10,7 @@ const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
 } = require('../config/leverageOptions');
+const { buildOpenTradeSnapshots } = require('../services/openTradeSnapshot');
 const { fitTradeComment } = require('../utils/tradeCommentEvents');
 
 // ============ HELPER: Generate Random Password ============
@@ -20,6 +21,202 @@ const generateTempPassword = () => {
 const buildAdminTradeComment = (prefix, note) => (
   fitTradeComment(`${prefix}: ${note || 'Manual admin action'}`)
 );
+
+const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
+
+const firstNonEmptyString = (...values) => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return '';
+};
+
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on', 'enabled', 'active'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off', 'disabled', 'inactive'].includes(normalized)) return false;
+  }
+
+  return fallback;
+};
+
+const parseAppSettingValue = (value) => {
+  if (typeof value !== 'string') {
+    return value ?? null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return value;
+  }
+};
+
+const normalizeQrSettings = (raw = {}, fallback = {}) => {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw
+    : {};
+  const base = fallback && typeof fallback === 'object' && !Array.isArray(fallback)
+    ? fallback
+    : {};
+
+  const qrImage = firstNonEmptyString(
+    source.qrImage,
+    source.qr_image,
+    source.qrImageUrl,
+    source.qr_image_url,
+    source.image,
+    source.imageUrl,
+    source.image_url,
+    typeof raw === 'string' ? raw : '',
+    base.qrImage,
+    base.qr_image,
+    base.qrImageUrl,
+    base.qr_image_url,
+    base.image,
+  );
+
+  const upiId = firstNonEmptyString(
+    source.upiId,
+    source.upi_id,
+    base.upiId,
+    base.upi_id,
+  );
+  const merchantName = firstNonEmptyString(
+    source.merchantName,
+    source.merchant_name,
+    source.accountHolderName,
+    source.account_holder_name,
+    base.merchantName,
+    base.merchant_name,
+    base.accountHolderName,
+  );
+  const accountName = firstNonEmptyString(
+    source.accountName,
+    source.account_name,
+    source.accountHolderName,
+    source.account_holder_name,
+    base.accountName,
+    base.account_name,
+    base.accountHolderName,
+  );
+  const bankName = firstNonEmptyString(
+    source.bankName,
+    source.bank_name,
+    base.bankName,
+    base.bank_name,
+  );
+  const accountNumber = firstNonEmptyString(
+    source.accountNumber,
+    source.account_number,
+    base.accountNumber,
+    base.account_number,
+  );
+  const ifscCode = firstNonEmptyString(
+    source.ifscCode,
+    source.ifsc_code,
+    base.ifscCode,
+    base.ifsc_code,
+  );
+  const instructions = firstNonEmptyString(
+    source.instructions,
+    source.note,
+    source.notes,
+    source.description,
+    base.instructions,
+    base.note,
+    base.notes,
+  );
+  const phoneNumber = firstNonEmptyString(
+    source.phoneNumber,
+    source.phone_number,
+    source.whatsappNumber,
+    source.whatsapp_number,
+    base.phoneNumber,
+    base.phone_number,
+  );
+  const enabled = toBoolean(
+    source.enabled ?? source.isEnabled ?? source.active,
+    toBoolean(base.enabled ?? base.isEnabled ?? base.active, !!(qrImage || upiId)),
+  );
+
+  return {
+    ...base,
+    ...source,
+    enabled,
+    isEnabled: enabled,
+    active: enabled,
+    qrImage,
+    qr_image: qrImage,
+    qrImageUrl: qrImage,
+    qr_image_url: qrImage,
+    image: qrImage,
+    image_url: qrImage,
+    upiId,
+    upi_id: upiId,
+    merchantName,
+    merchant_name: merchantName,
+    accountName,
+    account_name: accountName,
+    accountHolderName: accountName,
+    account_holder_name: accountName,
+    bankName,
+    bank_name: bankName,
+    accountNumber,
+    account_number: accountNumber,
+    ifscCode,
+    ifsc_code: ifscCode,
+    instructions,
+    note: instructions,
+    notes: instructions,
+    phoneNumber,
+    phone_number: phoneNumber,
+  };
+};
+
+const readQrSettings = async () => {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('key, value')
+    .in('key', QR_SETTINGS_KEYS);
+
+  if (error) throw error;
+
+  const settingsByKey = new Map((data || []).map((row) => [row.key, parseAppSettingValue(row.value)]));
+
+  for (const key of QR_SETTINGS_KEYS) {
+    const value = settingsByKey.get(key);
+    if (value) {
+      return normalizeQrSettings(value);
+    }
+  }
+
+  return normalizeQrSettings({});
+};
+
+const saveQrSettingsRecord = async (settings) => {
+  const now = new Date().toISOString();
+  const value = JSON.stringify(settings);
+
+  for (const key of QR_SETTINGS_KEYS) {
+    const { error } = await supabase
+      .from('app_settings')
+      .upsert(
+        { key, value, updated_at: now },
+        { onConflict: 'key' },
+      );
+
+    if (error) throw error;
+  }
+
+  return settings;
+};
 
 const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toISOString()) => {
   const { data: account, error: accountError } = await supabase
@@ -174,7 +371,7 @@ exports.createUser = async (req, res) => {
       phone, 
       email,
       role = 'user',
-      leverage = 300,
+      leverage = 30,
       brokerageRate = 0.0006,
       maxSavedAccounts = 10,
       demoBalance = 100000,
@@ -182,7 +379,7 @@ exports.createUser = async (req, res) => {
       createLive = true,
       liquidationType = 'liquidate',
     } = req.body;
-    const leverageNum = Number(leverage) || 300;
+    const leverageNum = Number(leverage) || 30;
     const allowedLeverageOptions = getAllowedLeverageOptions();
 
     if (!loginId || !loginId.trim()) {
@@ -892,6 +1089,75 @@ exports.rejectWithdrawal = async (req, res) => {
   }
 };
 
+exports.listQrDeposits = async (req, res) => {
+  try {
+    const { status } = req.query;
+
+    let query = supabase
+      .from('transactions')
+      .select(`
+        *,
+        users:user_id (email, first_name, last_name, login_id),
+        accounts:account_id (account_number, is_demo)
+      `)
+      .eq('type', 'deposit')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const deposits = (data || []).map((txn) => ({
+      ...txn,
+      user_email: txn.users?.email || '',
+      user_name: txn.users
+        ? `${txn.users.first_name || ''} ${txn.users.last_name || ''}`.trim()
+        : '',
+      user_login_id: txn.users?.login_id || '',
+      account_number: txn.accounts?.account_number || '',
+      is_demo: txn.accounts?.is_demo || false,
+    }));
+
+    res.json({ success: true, data: deposits, deposits });
+  } catch (error) {
+    console.error('listQrDeposits error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getQrSettings = async (req, res) => {
+  try {
+    const settings = await readQrSettings();
+    res.json({ success: true, data: settings, settings });
+  } catch (error) {
+    console.error('getQrSettings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveQrSettings = async (req, res) => {
+  try {
+    const existingSettings = await readQrSettings();
+    const payload = req.body && typeof req.body === 'object' ? req.body : {};
+    const settings = normalizeQrSettings(payload, existingSettings);
+    const savedSettings = await saveQrSettingsRecord(settings);
+
+    res.json({
+      success: true,
+      message: 'QR settings saved successfully',
+      data: savedSettings,
+      settings: savedSettings,
+    });
+  } catch (error) {
+    console.error('saveQrSettings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ============ PENDING ORDER STUBS ============
 exports.modifyPendingOrder = async (req, res) => {
   res.json({ success: true, message: 'Not implemented' });
@@ -1267,7 +1533,7 @@ exports.getAllOpenPositions = async (req, res) => {
   try {
     const { data: trades, error } = await supabase
       .from('trades')
-      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time, stop_loss, take_profit, comment')
+      .select('id, symbol, exchange, trade_type, quantity, open_price, current_price, profit, margin, brokerage, buy_brokerage, user_id, account_id, open_time, stop_loss, take_profit, comment')
       .eq('status', 'open')
       .order('open_time', { ascending: false })
       .limit(500);
@@ -1288,7 +1554,9 @@ exports.getAllOpenPositions = async (req, res) => {
       });
     }
 
-    const enriched = (trades || []).map((t) => ({
+    const liveTrades = await buildOpenTradeSnapshots(trades || []);
+
+    const enriched = liveTrades.map((t) => ({
       ...t,
       user_login_id: userMap[t.user_id] || '—',
     }));
@@ -1321,14 +1589,16 @@ exports.getUserOpenPositions = async (req, res) => {
 
     const { data: trades, error } = await supabase
       .from('trades')
-      .select('id, symbol, trade_type, quantity, open_price, current_price, profit, margin, user_id, account_id, open_time, stop_loss, take_profit, comment')
+      .select('id, symbol, exchange, trade_type, quantity, open_price, current_price, profit, margin, brokerage, buy_brokerage, user_id, account_id, open_time, stop_loss, take_profit, comment')
       .eq('status', 'open')
       .eq('user_id', userId)
       .order('open_time', { ascending: false });
 
     if (error) throw error;
 
-    const enriched = (trades || []).map((t) => ({
+    const liveTrades = await buildOpenTradeSnapshots(trades || []);
+
+    const enriched = liveTrades.map((t) => ({
       ...t,
       user_login_id: user.login_id || '—',
       user_name: `${user.first_name || ''} ${user.last_name || ''}`.trim(),

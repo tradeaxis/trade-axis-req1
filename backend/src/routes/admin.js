@@ -32,6 +32,16 @@ router.delete('/positions/:tradeId', adminAuth, adminController.adminDeletePosit
 router.get('/withdrawals', adminAuth, adminController.listWithdrawals);
 router.post('/withdrawals/:id/approve', adminAuth, adminController.approveWithdrawal);
 router.post('/withdrawals/:id/reject', adminAuth, adminController.rejectWithdrawal);
+router.get('/qr-deposits', adminAuth, adminController.listQrDeposits);
+router.get('/qr/deposits', adminAuth, adminController.listQrDeposits);
+router.get('/qr-settings', adminAuth, adminController.getQrSettings);
+router.get('/qr/settings', adminAuth, adminController.getQrSettings);
+router.post('/qr-settings', adminAuth, adminController.saveQrSettings);
+router.post('/qr/settings', adminAuth, adminController.saveQrSettings);
+router.put('/qr-settings', adminAuth, adminController.saveQrSettings);
+router.put('/qr/settings', adminAuth, adminController.saveQrSettings);
+router.patch('/qr-settings', adminAuth, adminController.saveQrSettings);
+router.patch('/qr/settings', adminAuth, adminController.saveQrSettings);
 
 // ================= MARKET / KITE ROUTES =================
 router.get('/kite/login-url', adminAuth, adminController.getKiteLoginUrl);

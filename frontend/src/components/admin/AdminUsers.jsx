@@ -47,7 +47,7 @@ export default function AdminUsers() {
     email: '',
     role: 'user',
     password: '',
-    leverage: 300,
+    leverage: 30,
     maxSavedAccounts: 10,
     brokerageRate: '0.06',
     demoBalance: 100000,
@@ -91,7 +91,7 @@ export default function AdminUsers() {
           ...prev,
           leverage: options.includes(prev.leverage)
             ? prev.leverage
-            : (options.includes(300) ? 300 : options[options.length - 1] || prev.leverage),
+            : (options.includes(30) ? 30 : options[0] || prev.leverage),
         }));
       } catch (_) {
         setLeverageOptions(DEFAULT_LEVERAGE_OPTIONS);
@@ -162,7 +162,7 @@ export default function AdminUsers() {
           email: '',
           role: 'user',
           password: '',
-          leverage: leverageOptions.includes(300) ? 300 : leverageOptions[leverageOptions.length - 1],
+          leverage: leverageOptions.includes(30) ? 30 : leverageOptions[0] || 30,
           maxSavedAccounts: 10,
           brokerageRate: '0.06',
           demoBalance: 100000,
