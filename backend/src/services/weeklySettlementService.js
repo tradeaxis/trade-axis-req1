@@ -62,7 +62,9 @@ class WeeklySettlementService {
     // Filter demo unless SETTLE_DEMO=true
     const openTrades = settleDemo
       ? trades
-      : trades.filter((t) => !t.accounts?.is_demo);
+      : trades.filter(
+          (t) => !t.accounts?.is_demo && String(t.settlement_week || '') !== settlementWeek,
+        );
 
     if (openTrades.length === 0) {
       console.log('ℹ️  No live-account trades to settle.');
@@ -118,7 +120,7 @@ class WeeklySettlementService {
           const grossPnL = (closePrice - openPrice) * direction * qty;
 
           // ── A) Close the old trade ──
-          const { error: closeErr } = await supabase
+          const { data: closedTrade, error: closeErr } = await supabase
             .from('trades')
             .update({
               close_price: closePrice,
@@ -132,11 +134,19 @@ class WeeklySettlementService {
               settlement_week: settlementWeek,
               comment: `Weekly settlement close. Gross P&L: ${grossPnL.toFixed(2)}`,
             })
-            .eq('id', trade.id);
+            .eq('id', trade.id)
+            .eq('status', 'open')
+            .select('id')
+            .maybeSingle();
 
           if (closeErr) {
             console.error(`  ❌ Close trade ${trade.id}:`, closeErr.message);
             errors.push({ tradeId: trade.id, error: closeErr.message });
+            continue;
+          }
+
+          if (!closedTrade?.id) {
+            console.log(`  ℹ️ Skipping ${trade.symbol} #${trade.id} — already settled in another run`);
             continue;
           }
 

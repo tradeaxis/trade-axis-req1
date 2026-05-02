@@ -3,14 +3,40 @@ import { create } from 'zustand';
 import api from '../services/api';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
+const TRADING_CACHE_KEY = 'trade_axis_trading_cache';
+const readTradingCache = () => {
+  try {
+    return JSON.parse(localStorage.getItem(TRADING_CACHE_KEY) || 'null');
+  } catch (_) {
+    return null;
+  }
+};
+
+const writeTradingCache = (state) => {
+  localStorage.setItem(
+    TRADING_CACHE_KEY,
+    JSON.stringify({
+      openTrades: state.openTrades || [],
+      pendingOrders: state.pendingOrders || [],
+      pendingOrderHistory: state.pendingOrderHistory || [],
+      tradeHistory: state.tradeHistory || [],
+      deals: state.deals || [],
+      dealsSummary: state.dealsSummary || null,
+      lastSyncedAt: state.lastSyncedAt || new Date().toISOString(),
+    }),
+  );
+};
+
+const initialTradingCache = readTradingCache();
 
 const useTradingStore = create((set, get) => ({
-  openTrades: [],
-  pendingOrders: [],
-  pendingOrderHistory: [],
-  tradeHistory: [],
-  deals: [],
-  dealsSummary: null,
+  openTrades: initialTradingCache?.openTrades || [],
+  pendingOrders: initialTradingCache?.pendingOrders || [],
+  pendingOrderHistory: initialTradingCache?.pendingOrderHistory || [],
+  tradeHistory: initialTradingCache?.tradeHistory || [],
+  deals: initialTradingCache?.deals || [],
+  dealsSummary: initialTradingCache?.dealsSummary || null,
+  lastSyncedAt: initialTradingCache?.lastSyncedAt || null,
   loading: false,
   error: null,
 
@@ -20,7 +46,13 @@ const useTradingStore = create((set, get) => ({
     try {
       const response = await api.get(`/trading/positions/${accountId}`);
       if (response.data.success) {
-        set({ openTrades: response.data.data || [], loading: false });
+        const nextState = {
+          openTrades: response.data.data || [],
+          loading: false,
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeTradingCache({ ...get(), ...nextState });
+        set(nextState);
       } else {
         set({ error: response.data.message, loading: false });
       }
@@ -35,7 +67,12 @@ const useTradingStore = create((set, get) => ({
     try {
       const response = await api.get(`/trading/pending-orders/${accountId}`);
       if (response.data.success) {
-        set({ pendingOrders: response.data.data || [] });
+        const nextState = {
+          pendingOrders: response.data.data || [],
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeTradingCache({ ...get(), ...nextState });
+        set(nextState);
       }
     } catch (error) {
       console.error('Fetch pending orders error:', error);
@@ -49,7 +86,13 @@ const useTradingStore = create((set, get) => ({
       const params = new URLSearchParams({ accountId, ...filters });
       const response = await api.get(`/trading/history?${params}`);
       if (response.data.success) {
-        set({ tradeHistory: response.data.data || [], loading: false });
+        const nextState = {
+          tradeHistory: response.data.data || [],
+          loading: false,
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeTradingCache({ ...get(), ...nextState });
+        set(nextState);
       } else {
         set({ error: response.data.message, loading: false });
       }
@@ -65,13 +108,20 @@ const useTradingStore = create((set, get) => ({
     try {
       const response = await api.get(`/transactions/deals?accountId=${accountId}&period=${period}`);
       if (response.data.success) {
-        set({ deals: response.data.data.deals || [], dealsSummary: response.data.data.summary || null, loading: false });
+        const nextState = {
+          deals: response.data.data.deals || [],
+          dealsSummary: response.data.data.summary || null,
+          loading: false,
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeTradingCache({ ...get(), ...nextState });
+        set(nextState);
       } else {
         set({ error: response.data.message, loading: false });
       }
     } catch (error) {
       console.error('Fetch deals error:', error);
-      set({ error: error.response?.data?.message || 'Failed to fetch deals', loading: false, deals: [], dealsSummary: null });
+      set({ error: error.response?.data?.message || 'Failed to fetch deals', loading: false });
     }
   },
 
@@ -80,7 +130,12 @@ const useTradingStore = create((set, get) => ({
     try {
       const response = await api.get(`/trading/pending-order-history/${accountId}`);
       if (response.data.success) {
-        set({ pendingOrderHistory: response.data.data || [] });
+        const nextState = {
+          pendingOrderHistory: response.data.data || [],
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeTradingCache({ ...get(), ...nextState });
+        set(nextState);
       }
     } catch (error) {
       console.error('Fetch pending order history error:', error);
@@ -428,8 +483,21 @@ const useTradingStore = create((set, get) => ({
 
   clearError: () => set({ error: null }),
 
-  reset: () =>
-    set({ openTrades: [], pendingOrders: [], pendingOrderHistory: [], tradeHistory: [], deals: [], dealsSummary: null, loading: false, error: null }),
+  reset: () => {
+    const nextState = {
+      openTrades: [],
+      pendingOrders: [],
+      pendingOrderHistory: [],
+      tradeHistory: [],
+      deals: [],
+      dealsSummary: null,
+      lastSyncedAt: null,
+      loading: false,
+      error: null,
+    };
+    writeTradingCache(nextState);
+    set(nextState);
+  },
 }));
 
 export default useTradingStore;

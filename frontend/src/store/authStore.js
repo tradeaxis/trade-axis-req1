@@ -4,6 +4,48 @@ import api from '../services/api';
 import socketService from '../services/socket';
 
 const SAVED_ACCOUNTS_KEY = 'trade_axis_saved_accounts';
+const AUTH_CACHE_KEY = 'trade_axis_auth_cache';
+
+const readJsonStorage = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) {
+    return fallback;
+  }
+};
+
+const readAuthCache = () => readJsonStorage(AUTH_CACHE_KEY, null);
+
+const writeAuthCache = ({ user, accounts, lastSyncedAt }) => {
+  localStorage.setItem(
+    AUTH_CACHE_KEY,
+    JSON.stringify({
+      user: user || null,
+      accounts: Array.isArray(accounts) ? accounts : [],
+      lastSyncedAt: lastSyncedAt || new Date().toISOString(),
+    }),
+  );
+};
+
+const clearAuthCache = () => {
+  localStorage.removeItem(AUTH_CACHE_KEY);
+};
+
+const isTransientAuthError = (error) => {
+  if (error?.response?.status === 503) return true;
+  if (!error?.response && ['ERR_NETWORK', 'ECONNABORTED'].includes(error?.code)) return true;
+
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    message.includes('network') ||
+    message.includes('offline') ||
+    message.includes('timeout') ||
+    message.includes('fetch')
+  );
+};
+
+const initialAuthCache = readAuthCache();
 
 // ✅ Helper: deduplicate saved accounts by loginId, then by email
 const deduplicateAccounts = (accounts) => {
@@ -32,11 +74,13 @@ const loginRequest = (loginId, password) => {
 };
 
 const useAuthStore = create((set, get) => ({
-  user: null,
-  accounts: [],
+  user: initialAuthCache?.user || null,
+  accounts: Array.isArray(initialAuthCache?.accounts) ? initialAuthCache.accounts : [],
   token: localStorage.getItem('token'),
-  isAuthenticated: false,
+  isAuthenticated: Boolean(localStorage.getItem('token') && initialAuthCache?.user),
   isLoading: true,
+  lastSyncedAt: initialAuthCache?.lastSyncedAt || null,
+  isUsingCachedSession: false,
   savedAccounts: deduplicateAccounts(
     JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY) || '[]')
   ),
@@ -52,7 +96,9 @@ const useAuthStore = create((set, get) => ({
         return { success: false, message: 'Invalid login response from server' };
       }
 
+      const lastSyncedAt = new Date().toISOString();
       localStorage.setItem('token', token);
+      writeAuthCache({ user, accounts, lastSyncedAt });
 
       // ✅ Set auth state first
       set({
@@ -61,6 +107,8 @@ const useAuthStore = create((set, get) => ({
         token,
         isAuthenticated: true,
         isLoading: false,
+        lastSyncedAt,
+        isUsingCachedSession: false,
       });
 
       get().saveCurrentAccount();
@@ -100,8 +148,16 @@ const useAuthStore = create((set, get) => ({
 
   logout: () => {
     localStorage.removeItem('token');
+    clearAuthCache();
     socketService.disconnect();
-    set({ user: null, accounts: [], token: null, isAuthenticated: false });
+    set({
+      user: null,
+      accounts: [],
+      token: null,
+      isAuthenticated: false,
+      lastSyncedAt: null,
+      isUsingCachedSession: false,
+    });
   },
 
   fullLogout: (loginId) => {
@@ -112,12 +168,15 @@ const useAuthStore = create((set, get) => ({
     localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(updated));
 
     localStorage.removeItem('token');
+    clearAuthCache();
     socketService.disconnect();
     set({
       user: null,
       accounts: [],
       token: null,
       isAuthenticated: false,
+      lastSyncedAt: null,
+      isUsingCachedSession: false,
       savedAccounts: updated,
     });
   },
@@ -132,13 +191,17 @@ const useAuthStore = create((set, get) => ({
     try {
       const response = await api.get('/auth/me');
       const { user, accounts } = response.data.data;
+      const lastSyncedAt = new Date().toISOString();
 
+      writeAuthCache({ user, accounts, lastSyncedAt });
       set({
         user,
         accounts,
         token,
         isAuthenticated: true,
         isLoading: false,
+        lastSyncedAt,
+        isUsingCachedSession: false,
       });
 
       get().saveCurrentAccount();
@@ -149,11 +212,27 @@ const useAuthStore = create((set, get) => ({
         console.warn('⚠️ Socket reconnect failed during checkAuth:', socketError);
       }
     } catch (error) {
-      if (error.response?.status === 503) {
+      if (isTransientAuthError(error)) {
+        const cached = readAuthCache();
+
+        if (cached?.user) {
+          set({
+            user: cached.user,
+            accounts: Array.isArray(cached.accounts) ? cached.accounts : [],
+            token,
+            isAuthenticated: true,
+            isLoading: false,
+            lastSyncedAt: cached.lastSyncedAt || null,
+            isUsingCachedSession: true,
+          });
+          return;
+        }
+
         set({ isLoading: false });
         return;
       }
 
+      clearAuthCache();
       localStorage.removeItem('token');
       set({
         user: null,
@@ -161,11 +240,26 @@ const useAuthStore = create((set, get) => ({
         token: null,
         isAuthenticated: false,
         isLoading: false,
+        lastSyncedAt: null,
+        isUsingCachedSession: false,
       });
     }
   },
 
-  setAccounts: (accounts) => set({ accounts }),
+  setAccounts: (accounts) => {
+    const normalizedAccounts = Array.isArray(accounts) ? accounts : [];
+    const { user, lastSyncedAt } = get();
+
+    if (user) {
+      writeAuthCache({
+        user,
+        accounts: normalizedAccounts,
+        lastSyncedAt: lastSyncedAt || new Date().toISOString(),
+      });
+    }
+
+    set({ accounts: normalizedAccounts });
+  },
 
   saveCurrentAccount: () => {
     const { user, token, savedAccounts } = get();
@@ -284,8 +378,10 @@ const useAuthStore = create((set, get) => ({
       );
 
       const { user, accounts, token } = response.data.data;
+      const lastSyncedAt = new Date().toISOString();
 
       localStorage.setItem('token', token);
+      writeAuthCache({ user, accounts, lastSyncedAt });
 
       try {
         socketService.disconnect();
@@ -326,6 +422,8 @@ const useAuthStore = create((set, get) => ({
         token,
         isAuthenticated: true,
         isLoading: false,
+        lastSyncedAt,
+        isUsingCachedSession: false,
         savedAccounts: updatedSavedAccounts,
       });
 

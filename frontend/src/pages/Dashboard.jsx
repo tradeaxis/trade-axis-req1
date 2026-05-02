@@ -112,6 +112,7 @@ const DASHBOARD_TABS = new Set([
   'settings',
   'admin',
 ]);
+const SELECTED_ACCOUNT_STORAGE_KEY = 'trade_axis_selected_account_id';
 
 const normalizeDashboardTab = (value) => {
   const candidate = String(value || '').toLowerCase();
@@ -491,6 +492,8 @@ const Dashboard = () => {
     switchToAccount,
     removeSavedAccount,
     getMaxSavedAccounts,
+    lastSyncedAt: authLastSyncedAt,
+    isUsingCachedSession,
   } = useAuthStore();
 
   const isAdmin = (user?.role || '').toLowerCase() === 'admin';
@@ -512,9 +515,17 @@ const Dashboard = () => {
     cancelOrder,
     updateTradePnL,
     updateTradesPnLBatch,
+    lastSyncedAt: tradingLastSyncedAt,
   } = useTradingStore();
 
-  const { symbols, quotes, refreshSymbols, getQuote, updatePrice } = useMarketStore();
+  const {
+    symbols,
+    quotes,
+    refreshSymbols,
+    getQuote,
+    updatePrice,
+    lastSyncedAt: marketLastSyncedAt,
+  } = useMarketStore();
 
   const {
     watchlists,
@@ -545,6 +556,9 @@ const Dashboard = () => {
 
   // ── Core state ──
   const [selectedAccount, setSelectedAccount] = useState(null);
+  const [isOffline, setIsOffline] = useState(
+    () => typeof navigator !== 'undefined' && navigator.onLine === false,
+  );
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [symbolData, setSymbolData] = useState(null);
   const [marketStatus, setMarketStatus] = useState({
@@ -747,10 +761,38 @@ const Dashboard = () => {
   // ── Account init ──
   useEffect(() => {
     if (accounts?.length) {
+      const preferredAccountId =
+        typeof window !== 'undefined'
+          ? window.localStorage.getItem(SELECTED_ACCOUNT_STORAGE_KEY)
+          : null;
+      const preferredAccount = preferredAccountId
+        ? accounts.find((account) => account.id === preferredAccountId)
+        : null;
       const demo = accounts.find((a) => a.is_demo);
-      setSelectedAccount(demo || accounts[0]);
+      setSelectedAccount(preferredAccount || demo || accounts[0]);
     }
   }, [accounts]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleNetworkChange = () => {
+      setIsOffline(window.navigator.onLine === false);
+    };
+
+    window.addEventListener('online', handleNetworkChange);
+    window.addEventListener('offline', handleNetworkChange);
+
+    return () => {
+      window.removeEventListener('online', handleNetworkChange);
+      window.removeEventListener('offline', handleNetworkChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !selectedAccount?.id) return;
+    window.localStorage.setItem(SELECTED_ACCOUNT_STORAGE_KEY, selectedAccount.id);
+  }, [selectedAccount?.id]);
 
   // ── First login password change prompt ──
   useEffect(() => {
@@ -773,10 +815,14 @@ const Dashboard = () => {
       }
     } catch (error) {
       console.error('Failed to fetch symbols:', error);
+      if (symbols?.length) {
+        setAllFuturesSymbols(symbols);
+        setSymbolsLoaded(true);
+      }
     } finally {
       setLoadingAllSymbols(false);
     }
-  }, []);
+  }, [symbols]);
 
   useEffect(() => {
     if (symbolsFetchedRef.current) return;
@@ -1121,6 +1167,26 @@ const accountStats = useMemo(() => {
 }, [selectedAccount, totalPnL, totalCommission]);  // ← Add totalPnL dependency
 
   const headlinePnL = accountStats.equity - accountStats.balance;
+  const lastKnownUpdate = useMemo(() => {
+    return [authLastSyncedAt, tradingLastSyncedAt, marketLastSyncedAt]
+      .filter(Boolean)
+      .reduce((latest, value) => {
+        if (!latest) return value;
+        return new Date(value) > new Date(latest) ? value : latest;
+      }, null);
+  }, [authLastSyncedAt, tradingLastSyncedAt, marketLastSyncedAt]);
+
+  const lastKnownUpdateLabel = lastKnownUpdate
+    ? new Date(lastKnownUpdate).toLocaleString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      })
+    : null;
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -1841,15 +1907,23 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
   const handleRefreshData = useCallback(async () => {
     // Use ref to prevent multiple simultaneous refreshes
     if (refreshingRef.current) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setIsOffline(true);
+      if (lastKnownUpdateLabel) {
+        toast('Showing last synced data', { duration: 1800, icon: '📡' });
+      }
+      return;
+    }
+
     refreshingRef.current = true;
     setIsRefreshing(true);
 
     try {
       // Refresh account data
       try {
-        const { data: authRes } = await api.get('/auth/me');
-        const refreshedAccounts = authRes?.data?.accounts || [];
-        if (authRes?.success && refreshedAccounts.length > 0) {
+        await useAuthStore.getState().checkAuth();
+        const refreshedAccounts = useAuthStore.getState().accounts || [];
+        if (refreshedAccounts.length > 0) {
           setAccounts(refreshedAccounts);
           const refreshed = refreshedAccounts.find((a) => a.id === selectedAccount?.id);
           if (refreshed) setSelectedAccount(refreshed);
@@ -1874,6 +1948,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       refreshingRef.current = false;
     }
   }, [
+    lastKnownUpdateLabel,
     selectedAccount?.id,
     activeWatchlistId,
     selectedSymbol,
@@ -1889,6 +1964,10 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
   useEffect(() => {
     const refreshOnResume = () => {
       if (document.visibilityState && document.visibilityState !== 'visible') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        setIsOffline(true);
+        return;
+      }
       handleRefreshData();
     };
 
@@ -3229,6 +3308,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       toast.success(
         result?.method === 'share'
           ? 'Deals PDF ready to share'
+          : result?.method === 'browser'
+          ? 'Deals PDF opened in browser'
           : result?.method === 'preview'
           ? 'Deals PDF opened'
           : 'Deals PDF download started',
@@ -6377,6 +6458,22 @@ const renderOrderConfirmation = () => {
           </button>
         </div>
       </header>
+
+      {(isOffline || isUsingCachedSession) && (
+        <div
+          className="px-4 py-2 text-xs border-b"
+          style={{
+            borderColor: border,
+            background: theme === 'light' ? '#fff7ed' : '#2a2418',
+            color: theme === 'light' ? '#9a3412' : '#f5c542',
+          }}
+        >
+          {isOffline ? 'Offline mode.' : 'Connection issue detected.'}{' '}
+          {lastKnownUpdateLabel
+            ? `Showing last synced data from ${lastKnownUpdateLabel}.`
+            : 'Showing the last available data snapshot.'}
+        </div>
+      )}
 
       {/* Desktop */}
       <div className="hidden lg:flex flex-1 overflow-hidden">

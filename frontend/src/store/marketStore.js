@@ -6,13 +6,35 @@ import { create } from 'zustand';
 import api from '../services/api';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
+const MARKET_CACHE_KEY = 'trade_axis_market_cache';
+const readMarketCache = () => {
+  try {
+    return JSON.parse(localStorage.getItem(MARKET_CACHE_KEY) || 'null');
+  } catch (_) {
+    return null;
+  }
+};
+
+const writeMarketCache = (state) => {
+  localStorage.setItem(
+    MARKET_CACHE_KEY,
+    JSON.stringify({
+      symbols: state.symbols || [],
+      quotes: state.quotes || {},
+      lastSyncedAt: state.lastSyncedAt || new Date().toISOString(),
+    }),
+  );
+};
+
+const initialMarketCache = readMarketCache();
 
 const useMarketStore = create((set, get) => ({
-  symbols:     [],
-  quotes:      {},
+  symbols:     initialMarketCache?.symbols || [],
+  quotes:      initialMarketCache?.quotes || {},
   loading:     false,
   error:       null,
   initialized: false,
+  lastSyncedAt: initialMarketCache?.lastSyncedAt || null,
 
   fetchSymbols: async () => {
     const state = get();
@@ -53,7 +75,16 @@ const useMarketStore = create((set, get) => ({
           };
         });
 
-        set({ symbols, quotes, loading: false, error: null, initialized: true });
+        const nextState = {
+          symbols,
+          quotes,
+          loading: false,
+          error: null,
+          initialized: true,
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeMarketCache(nextState);
+        set(nextState);
         return symbols;
       }
 
@@ -201,7 +232,12 @@ const useMarketStore = create((set, get) => ({
           off_quotes:     Boolean(q.off_quotes),
         };
 
-        set(state => ({ quotes: { ...state.quotes, [sym]: quote } }));
+        const nextState = {
+          quotes: { ...get().quotes, [sym]: quote },
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeMarketCache({ ...get(), ...nextState });
+        set(nextState);
         return quote;
       }
     } catch (_) {

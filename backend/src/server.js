@@ -156,7 +156,37 @@ const shouldRunCatchupSettlement = async () => {
   return false;
 };
 
+let settlementRunPromise = null;
+
 const runSettlementSafe = async (trigger = 'cron') => {
+  const target = getLastSettlementTarget();
+  const lastRun = await getLastSettlementTime();
+
+  if (lastRun && lastRun >= target) {
+    console.log(`ℹ️ Weekly settlement already completed for target ${target.toISOString()}`);
+    return {
+      success: true,
+      skipped: true,
+      message: 'Settlement already completed for the current Saturday window.',
+      settled: 0,
+      totalWeeklyPnL: 0,
+      accounts: 0,
+    };
+  }
+
+  if (settlementRunPromise) {
+    console.log('ℹ️ Weekly settlement already running — skipping duplicate trigger');
+    return {
+      success: true,
+      skipped: true,
+      message: 'Settlement is already running.',
+      settled: 0,
+      totalWeeklyPnL: 0,
+      accounts: 0,
+    };
+  }
+
+  settlementRunPromise = (async () => {
   console.log('');
   console.log('═══════════════════════════════════════════════════════');
   console.log(`🧾 WEEKLY SETTLEMENT TRIGGERED (${trigger})`);
@@ -194,7 +224,12 @@ const runSettlementSafe = async (trigger = 'cron') => {
       timestamp: new Date().toISOString(),
     });
     return { success: false, message: err.message };
+  } finally {
+    settlementRunPromise = null;
   }
+  })();
+
+  return settlementRunPromise;
 };
 
 /* =========================================================

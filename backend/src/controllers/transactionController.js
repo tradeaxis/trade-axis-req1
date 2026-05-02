@@ -185,6 +185,33 @@ const buildSettlementTimestamp = (settlementDate, fallback = null) => (
   fallback || (settlementDate ? `${settlementDate}T01:00:00+05:30` : null)
 );
 
+const formatDateInIst = (date) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+
+  return `${year}-${month}-${day}`;
+};
+
+const getLastSettlementTarget = (referenceDate = new Date()) => {
+  const utcMs = referenceDate.getTime() + referenceDate.getTimezoneOffset() * 60000;
+  const ist = new Date(utcMs + 5.5 * 3600000);
+
+  const daysAgo = (ist.getDay() + 1) % 7;
+  const lastSat = new Date(ist);
+  lastSat.setDate(lastSat.getDate() - daysAgo);
+  lastSat.setHours(1, 0, 0, 0);
+
+  return new Date(lastSat.getTime() - 5.5 * 3600000);
+};
+
 const buildSettlementDeals = (settlements = []) => {
   const groups = new Map();
 
@@ -265,6 +292,131 @@ const buildSettlementDeals = (settlements = []) => {
       };
     })
     .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+};
+
+const buildFallbackSettlementDealsFromTrades = (trades = [], existingSettlementDates = new Set()) => {
+  const groups = new Map();
+
+  (trades || [])
+    .filter(
+      (row) =>
+        row.status === 'closed' &&
+        (row.is_settlement_close || /weekly settlement close/i.test(String(row.comment || ''))),
+    )
+    .forEach((row) => {
+      const settlementDate = firstNonEmptyString(
+        row.settlement_week,
+        row.close_time ? String(row.close_time).slice(0, 10) : '',
+      );
+
+      if (!settlementDate || existingSettlementDates.has(settlementDate)) {
+        return;
+      }
+
+      const accountId = row.account_id || 'unknown';
+      const key = `${accountId}::${settlementDate}`;
+
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          settlementDate,
+          executedAt: row.close_time || row.updated_at || null,
+          totalProfitLoss: 0,
+          totalCommission: 0,
+          tradeCount: 0,
+          symbols: new Set(),
+        });
+      }
+
+      const group = groups.get(key);
+      group.totalProfitLoss += Number(row.profit || 0);
+      group.totalCommission += Number(row.brokerage || row.sell_brokerage || 0);
+      group.tradeCount += 1;
+
+      if (row.symbol) {
+        group.symbols.add(String(row.symbol).toUpperCase());
+      }
+      if (!group.executedAt && (row.close_time || row.updated_at)) {
+        group.executedAt = row.close_time || row.updated_at;
+      }
+    });
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const symbolCount = group.symbols.size;
+
+      return {
+        id: `trade-settlement-${group.key}`,
+        source: 'settlement',
+        side: 'settlement',
+        type: 'settlement',
+        dealLabel: 'Balance Settled',
+        symbol: null,
+        quantity: null,
+        price: null,
+        amount: Number(group.totalProfitLoss.toFixed(2)),
+        profit: Number(group.totalProfitLoss.toFixed(2)),
+        commission: Number(group.totalCommission.toFixed(2)),
+        time: buildSettlementTimestamp(group.settlementDate, group.executedAt),
+        status: 'completed',
+        description: [
+          `${group.tradeCount} trade${group.tradeCount === 1 ? '' : 's'} settled`,
+          symbolCount > 0 ? `${symbolCount} symbol${symbolCount === 1 ? '' : 's'}` : '',
+          'Recovered from settlement-close trades',
+        ]
+          .filter(Boolean)
+          .join(' | '),
+        settlement_date: group.settlementDate,
+        trade_count: group.tradeCount,
+      };
+    })
+    .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+};
+
+const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
+  const target = getLastSettlementTarget();
+  const now = new Date();
+
+  if (target > now) {
+    return null;
+  }
+
+  const settlementDate = formatDateInIst(target);
+  const openTrades = (trades || []).filter((trade) => trade.status === 'open');
+  const credit = Number(account?.credit || 0);
+  const floating = openTrades.reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
+  const amount = Number((credit + floating).toFixed(2));
+
+  if (!openTrades.length && amount === 0) {
+    return null;
+  }
+
+  return {
+    id: `pending-settlement-${account?.id || 'unknown'}-${settlementDate}`,
+    source: 'settlement',
+    side: 'settlement',
+    type: 'settlement',
+    dealLabel: 'Balance Settled',
+    symbol: null,
+    quantity: null,
+    price: null,
+    amount,
+    profit: amount,
+    commission: 0,
+    time: buildSettlementTimestamp(settlementDate, target.toISOString()),
+    status: 'completed',
+    description: [
+      `${openTrades.length} open trade${openTrades.length === 1 ? '' : 's'} snapshot`,
+      'Auto-generated from balance and equity for this Saturday window',
+    ]
+      .filter(Boolean)
+      .join(' | '),
+    balance_before: account?.balance ?? null,
+    balance_after: account?.balance ?? null,
+    settlement_date: settlementDate,
+    trade_count: openTrades.length,
+    is_pending_snapshot: true,
+  };
 };
 
 const getTransactionStatusAliases = (status) => {
@@ -627,7 +779,7 @@ const getDeals = async (req, res) => {
     // Get account balance
     const { data: account } = await supabase
       .from('accounts')
-      .select('balance')
+      .select('id, balance, credit')
       .eq('id', accountId)
       .single();
 
@@ -875,6 +1027,8 @@ const getDeals = async (req, res) => {
     });
 
     // 3) Weekly settlements (grouped into one entry per settlement run)
+    const settlementDeals = [];
+
     try {
       const { data: settlements } = await supabase
         .from('weekly_settlements')
@@ -883,15 +1037,49 @@ const getDeals = async (req, res) => {
         .order('settlement_date', { ascending: false })
         .limit(100);
 
-      const settlementDeals = buildSettlementDeals(settlements || []).filter((deal) => {
-        if (!startDate) return true;
-        return deal.time && new Date(deal.time) >= startDate;
-      });
-
-      allDeals.push(...settlementDeals);
+      settlementDeals.push(
+        ...buildSettlementDeals(settlements || []).filter((deal) => {
+          if (!startDate) return true;
+          return deal.time && new Date(deal.time) >= startDate;
+        }),
+      );
     } catch (e) {
       // weekly_settlements table may not exist — skip silently
     }
+
+    const actualSettlementDates = new Set(
+      settlementDeals
+        .map((deal) => firstNonEmptyString(deal.settlement_date))
+        .filter(Boolean),
+    );
+
+    settlementDeals.push(
+      ...buildFallbackSettlementDealsFromTrades(trades || [], actualSettlementDates).filter((deal) => {
+        if (!startDate) return true;
+        return deal.time && new Date(deal.time) >= startDate;
+      }),
+    );
+
+    const settlementDateTarget = formatDateInIst(getLastSettlementTarget());
+    const hasCurrentSettlement = settlementDeals.some(
+      (deal) => firstNonEmptyString(deal.settlement_date) === settlementDateTarget,
+    );
+
+    if (!hasCurrentSettlement) {
+      const pendingSettlementDeal = buildPendingSettlementSnapshotDeal({
+        account,
+        trades,
+      });
+
+      if (
+        pendingSettlementDeal &&
+        (!startDate || new Date(pendingSettlementDeal.time) >= startDate)
+      ) {
+        settlementDeals.push(pendingSettlementDeal);
+      }
+    }
+
+    allDeals.push(...settlementDeals);
 
     // Sort latest first
     allDeals.sort((a, b) => new Date(b.time) - new Date(a.time));
@@ -899,7 +1087,7 @@ const getDeals = async (req, res) => {
     const deals = allDeals.slice(0, parseInt(limit, 10));
 
     const exitDeals = allDeals.filter((d) => d.source === 'trade' && d.side === 'exit');
-    const settlementDeals = allDeals.filter((d) => d.source === 'settlement');
+    const settlementSummaryDeals = allDeals.filter((d) => d.source === 'settlement');
 
     const summary = {
       totalProfit: exitDeals.filter((d) => d.amount > 0).reduce((s, d) => s + d.amount, 0),
@@ -907,7 +1095,7 @@ const getDeals = async (req, res) => {
       totalDeposits: allDeals.filter((d) => d.type === 'deposit').reduce((s, d) => s + d.amount, 0),
       totalWithdrawals: Math.abs(allDeals.filter((d) => d.type === 'withdrawal').reduce((s, d) => s + d.amount, 0)),
       totalCommission: allDeals.reduce((s, d) => s + Number(d.commission || 0), 0),
-      balanceSettled: Number(settlementDeals[0]?.amount || 0),
+      balanceSettled: Number(settlementSummaryDeals[0]?.amount || 0),
       netPnL: exitDeals.reduce((s, d) => s + d.amount, 0),
       currentBalance: Number(account?.balance || 0),
     };

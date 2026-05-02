@@ -1,3 +1,6 @@
+import { Capacitor } from '@capacitor/core';
+import { Browser } from '@capacitor/browser';
+
 const PDF_PAGE_WIDTH = 595;
 const PDF_PAGE_HEIGHT = 842;
 const PDF_MARGIN_LEFT = 40;
@@ -10,6 +13,21 @@ const textEncoder = new TextEncoder();
 
 const byteLength = (value) => textEncoder.encode(value).length;
 const toBase64 = (value) => window.btoa(value);
+const isNativePlatform = () => {
+  try {
+    return Capacitor.isNativePlatform();
+  } catch (_) {
+    return false;
+  }
+};
+
+const blobToDataUrl = (blob) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read PDF data'));
+    reader.readAsDataURL(blob);
+  });
 
 const isMobileLikeDevice = () => {
   if (typeof navigator === 'undefined' || typeof window === 'undefined') {
@@ -194,6 +212,7 @@ export const exportDealsPdf = async ({
   const file = typeof File === 'function'
     ? new File([blob], fileName, { type: 'application/pdf' })
     : null;
+  const url = URL.createObjectURL(blob);
 
   if (
     file &&
@@ -209,21 +228,42 @@ export const exportDealsPdf = async ({
     return { method: 'share' };
   }
 
-  const dataUrl = `data:application/pdf;base64,${toBase64(pdf)}`;
+  if (isNativePlatform()) {
+    try {
+      const dataUrl = await blobToDataUrl(blob);
+      await Browser.open({ url: dataUrl });
+      return { method: 'browser' };
+    } catch (_) {
+      // Fall through to web-style export attempts below.
+    }
+  }
 
   if (isMobileLikeDevice()) {
-    const previewLink = document.createElement('a');
-    previewLink.href = dataUrl;
-    previewLink.target = '_blank';
-    previewLink.rel = 'noopener noreferrer';
-    previewLink.download = fileName;
-    document.body.appendChild(previewLink);
-    previewLink.click();
-    document.body.removeChild(previewLink);
+    const blobPreviewLink = document.createElement('a');
+    blobPreviewLink.href = url;
+    blobPreviewLink.target = '_blank';
+    blobPreviewLink.rel = 'noopener noreferrer';
+    blobPreviewLink.download = fileName;
+    document.body.appendChild(blobPreviewLink);
+    blobPreviewLink.click();
+    document.body.removeChild(blobPreviewLink);
+
+    const dataUrl = `data:application/pdf;base64,${toBase64(pdf)}`;
+    const dataPreviewLink = document.createElement('a');
+    dataPreviewLink.href = dataUrl;
+    dataPreviewLink.target = '_blank';
+    dataPreviewLink.rel = 'noopener noreferrer';
+    dataPreviewLink.download = fileName;
+    document.body.appendChild(dataPreviewLink);
+    dataPreviewLink.click();
+    document.body.removeChild(dataPreviewLink);
+
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 10000);
     return { method: 'preview' };
   }
 
-  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
 
   link.href = url;
@@ -236,7 +276,7 @@ export const exportDealsPdf = async ({
 
   window.setTimeout(() => {
     URL.revokeObjectURL(url);
-  }, 1000);
+  }, 10000);
 
   return { method: 'download' };
 };
