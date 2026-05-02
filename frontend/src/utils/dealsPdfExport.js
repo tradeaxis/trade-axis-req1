@@ -1,18 +1,12 @@
 import { Capacitor } from '@capacitor/core';
-import { Browser } from '@capacitor/browser';
+import { Directory, Filesystem } from '@capacitor/filesystem';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
-const PDF_PAGE_WIDTH = 595;
-const PDF_PAGE_HEIGHT = 842;
-const PDF_MARGIN_LEFT = 40;
-const PDF_TOP = 804;
-const PDF_LINE_HEIGHT = 13;
-const PDF_MAX_LINES = 56;
-const PDF_WRAP_AT = 88;
+const PAGE_MARGIN_X = 40;
+const PAGE_MARGIN_TOP = 42;
+const PAGE_MARGIN_BOTTOM = 34;
 
-const textEncoder = new TextEncoder();
-
-const byteLength = (value) => textEncoder.encode(value).length;
-const toBase64 = (value) => window.btoa(value);
 const isNativePlatform = () => {
   try {
     return Capacitor.isNativePlatform();
@@ -21,255 +15,103 @@ const isNativePlatform = () => {
   }
 };
 
-const blobToDataUrl = (blob) =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Failed to read PDF data'));
-    reader.readAsDataURL(blob);
-  });
+const sanitizeFileName = (value) => {
+  const normalized = String(value || 'deals-report.pdf')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-');
 
-const isMobileLikeDevice = () => {
-  if (typeof navigator === 'undefined' || typeof window === 'undefined') {
-    return false;
-  }
-
-  const agent = String(navigator.userAgent || '').toLowerCase();
-  const touchCapable = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-  return /android|iphone|ipad|ipod|mobile/i.test(agent) || (touchCapable && window.innerWidth < 1024);
+  return normalized.toLowerCase().endsWith('.pdf') ? normalized : `${normalized}.pdf`;
 };
 
-const escapePdfText = (value) =>
-  String(value ?? '')
-    .replace(/\\/g, '\\\\')
-    .replace(/\(/g, '\\(')
-    .replace(/\)/g, '\\)')
-    .replace(/[^\x20-\x7E]/g, ' ');
+const addWrappedText = (doc, lines = [], startY = PAGE_MARGIN_TOP) => {
+  const maxWidth = doc.internal.pageSize.getWidth() - PAGE_MARGIN_X * 2;
+  let cursorY = startY;
 
-const wrapText = (text, maxChars = PDF_WRAP_AT) => {
-  const source = String(text ?? '').trim();
-  if (!source) return [''];
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(71, 85, 105);
 
-  const words = source.split(/\s+/);
-  const lines = [];
-  let current = '';
-
-  const pushCurrent = () => {
-    if (current) {
-      lines.push(current);
-      current = '';
-    }
-  };
-
-  words.forEach((word) => {
-    if (word.length > maxChars) {
-      pushCurrent();
-      for (let index = 0; index < word.length; index += maxChars) {
-        lines.push(word.slice(index, index + maxChars));
-      }
-      return;
-    }
-
-    const candidate = current ? `${current} ${word}` : word;
-    if (candidate.length > maxChars) {
-      pushCurrent();
-      current = word;
-      return;
-    }
-
-    current = candidate;
-  });
-
-  pushCurrent();
-  return lines.length ? lines : [''];
-};
-
-const buildContentStream = (lines) => {
-  let y = PDF_TOP;
-  const parts = ['BT', '/F1 10 Tf'];
-
-  lines.forEach((line) => {
-    parts.push(`1 0 0 1 ${PDF_MARGIN_LEFT} ${y} Tm`);
-    parts.push(`(${escapePdfText(line)}) Tj`);
-    y -= PDF_LINE_HEIGHT;
-  });
-
-  parts.push('ET');
-  return parts.join('\n');
-};
-
-const buildPdfDocument = (pages) => {
-  const objects = [];
-  const addObject = (body) => {
-    objects.push(body);
-    return objects.length;
-  };
-
-  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-  const contentIds = pages.map((lines) => {
-    const content = buildContentStream(lines);
-    return addObject(`<< /Length ${byteLength(content)} >>\nstream\n${content}\nendstream`);
-  });
-
-  const pagesObjectId = objects.length + pages.length + 1;
-  const pageIds = pages.map((_, index) =>
-    addObject(
-      `<< /Type /Page /Parent ${pagesObjectId} 0 R /MediaBox [0 0 ${PDF_PAGE_WIDTH} ${PDF_PAGE_HEIGHT}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`,
-    ),
-  );
-  const pagesId = addObject(
-    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`,
-  );
-  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
-
-  let pdf = '%PDF-1.4\n';
-  const offsets = [0];
-
-  objects.forEach((objectBody, index) => {
-    offsets.push(byteLength(pdf));
-    pdf += `${index + 1} 0 obj\n${objectBody}\nendobj\n`;
-  });
-
-  const xrefOffset = byteLength(pdf);
-  pdf += `xref\n0 ${objects.length + 1}\n`;
-  pdf += '0000000000 65535 f \n';
-
-  for (let index = 1; index < offsets.length; index += 1) {
-    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
-  }
-
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-  return pdf;
-};
-
-const paginateEntries = ({ headerLines, entries }) => {
-  const pages = [];
-  const baseLines = headerLines.flatMap((line) => wrapText(line));
-  let current = [...baseLines];
-  let remaining = PDF_MAX_LINES - current.length - 1;
-
-  const pushNewPage = () => {
-    pages.push(current);
-    current = [...baseLines];
-    remaining = PDF_MAX_LINES - current.length - 1;
-  };
-
-  const normalizedEntries = (entries || []).map((entry) =>
-    (entry?.lines || []).flatMap((line) => wrapText(line)),
-  );
-
-  if (!normalizedEntries.length) {
-    current.push('No records matched the selected filters.');
-    pages.push(current);
-    return pages;
-  }
-
-  normalizedEntries.forEach((entryLines) => {
-    const block = [...entryLines, ''];
-
-    block.forEach((line) => {
-      if (remaining <= 0) {
-        pushNewPage();
-      }
-
-      current.push(line);
-      remaining -= 1;
+  lines
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .forEach((line) => {
+      const wrappedLines = doc.splitTextToSize(line, maxWidth);
+      doc.text(wrappedLines, PAGE_MARGIN_X, cursorY);
+      cursorY += wrappedLines.length * 12;
     });
-  });
 
-  if (current.length) {
-    pages.push(current);
-  }
-
-  return pages;
+  return cursorY;
 };
 
-export const exportDealsPdf = async ({
-  fileName,
-  title,
-  subtitleLines = [],
-  summaryLines = [],
-  entries = [],
-}) => {
-  const pages = paginateEntries({
-    headerLines: [
-      title,
-      ...subtitleLines,
-      '',
-      ...summaryLines,
-      '',
-      'Records',
-      '',
-    ],
-    entries,
-  }).map((pageLines, index, pageList) => [
-    ...pageLines,
-    `Page ${index + 1} of ${pageList.length}`,
-  ]);
+const addPageFooters = (doc) => {
+  const pageCount = doc.getNumberOfPages();
 
-  const pdf = buildPdfDocument(pages);
-  const blob = new Blob([pdf], { type: 'application/pdf' });
-  const file = typeof File === 'function'
-    ? new File([blob], fileName, { type: 'application/pdf' })
-    : null;
+  for (let page = 1; page <= pageCount; page += 1) {
+    doc.setPage(page);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      `Page ${page} of ${pageCount}`,
+      doc.internal.pageSize.getWidth() - PAGE_MARGIN_X,
+      doc.internal.pageSize.getHeight() - 14,
+      { align: 'right' },
+    );
+  }
+};
+
+const ensureAndroidStoragePermission = async () => {
+  if (!isNativePlatform() || Capacitor.getPlatform() !== 'android') {
+    return;
+  }
+
+  let permissions = await Filesystem.checkPermissions();
+  if (permissions.publicStorage !== 'granted') {
+    permissions = await Filesystem.requestPermissions();
+  }
+
+  if (permissions.publicStorage !== 'granted') {
+    throw new Error('Storage permission was not granted');
+  }
+};
+
+const savePdfToNativeDocuments = async (doc, fileName) => {
+  await ensureAndroidStoragePermission();
+
+  const relativePath = `TradeAxis/${sanitizeFileName(fileName)}`;
+  const base64Data = String(doc.output('datauristring') || '').split(',')[1] || '';
+
+  if (!base64Data) {
+    throw new Error('Failed to generate PDF data');
+  }
+
+  await Filesystem.writeFile({
+    path: relativePath,
+    data: base64Data,
+    directory: Directory.Documents,
+    recursive: true,
+  });
+
+  const uriResult = await Filesystem.getUri({
+    path: relativePath,
+    directory: Directory.Documents,
+  });
+
+  return {
+    method: 'saved',
+    path: relativePath,
+    uri: uriResult?.uri || null,
+  };
+};
+
+const downloadPdfOnWeb = async (doc, fileName) => {
+  const blob = doc.output('blob');
   const url = URL.createObjectURL(blob);
-
-  if (
-    file &&
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    typeof navigator.canShare === 'function' &&
-    navigator.canShare({ files: [file] })
-  ) {
-    await navigator.share({
-      title,
-      files: [file],
-    });
-    return { method: 'share' };
-  }
-
-  if (isNativePlatform()) {
-    try {
-      const dataUrl = await blobToDataUrl(blob);
-      await Browser.open({ url: dataUrl });
-      return { method: 'browser' };
-    } catch (_) {
-      // Fall through to web-style export attempts below.
-    }
-  }
-
-  if (isMobileLikeDevice()) {
-    const blobPreviewLink = document.createElement('a');
-    blobPreviewLink.href = url;
-    blobPreviewLink.target = '_blank';
-    blobPreviewLink.rel = 'noopener noreferrer';
-    blobPreviewLink.download = fileName;
-    document.body.appendChild(blobPreviewLink);
-    blobPreviewLink.click();
-    document.body.removeChild(blobPreviewLink);
-
-    const dataUrl = `data:application/pdf;base64,${toBase64(pdf)}`;
-    const dataPreviewLink = document.createElement('a');
-    dataPreviewLink.href = dataUrl;
-    dataPreviewLink.target = '_blank';
-    dataPreviewLink.rel = 'noopener noreferrer';
-    dataPreviewLink.download = fileName;
-    document.body.appendChild(dataPreviewLink);
-    dataPreviewLink.click();
-    document.body.removeChild(dataPreviewLink);
-
-    window.setTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 10000);
-    return { method: 'preview' };
-  }
-
   const link = document.createElement('a');
 
   link.href = url;
-  link.download = fileName;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
+  link.download = sanitizeFileName(fileName);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -279,4 +121,134 @@ export const exportDealsPdf = async ({
   }, 10000);
 
   return { method: 'download' };
+};
+
+export const exportDealsPdf = async ({
+  fileName,
+  title,
+  subtitleLines = [],
+  summaryRows = [],
+  columns = [],
+  rows = [],
+}) => {
+  const safeFileName = sanitizeFileName(fileName);
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'pt',
+    format: 'a4',
+    compress: true,
+  });
+
+  doc.setProperties({
+    title,
+    subject: 'Deals report',
+    creator: 'Trade Axis',
+  });
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(15, 23, 42);
+  doc.text(String(title || 'Deals Report'), PAGE_MARGIN_X, PAGE_MARGIN_TOP);
+
+  let cursorY = addWrappedText(doc, subtitleLines, PAGE_MARGIN_TOP + 20);
+  cursorY += 10;
+
+  if (summaryRows.length) {
+    autoTable(doc, {
+      startY: cursorY,
+      head: [['Summary', 'Value']],
+      body: summaryRows.map(([label, value]) => [label, value]),
+      margin: { left: PAGE_MARGIN_X, right: PAGE_MARGIN_X },
+      theme: 'grid',
+      styles: {
+        fontSize: 8,
+        cellPadding: 5,
+        overflow: 'linebreak',
+        textColor: [30, 41, 59],
+      },
+      headStyles: {
+        fillColor: [41, 98, 255],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+      },
+      alternateRowStyles: {
+        fillColor: [248, 250, 252],
+      },
+      columnStyles: {
+        0: { cellWidth: 145, fontStyle: 'bold' },
+        1: { cellWidth: 'auto' },
+      },
+    });
+
+    cursorY = (doc.lastAutoTable?.finalY || cursorY) + 18;
+  }
+
+  const normalizedColumns = columns.map((column) => ({
+    header: column.header,
+    dataKey: column.key,
+  }));
+
+  autoTable(doc, {
+    startY: cursorY,
+    columns: normalizedColumns,
+    body: rows,
+    margin: {
+      left: PAGE_MARGIN_X,
+      right: PAGE_MARGIN_X,
+      bottom: PAGE_MARGIN_BOTTOM,
+    },
+    theme: 'grid',
+    styles: {
+      fontSize: 7.5,
+      cellPadding: 4,
+      overflow: 'linebreak',
+      valign: 'middle',
+      textColor: [30, 41, 59],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.5,
+    },
+    headStyles: {
+      fillColor: [38, 166, 154],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+    },
+    alternateRowStyles: {
+      fillColor: [250, 250, 250],
+    },
+    columnStyles: {
+      date: { cellWidth: 98 },
+      symbol: { cellWidth: 78 },
+      deal: { cellWidth: 70 },
+      quantity: { cellWidth: 44, halign: 'right' },
+      price: { cellWidth: 56, halign: 'right' },
+      commission: { cellWidth: 62, halign: 'right' },
+      amount: { cellWidth: 68, halign: 'right' },
+      balanceAfter: { cellWidth: 68, halign: 'right' },
+      note: { cellWidth: 'auto' },
+    },
+    didParseCell: ({ cell, column, row, section }) => {
+      if (section !== 'body' || column.dataKey !== 'amount') {
+        return;
+      }
+
+      const amountValue = Number(row.raw?.__amountValue || 0);
+      if (amountValue > 0) {
+        cell.styles.textColor = [38, 166, 154];
+      } else if (amountValue < 0) {
+        cell.styles.textColor = [239, 83, 80];
+      }
+    },
+  });
+
+  addPageFooters(doc);
+
+  if (isNativePlatform()) {
+    try {
+      return await savePdfToNativeDocuments(doc, safeFileName);
+    } catch (error) {
+      console.error('Native PDF save failed, falling back to browser download:', error);
+    }
+  }
+
+  return downloadPdfOnWeb(doc, safeFileName);
 };

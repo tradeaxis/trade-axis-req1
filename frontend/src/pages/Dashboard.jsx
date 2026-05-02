@@ -3183,7 +3183,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         (sum, deal) => sum + Number(deal.commission || deal.brokerage || 0),
         0,
       ),
-      balanceSettled: 0,
+      balanceSettled: Number(dealsSummary.balanceSettled || 0),
       currentBalance: Number(dealsSummary.currentBalance || 0),
     };
   }, [dealsSummary, filteredDeals, dealsSymbolFilter]);
@@ -3240,7 +3240,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       hour12: true,
     });
 
-    const entries = filteredDeals.map((deal) => {
+    const rows = filteredDeals.map((deal) => {
       const commission = Number(deal.commission || deal.brokerage || 0);
       const isEntryDeal = deal.source === 'trade' && deal.side === 'entry';
       const rawAmount = Number(isEntryDeal ? 0 : (deal.amount ?? deal.profit ?? 0));
@@ -3251,34 +3251,26 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         (deal.type ? String(deal.type).replace(/_/g, ' ').toUpperCase() : 'DEAL');
       const symbolLabelText = deal.symbol
         ? formatDisplaySymbol(deal.symbol, allFuturesSymbols)
-        : dealLabel;
+        : '-';
 
-      const lines = [`${formatPdfDateTime(dealTime)} | ${symbolLabelText} | ${dealLabel}`];
-      const metaParts = [];
-
-      if (deal.quantity !== null && deal.quantity !== undefined) {
-        metaParts.push(`Qty: ${deal.quantity}`);
-      }
-      if (dealPrice > 0) {
-        metaParts.push(`Price: ${dealPrice.toFixed(2)}`);
-      }
-      if (!isEntryDeal) {
-        metaParts.push(`Amount: ${formatSignedPdfCurrency(rawAmount)}`);
-      }
-      if (metaParts.length) {
-        lines.push(metaParts.join(' | '));
-      }
-      if (commission > 0) {
-        lines.push(`Commission: ${formatPdfCurrency(commission)}`);
-      }
-      if (deal.balance_after !== undefined && deal.balance_after !== null) {
-        lines.push(`Balance After: ${formatPdfCurrency(Number(deal.balance_after || 0))}`);
-      }
-      if (deal.description) {
-        lines.push(`Note: ${deal.description}`);
-      }
-
-      return { lines };
+      return {
+        date: formatPdfDateTime(dealTime),
+        symbol: symbolLabelText,
+        deal: dealLabel,
+        quantity:
+          deal.quantity !== null && deal.quantity !== undefined
+            ? String(deal.quantity)
+            : '-',
+        price: dealPrice > 0 ? dealPrice.toFixed(2) : '-',
+        commission: commission > 0 ? formatPdfCurrency(commission) : '-',
+        amount: isEntryDeal ? '-' : formatSignedPdfCurrency(rawAmount),
+        balanceAfter:
+          deal.balance_after !== undefined && deal.balance_after !== null
+            ? formatPdfCurrency(Number(deal.balance_after || 0))
+            : '-',
+        note: deal.description || '',
+        __amountValue: isEntryDeal ? 0 : rawAmount,
+      };
     });
 
     try {
@@ -3294,25 +3286,37 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           `Symbol Filter: ${symbolLabel}`,
           `Exported At: ${exportedAt}`,
         ],
-        summaryLines: currentDealsSummary
+        summaryRows: currentDealsSummary
           ? [
-              `Profit: ${formatPdfCurrency(currentDealsSummary.totalProfit || 0)} | Loss: ${formatPdfCurrency(currentDealsSummary.totalLoss || 0)}`,
-              `Deposits: ${formatPdfCurrency(currentDealsSummary.totalDeposits || 0)} | Withdrawals: ${formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)}`,
-              `Commission: ${formatPdfCurrency(currentDealsSummary.totalCommission || 0)} | Balance Settled: ${formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)}`,
-              `Current Balance: ${formatPdfCurrency(currentDealsSummary.currentBalance || 0)}`,
+              ['Profit', formatPdfCurrency(currentDealsSummary.totalProfit || 0)],
+              ['Loss', formatPdfCurrency(currentDealsSummary.totalLoss || 0)],
+              ['Deposits', formatPdfCurrency(currentDealsSummary.totalDeposits || 0)],
+              ['Withdrawals', formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)],
+              ['Commission', formatPdfCurrency(currentDealsSummary.totalCommission || 0)],
+              ['Balance Settled', formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)],
+              ['Current Balance', formatPdfCurrency(currentDealsSummary.currentBalance || 0)],
             ]
           : [],
-        entries,
+        columns: [
+          { key: 'date', header: 'Date & Time' },
+          { key: 'symbol', header: 'Symbol' },
+          { key: 'deal', header: 'Deal' },
+          { key: 'quantity', header: 'Qty' },
+          { key: 'price', header: 'Price' },
+          { key: 'commission', header: 'Commission' },
+          { key: 'amount', header: 'Amount' },
+          { key: 'balanceAfter', header: 'Balance After' },
+          { key: 'note', header: 'Note' },
+        ],
+        rows,
       });
 
       toast.success(
-        result?.method === 'share'
-          ? 'Deals PDF ready to share'
-          : result?.method === 'browser'
-          ? 'Deals PDF opened in browser'
-          : result?.method === 'preview'
-          ? 'Deals PDF opened'
-          : 'Deals PDF download started',
+        result?.method === 'saved'
+          ? `Deals PDF saved to Documents/${result.path || 'TradeAxis'}`
+          : result?.method === 'download'
+          ? 'Deals PDF downloaded'
+          : 'Deals PDF exported',
       );
     } catch (error) {
       if (error?.name === 'AbortError') {
@@ -5610,68 +5614,49 @@ const renderOrderConfirmation = () => {
 
           {historyViewMode === 'deals' && (
             <>
-              {dealsSummary && (
+              {currentDealsSummary && (
                 <div className="p-3 border-b shrink-0" style={{ borderColor: border, background: bgAlt2 }}>
                   <div className="grid grid-cols-2 gap-2 text-sm">
                     <div className="flex justify-between">
                       <span style={{ color: textMuted }}>Profit:</span>
-                      <span style={{ color: '#26a69a' }}>+{formatINR(
-                        dealsSymbolFilter
-                          ? filteredDeals.filter(d => d.source === 'trade' && d.side === 'exit' && d.amount > 0).reduce((s, d) => s + d.amount, 0)
-                          : dealsSummary.totalProfit
-                      )}</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(currentDealsSummary.totalProfit)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span style={{ color: textMuted }}>Loss:</span>
-                      <span style={{ color: '#ef5350' }}>-{formatINR(
-                        dealsSymbolFilter
-                          ? Math.abs(filteredDeals.filter(d => d.source === 'trade' && d.side === 'exit' && d.amount < 0).reduce((s, d) => s + d.amount, 0))
-                          : dealsSummary.totalLoss
-                      )}</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(currentDealsSummary.totalLoss)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span style={{ color: textMuted }}>Deposits:</span>
-                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSymbolFilter ? 0 : dealsSummary.totalDeposits)}</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(currentDealsSummary.totalDeposits)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span style={{ color: textMuted }}>Withdrawals:</span>
-                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSymbolFilter ? 0 : dealsSummary.totalWithdrawals)}</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(currentDealsSummary.totalWithdrawals)}</span>
                     </div>
                     <div className="flex justify-between col-span-2 pt-2 border-t" style={{ borderColor: border }}>
                       <span style={{ color: textMuted }}>
                         Commission{dealsSymbolFilter ? ` (${formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)})` : ''}:
                       </span>
-                      <span className="font-bold" style={{ color: textMuted }}>{formatINR(
-                        dealsSymbolFilter
-                          ? filteredDeals.reduce((s, d) => s + Number(d.commission || 0), 0)
-                          : dealsSummary.totalCommission
-                      )}</span>
+                      <span className="font-bold" style={{ color: textMuted }}>{formatINR(currentDealsSummary.totalCommission)}</span>
                     </div>
                     <div className="flex justify-between col-span-2">
                       <span style={{ color: textMuted }}>Balance Settled:</span>
                       <span
                         className="font-bold"
                         style={{
-                          color:
-                            dealsSymbolFilter
-                              ? textMuted
-                              : Number(dealsSummary.balanceSettled || 0) >= 0
-                              ? '#26a69a'
-                              : '#ef5350',
+                          color: Number(currentDealsSummary.balanceSettled || 0) >= 0
+                            ? '#26a69a'
+                            : '#ef5350',
                         }}
                       >
-                        {!dealsSymbolFilter && Number(dealsSummary.balanceSettled || 0) > 0 ? '+' : ''}
-                        {!dealsSymbolFilter && Number(dealsSummary.balanceSettled || 0) < 0 ? '-' : ''}
-                        {formatINR(
-                          Math.abs(
-                            dealsSymbolFilter ? 0 : Number(dealsSummary.balanceSettled || 0)
-                          )
-                        )}
+                        {Number(currentDealsSummary.balanceSettled || 0) > 0 ? '+' : ''}
+                        {Number(currentDealsSummary.balanceSettled || 0) < 0 ? '-' : ''}
+                        {formatINR(Math.abs(Number(currentDealsSummary.balanceSettled || 0)))}
                       </span>
                     </div>
                     <div className="flex justify-between col-span-2">
                       <span style={{ color: textMuted }}>Balance:</span>
-                      <span className="font-bold" style={{ color: textPrimary }}>{formatINR(dealsSummary.currentBalance)}</span>
+                      <span className="font-bold" style={{ color: textPrimary }}>{formatINR(currentDealsSummary.currentBalance)}</span>
                     </div>
                   </div>
                 </div>

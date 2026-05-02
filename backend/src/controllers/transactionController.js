@@ -383,9 +383,14 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
 
   const settlementDate = formatDateInIst(target);
   const openTrades = (trades || []).filter((trade) => trade.status === 'open');
+  const balance = Number(account?.balance || 0);
   const credit = Number(account?.credit || 0);
   const floating = openTrades.reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
-  const amount = Number((credit + floating).toFixed(2));
+  const liveEquity = Number(account?.equity);
+  const derivedEquity = Number.isFinite(liveEquity)
+    ? liveEquity
+    : balance + credit + floating;
+  const amount = Number((derivedEquity - balance).toFixed(2));
 
   if (!openTrades.length && amount === 0) {
     return null;
@@ -407,7 +412,7 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
     status: 'completed',
     description: [
       `${openTrades.length} open trade${openTrades.length === 1 ? '' : 's'} snapshot`,
-      'Auto-generated from balance and equity for this Saturday window',
+      'Auto-generated from equity minus balance for this Saturday window',
     ]
       .filter(Boolean)
       .join(' | '),
@@ -417,6 +422,19 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
     trade_count: openTrades.length,
     is_pending_snapshot: true,
   };
+};
+
+const getCurrentWindowSettlementDeal = ({ account, trades = [], settlementDeals = [] }) => {
+  const currentSettlementDate = formatDateInIst(getLastSettlementTarget());
+  const recordedDeal = (settlementDeals || []).find(
+    (deal) => firstNonEmptyString(deal.settlement_date) === currentSettlementDate,
+  );
+
+  if (recordedDeal) {
+    return recordedDeal;
+  }
+
+  return buildPendingSettlementSnapshotDeal({ account, trades });
 };
 
 const getTransactionStatusAliases = (status) => {
@@ -779,7 +797,7 @@ const getDeals = async (req, res) => {
     // Get account balance
     const { data: account } = await supabase
       .from('accounts')
-      .select('id, balance, credit')
+      .select('id, balance, credit, equity')
       .eq('id', accountId)
       .single();
 
@@ -1028,6 +1046,7 @@ const getDeals = async (req, res) => {
 
     // 3) Weekly settlements (grouped into one entry per settlement run)
     const settlementDeals = [];
+    const allSettlementDeals = [];
 
     try {
       const { data: settlements } = await supabase
@@ -1037,39 +1056,42 @@ const getDeals = async (req, res) => {
         .order('settlement_date', { ascending: false })
         .limit(100);
 
-      settlementDeals.push(
-        ...buildSettlementDeals(settlements || []).filter((deal) => {
-          if (!startDate) return true;
-          return deal.time && new Date(deal.time) >= startDate;
-        }),
-      );
+      allSettlementDeals.push(...buildSettlementDeals(settlements || []));
     } catch (e) {
       // weekly_settlements table may not exist — skip silently
     }
 
     const actualSettlementDates = new Set(
-      settlementDeals
+      allSettlementDeals
         .map((deal) => firstNonEmptyString(deal.settlement_date))
         .filter(Boolean),
     );
 
+    allSettlementDeals.push(
+      ...buildFallbackSettlementDealsFromTrades(trades || [], actualSettlementDates),
+    );
+
+    allSettlementDeals.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+
     settlementDeals.push(
-      ...buildFallbackSettlementDealsFromTrades(trades || [], actualSettlementDates).filter((deal) => {
+      ...allSettlementDeals.filter((deal) => {
         if (!startDate) return true;
         return deal.time && new Date(deal.time) >= startDate;
       }),
     );
 
     const settlementDateTarget = formatDateInIst(getLastSettlementTarget());
-    const hasCurrentSettlement = settlementDeals.some(
+    const hasCurrentSettlement = allSettlementDeals.some(
       (deal) => firstNonEmptyString(deal.settlement_date) === settlementDateTarget,
     );
+    const currentWindowSettlementDeal = getCurrentWindowSettlementDeal({
+      account,
+      trades,
+      settlementDeals: allSettlementDeals,
+    });
 
     if (!hasCurrentSettlement) {
-      const pendingSettlementDeal = buildPendingSettlementSnapshotDeal({
-        account,
-        trades,
-      });
+      const pendingSettlementDeal = currentWindowSettlementDeal;
 
       if (
         pendingSettlementDeal &&
@@ -1087,7 +1109,7 @@ const getDeals = async (req, res) => {
     const deals = allDeals.slice(0, parseInt(limit, 10));
 
     const exitDeals = allDeals.filter((d) => d.source === 'trade' && d.side === 'exit');
-    const settlementSummaryDeals = allDeals.filter((d) => d.source === 'settlement');
+    const settlementSummaryDeal = currentWindowSettlementDeal || allSettlementDeals[0] || null;
 
     const summary = {
       totalProfit: exitDeals.filter((d) => d.amount > 0).reduce((s, d) => s + d.amount, 0),
@@ -1095,7 +1117,7 @@ const getDeals = async (req, res) => {
       totalDeposits: allDeals.filter((d) => d.type === 'deposit').reduce((s, d) => s + d.amount, 0),
       totalWithdrawals: Math.abs(allDeals.filter((d) => d.type === 'withdrawal').reduce((s, d) => s + d.amount, 0)),
       totalCommission: allDeals.reduce((s, d) => s + Number(d.commission || 0), 0),
-      balanceSettled: Number(settlementSummaryDeals[0]?.amount || 0),
+      balanceSettled: Number(settlementSummaryDeal?.amount || 0),
       netPnL: exitDeals.reduce((s, d) => s + d.amount, 0),
       currentBalance: Number(account?.balance || 0),
     };
