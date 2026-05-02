@@ -386,10 +386,7 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
   const balance = Number(account?.balance || 0);
   const credit = Number(account?.credit || 0);
   const floating = openTrades.reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
-  const liveEquity = Number(account?.equity);
-  const derivedEquity = Number.isFinite(liveEquity)
-    ? liveEquity
-    : balance + credit + floating;
+  const derivedEquity = balance + credit + floating;
   const amount = Number((derivedEquity - balance).toFixed(2));
 
   if (!openTrades.length && amount === 0) {
