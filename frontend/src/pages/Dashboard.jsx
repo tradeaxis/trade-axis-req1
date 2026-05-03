@@ -491,7 +491,6 @@ const Dashboard = () => {
     addAccount,
     switchToAccount,
     removeSavedAccount,
-    getMaxSavedAccounts,
     lastSyncedAt: authLastSyncedAt,
     isUsingCachedSession,
   } = useAuthStore();
@@ -4588,38 +4587,58 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 mt-2">
+        <div className="grid grid-cols-1 gap-2 mt-2">
           <div
-            className="px-3 py-2 rounded-lg flex items-center justify-between"
-            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
+            className="p-3 rounded-lg"
+            style={{
+              background: theme === 'light' ? '#e2e8f0' : '#252832',
+              border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
+            }}
           >
-            <span className="text-[11px] font-medium" style={{ color: '#787b86' }}>
-              Margin
-            </span>
-            <span className="font-semibold text-xs" style={{ color: '#f5c542' }}>
-              {formatINR(accountStats.margin)}
-            </span>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-medium" style={{ color: '#787b86' }}>
+                  Used Margin
+                </div>
+                <div className="text-[10px]" style={{ color: '#787b86' }}>
+                  Amount currently blocked for open positions
+                </div>
+              </div>
+              <div className="font-bold text-sm" style={{ color: '#f5c542' }}>
+                {formatINR(accountStats.margin)}
+              </div>
+            </div>
           </div>
           <div
-            className="px-3 py-2 rounded-lg flex items-center justify-between"
-            style={{ background: theme === 'light' ? '#e2e8f0' : '#252832' }}
+            className="p-3 rounded-lg"
+            style={{
+              background: theme === 'light' ? '#e2e8f0' : '#252832',
+              border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
+            }}
           >
-            <span className="text-[11px] font-medium" style={{ color: '#787b86' }}>
-              Margin Level
-            </span>
-            <span
-              className="font-semibold text-xs"
-              style={{
-                color:
-                  accountStats.margin > 0
-                    ? (accountStats.marginLevel >= 100 ? '#26a69a' : '#ef5350')
-                    : '#787b86',
-              }}
-            >
-              {accountStats.margin > 0
-                ? `${accountStats.marginLevel.toFixed(2)}%`
-                : '0.00%'}
-            </span>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-medium" style={{ color: '#787b86' }}>
+                  Margin Level
+                </div>
+                <div className="text-[10px]" style={{ color: '#787b86' }}>
+                  Equity divided by used margin
+                </div>
+              </div>
+              <div
+                className="font-bold text-sm"
+                style={{
+                  color:
+                    accountStats.margin > 0
+                      ? (accountStats.marginLevel >= 100 ? '#26a69a' : '#ef5350')
+                      : '#787b86',
+                }}
+              >
+                {accountStats.margin > 0
+                  ? `${accountStats.marginLevel.toFixed(2)}%`
+                  : '0.00%'}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -6290,29 +6309,6 @@ const renderOrderConfirmation = () => {
                 <UserPlus size={18} />
                 Add Another Account
               </button>
-            </div>
-          </div>
-
-          <div
-            className="p-4 rounded-xl border flex items-center gap-3"
-            style={{ background: bgAlt, border: `1px solid ${border}` }}
-          >
-            <img
-              src="/arisetech-logo.png"
-              alt="Arise Tech Services"
-              className="h-11 w-11 object-contain rounded-lg"
-              onError={(e) => { e.target.style.display = 'none'; }}
-            />
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.18em]" style={{ color: textMuted }}>
-                Developed By
-              </div>
-              <div className="text-sm font-semibold" style={{ color: textPrimary }}>
-                Arise Tech Services
-              </div>
-              <div className="text-xs mt-0.5" style={{ color: textMuted }}>
-                Application delivery and technology support
-              </div>
             </div>
           </div>
 

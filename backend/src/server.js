@@ -23,7 +23,7 @@ const nodeCron   = require('node-cron');
 
 const { testConnection, supabase } = require('./config/supabase');
 const { dbQueue }                  = require('./config/dbQueue');   // ✅ MOVED TO TOP
-const { protect, adminOnly }       = require('./middleware/auth');
+const { protect, adminOnly, adminOrSubBroker } = require('./middleware/auth');
 
 const authRoutes        = require('./routes/auth');
 const adminRoutes       = require('./routes/admin');
@@ -32,6 +32,7 @@ const transactionRoutes = require('./routes/transactions');
 const marketRoutes      = require('./routes/market');
 const tradingRoutes     = require('./routes/trading');
 const watchlistRoutes   = require('./routes/watchlists');
+const webAdminRoutes    = require('./routes/webAdmin');
 
 const SocketHandler       = require('./websocket/socketHandler');
 const kiteService         = require('./services/kiteService');
@@ -243,6 +244,7 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/market',       marketRoutes);
 app.use('/api/trading',      tradingRoutes);
 app.use('/api/watchlists',   watchlistRoutes);
+app.use('/api/web-admin',    webAdminRoutes);
 
 // ✅ Manual settlement trigger (admin only)
 app.post('/api/admin/trigger-settlement', protect, adminOnly, async (req, res) => {
@@ -273,6 +275,32 @@ app.get('/api/admin/settlement-status', protect, adminOnly, async (req, res) => 
       nextScheduled:  nextSat.toISOString(),
       cronExpression: process.env.SETTLEMENT_CRON || '0 1 * * 6',
       timezone:       process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata',
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/web-admin/trigger-settlement', protect, adminOrSubBroker, async (req, res) => {
+  try {
+    const result = await runSettlementSafe(`web-${req.user.role}`);
+    res.json(result);
+  } catch (err) {
+    console.error('Web settlement trigger error:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get('/api/web-admin/settlement-status', protect, adminOrSubBroker, async (req, res) => {
+  try {
+    const lastRun = await getLastSettlementTime();
+    const nextScheduled = getLastSettlementTarget();
+    res.json({
+      success: true,
+      lastRun: lastRun ? lastRun.toISOString() : null,
+      nextScheduled: nextScheduled.toISOString(),
+      timezone: 'Asia/Kolkata',
+      cronExpression: 'Saturday 01:00 IST',
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

@@ -421,7 +421,7 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
   };
 };
 
-const getCurrentWindowSettlementDeal = ({ account, trades = [], settlementDeals = [] }) => {
+const getCurrentWindowSettlementDeal = ({ settlementDeals = [] }) => {
   const currentSettlementDate = formatDateInIst(getLastSettlementTarget());
   const recordedDeal = (settlementDeals || []).find(
     (deal) => firstNonEmptyString(deal.settlement_date) === currentSettlementDate,
@@ -431,7 +431,7 @@ const getCurrentWindowSettlementDeal = ({ account, trades = [], settlementDeals 
     return recordedDeal;
   }
 
-  return buildPendingSettlementSnapshotDeal({ account, trades });
+  return null;
 };
 
 const getTransactionStatusAliases = (status) => {
@@ -1077,26 +1077,9 @@ const getDeals = async (req, res) => {
       }),
     );
 
-    const settlementDateTarget = formatDateInIst(getLastSettlementTarget());
-    const hasCurrentSettlement = allSettlementDeals.some(
-      (deal) => firstNonEmptyString(deal.settlement_date) === settlementDateTarget,
-    );
     const currentWindowSettlementDeal = getCurrentWindowSettlementDeal({
-      account,
-      trades,
       settlementDeals: allSettlementDeals,
     });
-
-    if (!hasCurrentSettlement) {
-      const pendingSettlementDeal = currentWindowSettlementDeal;
-
-      if (
-        pendingSettlementDeal &&
-        (!startDate || new Date(pendingSettlementDeal.time) >= startDate)
-      ) {
-        settlementDeals.push(pendingSettlementDeal);
-      }
-    }
 
     allDeals.push(...settlementDeals);
 

@@ -33,6 +33,7 @@ const clearAuthCache = () => {
 };
 
 const isTransientAuthError = (error) => {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
   if (error?.response?.status === 503) return true;
   if (!error?.response && ['ERR_NETWORK', 'ECONNABORTED'].includes(error?.code)) return true;
 
@@ -46,6 +47,10 @@ const isTransientAuthError = (error) => {
 };
 
 const initialAuthCache = readAuthCache();
+const startsOffline =
+  typeof navigator !== 'undefined' &&
+  navigator.onLine === false &&
+  Boolean(localStorage.getItem('token') && initialAuthCache?.user);
 
 // ✅ Helper: deduplicate saved accounts by loginId, then by email
 const deduplicateAccounts = (accounts) => {
@@ -80,7 +85,7 @@ const useAuthStore = create((set, get) => ({
   isAuthenticated: Boolean(localStorage.getItem('token') && initialAuthCache?.user),
   isLoading: true,
   lastSyncedAt: initialAuthCache?.lastSyncedAt || null,
-  isUsingCachedSession: false,
+  isUsingCachedSession: startsOffline,
   savedAccounts: deduplicateAccounts(
     JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY) || '[]')
   ),
@@ -188,6 +193,20 @@ const useAuthStore = create((set, get) => ({
       return;
     }
 
+    const cached = readAuthCache();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false && cached?.user) {
+      set({
+        user: cached.user,
+        accounts: Array.isArray(cached.accounts) ? cached.accounts : [],
+        token,
+        isAuthenticated: true,
+        isLoading: false,
+        lastSyncedAt: cached.lastSyncedAt || null,
+        isUsingCachedSession: true,
+      });
+      return;
+    }
+
     try {
       const response = await api.get('/auth/me');
       const { user, accounts } = response.data.data;
@@ -213,8 +232,6 @@ const useAuthStore = create((set, get) => ({
       }
     } catch (error) {
       if (isTransientAuthError(error)) {
-        const cached = readAuthCache();
-
         if (cached?.user) {
           set({
             user: cached.user,
@@ -265,9 +282,6 @@ const useAuthStore = create((set, get) => ({
     const { user, token, savedAccounts } = get();
     if (!user || !token) return;
 
-    const maxSaved =
-      user.maxSavedAccounts === -1 ? 999 : user.maxSavedAccounts || 10;
-
     const existingIndex = savedAccounts.findIndex(
       (acc) =>
         (acc.loginId && acc.loginId === user.loginId) ||
@@ -292,7 +306,7 @@ const useAuthStore = create((set, get) => ({
         ...accountData,
       };
     } else {
-      updated = [accountData, ...savedAccounts].slice(0, maxSaved);
+      updated = [accountData, ...savedAccounts];
     }
 
     updated = deduplicateAccounts(updated);
@@ -302,21 +316,7 @@ const useAuthStore = create((set, get) => ({
   },
 
   addAccount: async (loginId, password) => {
-    const { user: currentUser, savedAccounts } = get();
-    const maxSaved =
-      currentUser?.maxSavedAccounts === -1
-        ? 999
-        : currentUser?.maxSavedAccounts || 5;
-
-    if (savedAccounts.length >= maxSaved) {
-      return {
-        success: false,
-        message:
-          maxSaved === 999
-            ? 'Cannot add more accounts'
-            : `Maximum ${maxSaved} saved accounts allowed. Remove one first.`,
-      };
-    }
+    const { savedAccounts } = get();
 
     try {
       const response = await loginRequest(loginId, password);
@@ -461,10 +461,7 @@ const useAuthStore = create((set, get) => ({
   },
 
   getMaxSavedAccounts: () => {
-    const { user } = get();
-    const max = user?.maxSavedAccounts;
-    if (max === -1 || max === undefined) return '∞';
-    return max || 5;
+    return 'Unlimited';
   },
 
   isClosingMode: () => {

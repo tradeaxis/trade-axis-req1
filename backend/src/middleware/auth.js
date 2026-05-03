@@ -75,4 +75,17 @@ const adminOnly = (req, res, next) => {
   }
 };
 
-module.exports = { protect, adminOnly };
+const adminOrSubBroker = (req, res, next) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'sub_broker') {
+    next();
+    return;
+  }
+
+  res.status(403).json({
+    success: false,
+    message: 'Access denied. Admin or sub broker only.'
+  });
+};
+
+module.exports = { protect, adminOnly, adminOrSubBroker };

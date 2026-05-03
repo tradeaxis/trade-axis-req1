@@ -12,6 +12,7 @@ backend/.env
 # Build outputs
 frontend/dist/
 frontend/build/
+webapp/dist/
 
 # Logs
 *.log
