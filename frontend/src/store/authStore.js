@@ -71,7 +71,7 @@ const loginRequest = (loginId, password) => {
 
   return api.post('/auth/login', body, {
     skipAuth: true,
-    timeout: 12000,
+    timeout: 45000,
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
