@@ -418,6 +418,16 @@ function App() {
     }
   };
 
+  const selectAccount = (id) => {
+    setSelectedAccountId(id);
+    localStorage.setItem(authStorageKey, JSON.stringify({
+      ...auth,
+      accounts,
+      token: localStorage.getItem(tokenStorageKey),
+      selectedAccountId: id,
+    }));
+  };
+
   if (!auth) return <Login onLogin={handleLogin} />;
 
   const navTabs = role === 'admin' || role === 'sub_broker'
@@ -478,18 +488,10 @@ function App() {
               accounts={accounts}
               selectedAccount={selectedAccount}
               selectedAccountId={selectedAccount?.id || ''}
-              onSelectAccount={(id) => {
-                setSelectedAccountId(id);
-                localStorage.setItem(authStorageKey, JSON.stringify({ ...auth, accounts, token: localStorage.getItem(tokenStorageKey), selectedAccountId: id }));
-              }}
+              onSelectAccount={selectAccount}
               savedSessions={savedSessions}
               onSwitchSavedSession={switchSavedSession}
-              onAddAccount={() => setShowAddAccount(true)}
             />
-            <button className="btn subtle" onClick={refreshAuth}>
-              <RefreshCw size={16} />
-              Refresh
-            </button>
           </div>
         </header>
 
@@ -501,7 +503,19 @@ function App() {
           {safeActive === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
           {safeActive === 'messages' && <Messages />}
           {safeActive === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
-          {safeActive === 'settings' && <SettingsPanel user={user} />}
+          {safeActive === 'settings' && (
+            <SettingsPanel
+              user={user}
+              accounts={accounts}
+              selectedAccount={selectedAccount}
+              selectedAccountId={selectedAccount?.id || ''}
+              onSelectAccount={selectAccount}
+              savedSessions={savedSessions}
+              onSwitchSavedSession={switchSavedSession}
+              onAddAccount={() => setShowAddAccount(true)}
+              onRefresh={refreshAuth}
+            />
+          )}
           {safeActive === 'users' && <UsersPanel mode="user" role={role} />}
           {safeActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
           {safeActive === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
@@ -550,7 +564,7 @@ function AccountSelect({
   onAddAccount,
 }) {
   return (
-    <div className="account-switcher">
+    <div className={`account-switcher ${onAddAccount ? 'has-account-action' : ''}`}>
       <select className="select compact-select" value={selectedAccountId || ''} onChange={(event) => onSelectAccount(event.target.value)}>
         {(accounts || []).map((account) => (
           <option key={account.id} value={account.id}>
@@ -572,10 +586,12 @@ function AccountSelect({
           ))}
         </select>
       )}
-      <button className="btn subtle" type="button" onClick={onAddAccount}>
-        <Plus size={16} />
-        Add Account
-      </button>
+      {onAddAccount && (
+        <button className="btn subtle" type="button" onClick={onAddAccount}>
+          <Plus size={16} />
+          Add Account
+        </button>
+      )}
     </div>
   );
 }
@@ -1429,7 +1445,17 @@ function WalletPanel({ selectedAccount, refreshAuth }) {
   );
 }
 
-function SettingsPanel({ user }) {
+function SettingsPanel({
+  user,
+  accounts,
+  selectedAccount,
+  selectedAccountId,
+  onSelectAccount,
+  savedSessions,
+  onSwitchSavedSession,
+  onAddAccount,
+  onRefresh,
+}) {
   return (
     <div className="grid-2">
       <div className="card pad">
@@ -1447,6 +1473,39 @@ function SettingsPanel({ user }) {
         <div className="section-head">
           <div><h2>Security</h2><p>Password changes remain available in the mobile app flow.</p></div>
           <Lock color="var(--blue)" />
+        </div>
+      </div>
+      <div className="card pad">
+        <div className="section-head">
+          <div><h2>Accounts</h2><p>Switch account, add another login, or refresh account details.</p></div>
+          <button className="btn subtle" type="button" onClick={onRefresh}><RefreshCw size={16} />Refresh</button>
+        </div>
+        <div className="settings-account-panel">
+          <AccountSelect
+            accounts={accounts}
+            selectedAccount={selectedAccount}
+            selectedAccountId={selectedAccountId}
+            onSelectAccount={onSelectAccount}
+            savedSessions={savedSessions}
+            onSwitchSavedSession={onSwitchSavedSession}
+            onAddAccount={onAddAccount}
+          />
+          <div className="list account-list">
+            {(accounts || []).map((account) => (
+              <div className={`row ${account.id === selectedAccountId ? 'active' : ''}`} key={account.id}>
+                <div>
+                  <strong>{account.account_number}</strong>
+                  <div className="meta">{account.is_demo ? 'Demo account' : 'Live account'}</div>
+                </div>
+                {account.id === selectedAccountId && <span className="pill blue">Selected</span>}
+              </div>
+            ))}
+            {!accounts?.length && (
+              <div className="row">
+                <div><strong>No accounts found</strong><div className="meta">Add an account to start using the dashboard.</div></div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
