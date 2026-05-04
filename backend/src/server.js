@@ -140,7 +140,19 @@ const getLastSettlementTarget = () => {
   return new Date(lastSat.getTime() - 5.5 * 3600000); // back to UTC
 };
 
+const isSettlementWindow = (date = new Date()) => {
+  const utcMs = date.getTime() + date.getTimezoneOffset() * 60000;
+  const ist   = new Date(utcMs + 5.5 * 3600000);
+
+  return ist.getDay() === 6 && ist.getHours() === 1;
+};
+
 const shouldRunCatchupSettlement = async () => {
+  if (!isSettlementWindow()) {
+    console.log('ℹ️ Settlement catchup skipped: outside Saturday 01:00 IST window.');
+    return false;
+  }
+
   const lastRun = await getLastSettlementTime();
   const target  = getLastSettlementTarget();
   const now     = new Date();
@@ -160,6 +172,19 @@ const shouldRunCatchupSettlement = async () => {
 let settlementRunPromise = null;
 
 const runSettlementSafe = async (trigger = 'cron') => {
+  const manualTrigger = trigger === 'manual' || String(trigger).startsWith('web-');
+  if (!manualTrigger && !isSettlementWindow()) {
+    console.log(`ℹ️ Weekly settlement skipped (${trigger}): outside Saturday 01:00 IST window.`);
+    return {
+      success: true,
+      skipped: true,
+      message: 'Automatic settlement runs only on Saturday between 01:00 and 01:59 IST.',
+      settled: 0,
+      totalWeeklyPnL: 0,
+      accounts: 0,
+    };
+  }
+
   const target = getLastSettlementTarget();
   const lastRun = await getLastSettlementTime();
 

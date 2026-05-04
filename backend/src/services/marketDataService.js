@@ -9,6 +9,14 @@ const { supabase } = require('../config/supabase');
 const kiteService      = require('./kiteService');
 const kiteStreamService= require('./kiteStreamService');
 
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+};
+
 class MarketDataService {
   constructor() {
     this.metaCache = new Map();
@@ -45,13 +53,20 @@ class MarketDataService {
     // ── Resolve prices ────────────────────────────────────────────────────
     // DB columns: last_price, bid, ask, open_price, high_price, low_price,
     //             previous_close, change_value, change_percent
-    const lastPrice  = live ? live.last      : Number(d.last_price    || 0);
-    const bidPrice   = live ? live.bid       : Number(d.bid           || d.last_price || 0);
-    const askPrice   = live ? live.ask       : Number(d.ask           || d.last_price || 0);
+    const fallbackPrice = firstPositiveNumber(
+      d.last_price,
+      d.previous_close,
+      d.close_price,
+      d.bid,
+      d.ask,
+    );
+    const lastPrice  = live ? live.last      : fallbackPrice;
+    const bidPrice   = live ? live.bid       : firstPositiveNumber(d.bid, fallbackPrice);
+    const askPrice   = live ? live.ask       : firstPositiveNumber(d.ask, fallbackPrice);
     const openPrice  = live ? live.open      : Number(d.open_price    || 0);
     const highPrice  = live ? live.high      : Number(d.high_price    || 0);
     const lowPrice   = live ? live.low       : Number(d.low_price     || 0);
-    const prevClose  = live ? live.prevClose : Number(d.previous_close|| 0);
+    const prevClose  = live ? live.prevClose : firstPositiveNumber(d.previous_close, fallbackPrice);
     const changeVal  = live ? live.change    : Number(d.change_value  || 0);
     const changePct  = live ? live.changePct : Number(d.change_percent|| 0);
     const dbLastUpdate = d.last_update ? new Date(d.last_update).getTime() : 0;
@@ -101,7 +116,7 @@ class MarketDataService {
       // ── Meta ──
       timestamp:  live ? live.timestamp : (dbLastUpdate || Date.now()),
       source:     live ? 'kite' : 'db',
-      off_quotes: !live && (!d.last_price || d.last_price <= 0 || isDbStale),
+      off_quotes: !live && (!fallbackPrice || fallbackPrice <= 0 || isDbStale),
     };
   }
 

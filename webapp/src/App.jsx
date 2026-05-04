@@ -122,20 +122,32 @@ const isVisibleContract = (symbol, referenceDate = new Date()) => {
 const filterTradableSymbols = (symbols = []) =>
   (symbols || []).filter((symbol) => symbol?.is_active !== false && isVisibleContract(symbol));
 
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+};
+
 const getSymbolPrice = (symbol) =>
-  Number(
-    symbol?.last_price ||
-    symbol?.lastPrice ||
-    symbol?.current_price ||
-    symbol?.currentPrice ||
-    symbol?.previous_close ||
-    symbol?.previousClose ||
-    symbol?.close_price ||
-    symbol?.ohlc?.close ||
-    symbol?.bid ||
-    symbol?.ask ||
-    0
+  firstPositiveNumber(
+    symbol?.last_price,
+    symbol?.lastPrice,
+    symbol?.current_price,
+    symbol?.currentPrice,
+    symbol?.previous_close,
+    symbol?.previousClose,
+    symbol?.close_price,
+    symbol?.closePrice,
+    symbol?.ohlc?.close,
+    symbol?.bid,
+    symbol?.ask,
   );
+
+const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPrice, getSymbolPrice(symbol));
+
+const getSymbolAsk = (symbol) => firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol));
 
 const loadTradableSymbols = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
@@ -793,8 +805,8 @@ function Quotes({ selectedAccount }) {
             {visible.map((symbol) => (
               <tr key={symbol.symbol} className="click-row" onClick={() => setTicketSymbol(symbol)}>
                 <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
-                <td>{Number(symbol.bid || 0).toFixed(2)}</td>
-                <td>{Number(symbol.ask || 0).toFixed(2)}</td>
+                <td>{getSymbolBid(symbol).toFixed(2)}</td>
+                <td>{getSymbolAsk(symbol).toFixed(2)}</td>
                 <td>{getSymbolPrice(symbol).toFixed(2)}</td>
                 <td className={Number(symbol.change_percent || 0) >= 0 ? 'positive' : 'negative'}>
                   {Number(symbol.change_percent || 0).toFixed(2)}%

@@ -26,6 +26,7 @@ const SYMBOL_SELECT_FIELDS = [
   'bid',
   'ask',
   'last_price',
+  'previous_close',
   'open_price',
   'high_price',
   'low_price',
@@ -36,6 +37,31 @@ const SYMBOL_SELECT_FIELDS = [
   'tick_size',
   'last_update',
 ].join(', ');
+
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+};
+
+const withQuoteFallback = (symbol) => {
+  const fallbackPrice = firstPositiveNumber(
+    symbol?.last_price,
+    symbol?.previous_close,
+    symbol?.close_price,
+    symbol?.bid,
+    symbol?.ask,
+  );
+
+  return {
+    ...symbol,
+    last_price: fallbackPrice,
+    bid: firstPositiveNumber(symbol?.bid, fallbackPrice),
+    ask: firstPositiveNumber(symbol?.ask, fallbackPrice),
+  };
+};
 
 // In-memory symbol list cache — avoids repeated full-table scans
 let _symbolCache     = null;
@@ -126,6 +152,8 @@ exports.getSymbols = async (req, res) => {
       allSymbols = allSymbols.slice(0, parseInt(limit));
     }
 
+    allSymbols = allSymbols.map(withQuoteFallback);
+
 // Store in cache only for unfiltered full fetches
     if (!search && !category) {
       _symbolCache     = allSymbols;
@@ -167,12 +195,20 @@ exports.getQuote = async (req, res) => {
     const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
     const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
+    const fallbackPrice = firstPositiveNumber(
+      dbSym.last_price,
+      dbSym.previous_close,
+      dbSym.close_price,
+      dbSym.bid,
+      dbSym.ask,
+    );
 
     const quote = {
       ...dbSym,
-      last_price: hasLive ? live.last : Number(dbSym.last_price || 0),
-      bid: hasLive ? live.bid : Number(dbSym.bid || dbSym.last_price || 0),
-      ask: hasLive ? live.ask : Number(dbSym.ask || dbSym.last_price || 0),
+      last_price: hasLive ? live.last : fallbackPrice,
+      previous_close: Number(dbSym.previous_close || 0),
+      bid: hasLive ? live.bid : firstPositiveNumber(dbSym.bid, fallbackPrice),
+      ask: hasLive ? live.ask : firstPositiveNumber(dbSym.ask, fallbackPrice),
       open_price: hasLive ? live.open : Number(dbSym.open_price || 0),
       high_price: hasLive ? live.high : Number(dbSym.high_price || 0),
       low_price: hasLive ? live.low : Number(dbSym.low_price || 0),
@@ -243,7 +279,7 @@ exports.searchSymbols = async (req, res) => {
 
     if (error) throw error;
 
-    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow);
+    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow).map(withQuoteFallback);
     res.json({ success: true, symbols: filteredSymbols, total: filteredSymbols.length });
   } catch (error) {
     console.error('searchSymbols error:', error);

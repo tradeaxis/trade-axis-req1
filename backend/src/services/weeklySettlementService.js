@@ -303,13 +303,13 @@ class WeeklySettlementService {
     // 2. DB symbols table
     const { data: symRow } = await supabase
       .from('symbols')
-      .select('last_price, bid, ask')
+      .select('last_price, previous_close, bid, ask')
       .eq('symbol', trade.symbol)
       .limit(1);
 
     const s = symRow?.[0];
     if (s) {
-      const p = Number(s.last_price || 0) || Number(s.bid || 0) || Number(s.ask || 0);
+      const p = Number(s.last_price || 0) || Number(s.previous_close || 0) || Number(s.bid || 0) || Number(s.ask || 0);
       if (p > 0) return p;
     }
 
