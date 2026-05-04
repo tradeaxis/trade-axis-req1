@@ -92,6 +92,49 @@ const mapTransaction = (txn) => ({
   is_demo: txn.accounts?.is_demo || false,
 });
 
+const attachUserAndAccountInfo = async (rows = []) => {
+  const userIds = [...new Set(rows.map((row) => row.user_id).filter(Boolean))];
+  const accountIds = [...new Set(rows.map((row) => row.account_id).filter(Boolean))];
+  const userMap = new Map();
+  const accountMap = new Map();
+
+  if (userIds.length) {
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('id, login_id, email, first_name, last_name, role, created_by')
+      .in('id', userIds);
+    if (error) throw error;
+    (users || []).forEach((user) => userMap.set(user.id, user));
+  }
+
+  if (accountIds.length) {
+    const { data: accounts, error } = await supabase
+      .from('accounts')
+      .select('id, account_number, is_demo, balance, equity, margin, free_margin, leverage')
+      .in('id', accountIds);
+    if (error) throw error;
+    (accounts || []).forEach((account) => accountMap.set(account.id, account));
+  }
+
+  return rows.map((row) => {
+    const user = userMap.get(row.user_id) || {};
+    const account = accountMap.get(row.account_id) || {};
+    return {
+      ...row,
+      user_login_id: user.login_id || '',
+      user_name: `${user.first_name || ''} ${user.last_name || ''}`.trim(),
+      user_email: user.email || '',
+      account_number: account.account_number || '',
+      is_demo: account.is_demo || false,
+      account_balance: account.balance,
+      account_equity: account.equity,
+      account_margin: account.margin,
+      account_free_margin: account.free_margin,
+      account_leverage: account.leverage,
+    };
+  });
+};
+
 exports.summary = async (req, res) => {
   try {
     const userIds = await getManagedUserIds(req);
@@ -498,6 +541,115 @@ exports.openPositions = async (req, res) => {
   }
 };
 
+exports.positions = async (req, res) => {
+  try {
+    const {
+      userId = '',
+      status = 'open',
+      q = '',
+      limit = 1000,
+    } = req.query;
+
+    if (userId) await assertManagedUser(req, userId);
+
+    let query = supabase
+      .from('trades')
+      .select('id, symbol, exchange, trade_type, quantity, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at')
+      .order(status === 'closed' ? 'close_time' : 'open_time', { ascending: false })
+      .limit(Math.min(Number(limit) || 1000, 2000));
+
+    if (status && status !== 'all') query = query.eq('status', status);
+    if (userId) {
+      query = query.eq('user_id', userId);
+    } else {
+      const userIds = await getManagedUserIds(req);
+      if (Array.isArray(userIds)) {
+        if (userIds.length === 0) return res.json({ success: true, data: [] });
+        query = query.in('user_id', userIds);
+      }
+    }
+
+    if (q && q.trim()) {
+      const term = q.trim();
+      query = query.or(`symbol.ilike.%${term}%,comment.ilike.%${term}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ success: true, data: await attachUserAndAccountInfo(data || []) });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.orders = async (req, res) => {
+  try {
+    const {
+      userId = '',
+      status = 'executed',
+      q = '',
+      limit = 1000,
+    } = req.query;
+
+    if (userId) await assertManagedUser(req, userId);
+
+    const scopedUserIds = await getManagedUserIds(req);
+    const applyScope = (query) => {
+      let next = query;
+      if (userId) next = next.eq('user_id', userId);
+      else if (Array.isArray(scopedUserIds)) {
+        if (scopedUserIds.length === 0) return null;
+        next = next.in('user_id', scopedUserIds);
+      }
+      return next;
+    };
+
+    if (status === 'executed') {
+      let query = supabase
+        .from('trades')
+        .select('id, user_id, account_id, symbol, trade_type, quantity, open_price, current_price, status, open_time, close_time, comment')
+        .order('open_time', { ascending: false })
+        .limit(Math.min(Number(limit) || 1000, 2000));
+      query = applyScope(query);
+      if (!query) return res.json({ success: true, data: [] });
+      if (q && q.trim()) query = query.or(`symbol.ilike.%${q.trim()}%,comment.ilike.%${q.trim()}%`);
+      const { data, error } = await query;
+      if (error) throw error;
+      const rows = await attachUserAndAccountInfo(data || []);
+      return res.json({
+        success: true,
+        data: rows.map((row) => ({
+          ...row,
+          order_status: 'executed',
+          order_type: 'market',
+          rate: row.open_price,
+          time: row.open_time,
+        })),
+      });
+    }
+
+    let query = supabase
+      .from('pending_orders')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(Math.min(Number(limit) || 1000, 2000));
+
+    if (status === 'pending') query = query.eq('status', 'pending');
+    if (status === 'rejected') query = query.in('status', ['rejected', 'cancelled', 'failed']);
+    query = applyScope(query);
+    if (!query) return res.json({ success: true, data: [] });
+    if (q && q.trim()) query = query.or(`symbol.ilike.%${q.trim()}%,comment.ilike.%${q.trim()}%`);
+
+    const { data, error } = await query;
+    if (error) {
+      return res.json({ success: true, data: [] });
+    }
+    res.json({ success: true, data: await attachUserAndAccountInfo(data || []) });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.closePosition = async (req, res, next) => {
   try {
     const { tradeId } = req.body || {};
@@ -559,6 +711,7 @@ exports.tradeOnBehalf = async (req, res) => {
       currentPrice,
       stopLoss = 0,
       takeProfit = 0,
+      entryTime,
       comment = '',
     } = req.body || {};
 
@@ -607,7 +760,10 @@ exports.tradeOnBehalf = async (req, res) => {
     const brokerageRate = await require('../services/tradingService').getBrokerageRate(userId);
     const marginRequired = (price * qty * lotSize) / leverage;
     const brokerage = price * qty * lotSize * brokerageRate;
-    const now = new Date().toISOString();
+    const requestedEntryTime = entryTime ? new Date(entryTime) : null;
+    const now = requestedEntryTime && !Number.isNaN(requestedEntryTime.getTime())
+      ? requestedEntryTime.toISOString()
+      : new Date().toISOString();
     const accountEquity = Number(account.equity ?? (Number(account.balance || 0) + Number(account.credit || 0)));
     const newMargin = Number(account.margin || 0) + marginRequired;
 

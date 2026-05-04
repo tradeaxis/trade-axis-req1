@@ -15,6 +15,8 @@ router.get('/transactions', webAdminAuth, webAdminController.listTransactions);
 router.post('/transactions/:id/action', webAdminAuth, webAdminController.updateTransaction);
 
 router.get('/open-positions', webAdminAuth, webAdminController.openPositions);
+router.get('/positions', webAdminAuth, webAdminController.positions);
+router.get('/orders', webAdminAuth, webAdminController.orders);
 router.post('/trade-on-behalf', webAdminAuth, webAdminController.tradeOnBehalf);
 
 router.get('/market-holiday', webAdminAuth, adminController.getMarketHoliday);
