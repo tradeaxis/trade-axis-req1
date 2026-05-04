@@ -83,7 +83,7 @@ const useAuthStore = create((set, get) => ({
   accounts: Array.isArray(initialAuthCache?.accounts) ? initialAuthCache.accounts : [],
   token: localStorage.getItem('token'),
   isAuthenticated: Boolean(localStorage.getItem('token') && initialAuthCache?.user),
-  isLoading: true,
+  isLoading: startsOffline ? false : true,
   lastSyncedAt: initialAuthCache?.lastSyncedAt || null,
   isUsingCachedSession: startsOffline,
   savedAccounts: deduplicateAccounts(

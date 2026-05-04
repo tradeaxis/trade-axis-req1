@@ -42,6 +42,7 @@ import api from './services/api';
 
 const authStorageKey = 'trade_axis_web_auth';
 const tokenStorageKey = 'trade_axis_web_token';
+const savedSessionsKey = 'trade_axis_web_saved_sessions';
 
 const commonTabs = [
   { id: 'overview', label: 'Overview', icon: Home },
@@ -88,11 +89,81 @@ const getUserName = (user) => {
 
 const getLoginId = (user) => user?.login_id || user?.loginId || '';
 
+const getExpiryDate = (symbol) => {
+  const raw = symbol?.expiry_date || symbol?.expiryDate || symbol?.expiry;
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const getMonthKey = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
+
+const isVisibleContract = (symbol, referenceDate = new Date()) => {
+  const expiry = getExpiryDate(symbol);
+  if (!expiry) return true;
+
+  const allowedMonths = new Set([getMonthKey(referenceDate)]);
+  if (referenceDate.getDate() >= 20) {
+    allowedMonths.add(getMonthKey(addMonths(referenceDate, 1)));
+  }
+
+  return allowedMonths.has(getMonthKey(expiry));
+};
+
+const filterTradableSymbols = (symbols = []) =>
+  (symbols || []).filter((symbol) => symbol?.is_active !== false && isVisibleContract(symbol));
+
+const getSymbolPrice = (symbol) =>
+  Number(symbol?.last_price || symbol?.lastPrice || symbol?.bid || symbol?.ask || 0);
+
+const loadTradableSymbols = async (params = {}) => {
+  const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
+  return filterTradableSymbols(res.data?.symbols || []);
+};
+
 const readAuth = () => {
   try {
     return JSON.parse(localStorage.getItem(authStorageKey) || 'null');
   } catch {
     return null;
+  }
+};
+
+const readSavedSessions = () => {
+  try {
+    return JSON.parse(localStorage.getItem(savedSessionsKey) || '[]');
+  } catch {
+    return [];
+  }
+};
+
+const writeSavedSession = (session) => {
+  if (!session?.token || !session?.user) return;
+  const loginId = getLoginId(session.user) || session.user.email;
+  const next = [
+    { ...session, savedAt: new Date().toISOString() },
+    ...readSavedSessions().filter((item) => (getLoginId(item.user) || item.user?.email) !== loginId),
+  ];
+  localStorage.setItem(savedSessionsKey, JSON.stringify(next));
+};
+
+const createSessionFromLogin = async (loginId, password) => {
+  const body = new URLSearchParams({ loginId: loginId.trim(), password });
+  const res = await api.post('/auth/login', body, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+  const data = res.data?.data || {};
+  localStorage.setItem(tokenStorageKey, data.token);
+
+  try {
+    const me = await api.get('/auth/me');
+    const fresh = me.data?.data || {};
+    return { user: fresh.user || data.user, accounts: fresh.accounts || data.accounts || [], token: data.token };
+  } catch {
+    return { user: data.user, accounts: data.accounts || [], token: data.token };
   }
 };
 
@@ -110,17 +181,10 @@ function Login({ onLogin }) {
 
     setLoading(true);
     try {
-      const body = new URLSearchParams({
-        loginId: form.loginId.trim(),
-        password: form.password,
-      });
-      const res = await api.post('/auth/login', body, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
-      const data = res.data?.data || {};
-      localStorage.setItem(tokenStorageKey, data.token);
-      localStorage.setItem(authStorageKey, JSON.stringify({ user: data.user, accounts: data.accounts || [] }));
-      onLogin({ user: data.user, accounts: data.accounts || [] });
+      const session = await createSessionFromLogin(form.loginId, form.password);
+      localStorage.setItem(authStorageKey, JSON.stringify(session));
+      writeSavedSession(session);
+      onLogin(session);
       toast.success('Login successful');
     } catch (error) {
       toast.error(error.response?.data?.message || 'Login failed');
@@ -274,10 +338,29 @@ function App() {
   const [active, setActive] = useState('overview');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [accounts, setAccounts] = useState(cached?.accounts || []);
+  const [selectedAccountId, setSelectedAccountId] = useState(cached?.selectedAccountId || cached?.accounts?.[0]?.id || '');
+  const [savedSessions, setSavedSessions] = useState(readSavedSessions());
+  const [showAddAccount, setShowAddAccount] = useState(false);
 
   const user = auth?.user || null;
   const role = String(user?.role || 'user').toLowerCase();
-  const selectedAccount = accounts[0] || null;
+  const selectedAccount = accounts.find((account) => account.id === selectedAccountId) || accounts[0] || null;
+
+  const applySession = (session) => {
+    const nextAccountId = session?.selectedAccountId || session?.accounts?.[0]?.id || '';
+    localStorage.setItem(tokenStorageKey, session.token);
+    localStorage.setItem(authStorageKey, JSON.stringify({ ...session, selectedAccountId: nextAccountId }));
+    setAuth(session);
+    setAccounts(session?.accounts || []);
+    setSelectedAccountId(nextAccountId);
+    setSavedSessions(readSavedSessions());
+    setActive('overview');
+    setSidebarOpen(false);
+  };
+
+  const handleLogin = (session) => {
+    applySession(session);
+  };
 
   const refreshAuth = useCallback(async () => {
     const token = localStorage.getItem(tokenStorageKey);
@@ -285,15 +368,21 @@ function App() {
     try {
       const res = await api.get('/auth/me');
       const data = res.data?.data || {};
-      setAuth({ user: data.user, accounts: data.accounts || [] });
+      const nextAccounts = data.accounts || [];
+      const nextAccountId = nextAccounts.some((account) => account.id === selectedAccountId)
+        ? selectedAccountId
+        : nextAccounts[0]?.id || '';
+      const nextSession = { user: data.user, accounts: nextAccounts, token, selectedAccountId: nextAccountId };
+      setAuth(nextSession);
       setAccounts(data.accounts || []);
-      localStorage.setItem(authStorageKey, JSON.stringify({ user: data.user, accounts: data.accounts || [] }));
+      setSelectedAccountId(nextAccountId);
+      localStorage.setItem(authStorageKey, JSON.stringify(nextSession));
     } catch {
       localStorage.removeItem(tokenStorageKey);
       localStorage.removeItem(authStorageKey);
       setAuth(null);
     }
-  }, []);
+  }, [selectedAccountId]);
 
   useEffect(() => {
     if (auth) refreshAuth();
@@ -303,14 +392,39 @@ function App() {
     localStorage.removeItem(tokenStorageKey);
     localStorage.removeItem(authStorageKey);
     setAuth(null);
+    setAccounts([]);
+    setSelectedAccountId('');
+    setActive('overview');
+    setSidebarOpen(false);
   };
 
-  if (!auth) return <Login onLogin={setAuth} />;
+  const switchSavedSession = async (sessionIndex) => {
+    const session = savedSessions[Number(sessionIndex)];
+    if (!session?.token) return;
+    try {
+      localStorage.setItem(tokenStorageKey, session.token);
+      const res = await api.post('/auth/switch-account', {
+        loginId: getLoginId(session.user),
+        email: session.user?.email,
+        token: session.token,
+      }, { skipAuth: true });
+      const data = res.data?.data || {};
+      const nextSession = { user: data.user, accounts: data.accounts || [], token: data.token };
+      writeSavedSession(nextSession);
+      applySession(nextSession);
+      toast.success('Account switched');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Saved account switch failed');
+    }
+  };
+
+  if (!auth) return <Login onLogin={handleLogin} />;
 
   const navTabs = role === 'admin' || role === 'sub_broker'
     ? [...commonTabs, ...adminTabs.filter((tab) => !tab.adminOnly || role === 'admin')]
     : commonTabs;
-  const activeTab = navTabs.find((tab) => tab.id === active) || navTabs[0];
+  const safeActive = navTabs.some((tab) => tab.id === active) ? active : 'overview';
+  const activeTab = navTabs.find((tab) => tab.id === safeActive) || navTabs[0];
 
   return (
     <div className="app-shell">
@@ -320,10 +434,10 @@ function App() {
           <span>Trade Axis</span>
         </div>
 
-        <nav>
+        <nav className="sidebar-nav">
           <div className="nav-section-title">Workspace</div>
           {commonTabs.map((tab) => (
-            <NavButton key={tab.id} tab={tab} active={active === tab.id} onClick={() => { setActive(tab.id); setSidebarOpen(false); }} />
+            <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => { setActive(tab.id); setSidebarOpen(false); }} />
           ))}
 
           {(role === 'admin' || role === 'sub_broker') && (
@@ -332,7 +446,7 @@ function App() {
               {adminTabs
                 .filter((tab) => !tab.adminOnly || role === 'admin')
                 .map((tab) => (
-                  <NavButton key={tab.id} tab={tab} active={active === tab.id} onClick={() => { setActive(tab.id); setSidebarOpen(false); }} />
+                  <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => { setActive(tab.id); setSidebarOpen(false); }} />
                 ))}
             </>
           )}
@@ -360,7 +474,18 @@ function App() {
             <p>{roleLabel(role)} console with live trading controls</p>
           </div>
           <div className="topbar-actions">
-            <AccountSelect accounts={accounts} selectedAccount={selectedAccount} />
+            <AccountSelect
+              accounts={accounts}
+              selectedAccount={selectedAccount}
+              selectedAccountId={selectedAccount?.id || ''}
+              onSelectAccount={(id) => {
+                setSelectedAccountId(id);
+                localStorage.setItem(authStorageKey, JSON.stringify({ ...auth, accounts, token: localStorage.getItem(tokenStorageKey), selectedAccountId: id }));
+              }}
+              savedSessions={savedSessions}
+              onSwitchSavedSession={switchSavedSession}
+              onAddAccount={() => setShowAddAccount(true)}
+            />
             <button className="btn subtle" onClick={refreshAuth}>
               <RefreshCw size={16} />
               Refresh
@@ -369,28 +494,38 @@ function App() {
         </header>
 
         <section className="content">
-          {active === 'overview' && <Overview role={role} selectedAccount={selectedAccount} />}
-          {active === 'quotes' && <Quotes />}
-          {active === 'chart' && <ChartWorkspace />}
-          {active === 'trade' && <Trade selectedAccount={selectedAccount} />}
-          {active === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
-          {active === 'messages' && <Messages />}
-          {active === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
-          {active === 'settings' && <SettingsPanel user={user} />}
-          {active === 'users' && <UsersPanel mode="user" role={role} />}
-          {active === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
-          {active === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
-          {active === 'qrDeposits' && <QrDepositsPanel />}
-          {active === 'settlement' && <SettlementPanel />}
-          {active === 'marketHoliday' && <MarketHolidayPanel />}
-          {active === 'manualClose' && <ManualClosePanel />}
-          {active === 'scriptBan' && <ScriptBanPanel />}
-          {active === 'kiteSetup' && <KiteSetupPanel />}
-          {active === 'tradeOnBehalf' && <TradeOnBehalfPanel />}
+          {safeActive === 'overview' && <Overview role={role} selectedAccount={selectedAccount} />}
+          {safeActive === 'quotes' && <Quotes selectedAccount={selectedAccount} />}
+          {safeActive === 'chart' && <ChartWorkspace selectedAccount={selectedAccount} />}
+          {safeActive === 'trade' && <Trade selectedAccount={selectedAccount} />}
+          {safeActive === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
+          {safeActive === 'messages' && <Messages />}
+          {safeActive === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
+          {safeActive === 'settings' && <SettingsPanel user={user} />}
+          {safeActive === 'users' && <UsersPanel mode="user" role={role} />}
+          {safeActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
+          {safeActive === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
+          {safeActive === 'qrDeposits' && <QrDepositsPanel />}
+          {safeActive === 'settlement' && <SettlementPanel />}
+          {safeActive === 'marketHoliday' && <MarketHolidayPanel />}
+          {safeActive === 'manualClose' && <ManualClosePanel />}
+          {safeActive === 'scriptBan' && <ScriptBanPanel />}
+          {safeActive === 'kiteSetup' && <KiteSetupPanel />}
+          {safeActive === 'tradeOnBehalf' && <TradeOnBehalfPanel />}
         </section>
       </main>
 
       {sidebarOpen && <button aria-label="Close menu" className="modal-backdrop" onClick={() => setSidebarOpen(false)} />}
+      {showAddAccount && (
+        <AddAccountModal
+          onClose={() => setShowAddAccount(false)}
+          onAdded={(session) => {
+            writeSavedSession(session);
+            applySession(session);
+            setShowAddAccount(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -405,10 +540,87 @@ function NavButton({ tab, active, onClick }) {
   );
 }
 
-function AccountSelect({ accounts, selectedAccount }) {
+function AccountSelect({
+  accounts,
+  selectedAccount,
+  selectedAccountId,
+  onSelectAccount,
+  savedSessions,
+  onSwitchSavedSession,
+  onAddAccount,
+}) {
   return (
-    <div className="pill blue">
-      {selectedAccount?.account_number || accounts?.[0]?.account_number || 'No Account'}
+    <div className="account-switcher">
+      <select className="select compact-select" value={selectedAccountId || ''} onChange={(event) => onSelectAccount(event.target.value)}>
+        {(accounts || []).map((account) => (
+          <option key={account.id} value={account.id}>
+            {account.account_number} - {account.is_demo ? 'Demo' : 'Live'}
+          </option>
+        ))}
+        {!accounts?.length && <option value="">No Account</option>}
+      </select>
+      {savedSessions.length > 1 && (
+        <select className="select compact-select" defaultValue="" onChange={(event) => {
+          if (event.target.value !== '') onSwitchSavedSession(event.target.value);
+          event.target.value = '';
+        }}>
+          <option value="">Switch Login</option>
+          {savedSessions.map((session, index) => (
+            <option key={`${getLoginId(session.user) || session.user?.email}-${index}`} value={index}>
+              {getLoginId(session.user) || session.user?.email || 'Saved account'}
+            </option>
+          ))}
+        </select>
+      )}
+      <button className="btn subtle" type="button" onClick={onAddAccount}>
+        <Plus size={16} />
+        Add Account
+      </button>
+    </div>
+  );
+}
+
+function AddAccountModal({ onClose, onAdded }) {
+  const [form, setForm] = useState({ loginId: '', password: '' });
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!form.loginId.trim() || !form.password) {
+      toast.error('Enter login ID and password');
+      return;
+    }
+    setLoading(true);
+    try {
+      const session = await createSessionFromLogin(form.loginId, form.password);
+      toast.success('Account added');
+      onAdded(session);
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Add account failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal small-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <strong>Add Account</strong>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="field">
+            <label>Login ID</label>
+            <input className="input mono" value={form.loginId} onChange={(event) => setForm((prev) => ({ ...prev, loginId: event.target.value.toUpperCase() }))} />
+          </div>
+          <div className="field">
+            <label>Password</label>
+            <input className="input" type="password" value={form.password} onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))} />
+          </div>
+          <button className="btn primary block" disabled={loading}>{loading ? 'Adding...' : 'Add Account'}</button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -479,16 +691,16 @@ function Stat({ label, value, tone = '' }) {
   );
 }
 
-function Quotes() {
+function Quotes({ selectedAccount }) {
   const [symbols, setSymbols] = useState([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [ticketSymbol, setTicketSymbol] = useState(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const res = await api.get('/market/symbols', { params: { limit: 5000 } });
-      setSymbols(res.data?.symbols || []);
+      setSymbols(await loadTradableSymbols());
     } catch {
       toast.error('Failed to load quotes');
     } finally {
@@ -539,11 +751,11 @@ function Quotes() {
           </thead>
           <tbody>
             {visible.map((symbol) => (
-              <tr key={symbol.symbol}>
+              <tr key={symbol.symbol} className="click-row" onClick={() => setTicketSymbol(symbol)}>
                 <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
                 <td>{Number(symbol.bid || 0).toFixed(2)}</td>
                 <td>{Number(symbol.ask || 0).toFixed(2)}</td>
-                <td>{Number(symbol.last_price || 0).toFixed(2)}</td>
+                <td>{getSymbolPrice(symbol).toFixed(2)}</td>
                 <td className={Number(symbol.change_percent || 0) >= 0 ? 'positive' : 'negative'}>
                   {Number(symbol.change_percent || 0).toFixed(2)}%
                 </td>
@@ -556,34 +768,172 @@ function Quotes() {
           </tbody>
         </table>
       </div>
+
+      {ticketSymbol && (
+        <TradeTicketModal
+          accountId={selectedAccount?.id}
+          symbols={symbols}
+          initialSymbol={ticketSymbol.symbol}
+          title={ticketSymbol.symbol}
+          subtitle={ticketSymbol.display_name || 'Quote trade ticket'}
+          onClose={() => setTicketSymbol(null)}
+          onDone={load}
+        />
+      )}
     </div>
   );
 }
 
-function ChartWorkspace() {
+function ChartWorkspace({ selectedAccount }) {
   const [symbols, setSymbols] = useState([]);
   const [symbol, setSymbol] = useState('');
+  const [showTicket, setShowTicket] = useState(false);
 
   useEffect(() => {
-    api.get('/market/symbols', { params: { limit: 200 } }).then((res) => {
-      const rows = res.data?.symbols || [];
+    loadTradableSymbols({ limit: 5000 }).then((rows) => {
       setSymbols(rows);
       setSymbol(rows[0]?.symbol || '');
     }).catch(() => {});
   }, []);
 
   return (
-    <div className="card chart-box">
+    <div className="chart-workspace">
+      <div className="card chart-box">
       <div className="chart-header">
         <div>
           <strong>{symbol || 'Select Script'}</strong>
           <div className="meta">15 minute candles</div>
         </div>
-        <select className="select" value={symbol} onChange={(event) => setSymbol(event.target.value)} style={{ maxWidth: 260 }}>
-          {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
-        </select>
+        <div className="chart-actions">
+          <select className="select" value={symbol} onChange={(event) => setSymbol(event.target.value)} style={{ maxWidth: 260 }}>
+            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
+          </select>
+          <button className="btn primary" disabled={!symbol} onClick={() => setShowTicket(true)}>
+            <ArrowLeftRight size={16} />
+            Trade
+          </button>
+        </div>
       </div>
       <PriceChart symbol={symbol} />
+      </div>
+      <div className="card pad chart-side-panel">
+        <div className="section-head">
+          <div>
+            <h2>Market Watch</h2>
+            <p>Current and next month from the same contract rules.</p>
+          </div>
+        </div>
+        <div className="list compact-list">
+          {symbols.slice(0, 18).map((row) => (
+            <button key={row.symbol} className={`row clickable ${symbol === row.symbol ? 'active' : ''}`} onClick={() => setSymbol(row.symbol)}>
+              <div><strong>{row.symbol}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
+              <div className="mono">{getSymbolPrice(row).toFixed(2)}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+      {showTicket && (
+        <TradeTicketModal
+          accountId={selectedAccount?.id}
+          symbols={symbols}
+          initialSymbol={symbol}
+          title={symbol}
+          subtitle="Chart trade ticket"
+          onClose={() => setShowTicket(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, onClose, onDone }) {
+  return (
+    <div className="modal-backdrop">
+      <div className="modal ticket-modal">
+        <div className="modal-head">
+          <div>
+            <strong>{title || 'Trade Ticket'}</strong>
+            <div className="meta">{subtitle || 'Place market, limit or stop orders'}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <TradeTicket
+            accountId={accountId}
+            symbols={symbols}
+            initialSymbol={initialSymbol}
+            onDone={async () => {
+              await onDone?.();
+              onClose();
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
+  const [form, setForm] = useState({
+    symbol: initialSymbol || symbols?.[0]?.symbol || '',
+    orderType: 'market',
+    quantity: 1,
+    price: '',
+    stopLoss: '',
+    takeProfit: '',
+  });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (initialSymbol) {
+      setForm((prev) => ({ ...prev, symbol: initialSymbol }));
+    } else if (!form.symbol && symbols?.[0]?.symbol) {
+      setForm((prev) => ({ ...prev, symbol: symbols[0].symbol }));
+    }
+  }, [initialSymbol, symbols, form.symbol]);
+
+  const place = async (side) => {
+    if (!accountId) return toast.error('Select an account first');
+    if (!form.symbol) return toast.error('Select a script');
+
+    setBusy(true);
+    try {
+      const orderType = form.orderType || 'market';
+      const resolvedSide =
+        orderType.startsWith('buy_') ? 'buy' :
+        orderType.startsWith('sell_') ? 'sell' :
+        side;
+
+      const res = await api.post('/trading/order', {
+        accountId,
+        symbol: form.symbol,
+        type: resolvedSide,
+        orderType,
+        quantity: Number(form.quantity),
+        price: Number(form.price || 0),
+        stopLoss: Number(form.stopLoss || 0),
+        takeProfit: Number(form.takeProfit || 0),
+      });
+      toast.success(res.data?.message || 'Order placed');
+      await onDone?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Order failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="ticket-stack">
+      <OrderFields form={form} setForm={setForm} symbols={symbols} />
+      <div className="grid-2">
+        <button className="btn success" disabled={busy} onClick={() => place('buy')}>
+          <ArrowDownCircle size={17} />Buy
+        </button>
+        <button className="btn danger" disabled={busy} onClick={() => place('sell')}>
+          <ArrowUpCircle size={17} />Sell
+        </button>
+      </div>
     </div>
   );
 }
@@ -592,51 +942,28 @@ function Trade({ selectedAccount }) {
   const [symbols, setSymbols] = useState([]);
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
-  const [form, setForm] = useState({ symbol: '', type: 'buy', orderType: 'market', quantity: 1, price: '', stopLoss: '', takeProfit: '' });
-  const [busy, setBusy] = useState(false);
+  const [selectedSymbol, setSelectedSymbol] = useState('');
+  const [marketQuery, setMarketQuery] = useState('');
 
   const accountId = selectedAccount?.id;
 
   const load = useCallback(async () => {
     if (!accountId) return;
     const [symbolsRes, posRes, orderRes] = await Promise.all([
-      api.get('/market/symbols', { params: { limit: 500 } }),
+      loadTradableSymbols(),
       api.get(`/trading/positions/${accountId}`),
       api.get(`/trading/pending-orders/${accountId}`),
     ]);
-    const symbolRows = symbolsRes.data?.symbols || [];
+    const symbolRows = Array.isArray(symbolsRes) ? symbolsRes : [];
     setSymbols(symbolRows);
     setPositions(posRes.data?.data || []);
     setOrders(orderRes.data?.data || []);
-    setForm((prev) => ({ ...prev, symbol: prev.symbol || symbolRows[0]?.symbol || '' }));
+    setSelectedSymbol((prev) => prev || symbolRows[0]?.symbol || '');
   }, [accountId]);
 
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
-
-  const place = async () => {
-    if (!accountId) return toast.error('Select an account first');
-    setBusy(true);
-    try {
-      const res = await api.post('/trading/order', {
-        accountId,
-        symbol: form.symbol,
-        type: form.type,
-        orderType: form.orderType,
-        quantity: Number(form.quantity),
-        price: Number(form.price || 0),
-        stopLoss: Number(form.stopLoss || 0),
-        takeProfit: Number(form.takeProfit || 0),
-      });
-      toast.success(res.data?.message || 'Order placed');
-      await load();
-    } catch (error) {
-      toast.error(error.response?.data?.message || 'Order failed');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const closeTrade = async (tradeId) => {
     if (!window.confirm('Close this position?')) return;
@@ -649,6 +976,50 @@ function Trade({ selectedAccount }) {
     }
   };
 
+  const partialCloseTrade = async (trade) => {
+    const volume = window.prompt('Enter quantity to close', String(trade.quantity || ''));
+    if (!volume) return;
+    try {
+      const res = await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: Number(volume) });
+      toast.success(res.data?.message || 'Position partially closed');
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Partial close failed');
+    }
+  };
+
+  const closeAll = async () => {
+    if (!positions.length) return;
+    if (!window.confirm('Close all open positions?')) return;
+    try {
+      const res = await api.post('/trading/close-all', { accountId, filterType: 'all' });
+      toast.success(res.data?.message || 'All positions closed');
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Close all failed');
+    }
+  };
+
+  const cancelOrder = async (orderId) => {
+    if (!window.confirm('Cancel this pending order?')) return;
+    try {
+      const res = await api.delete(`/trading/pending-order/${orderId}`);
+      toast.success(res.data?.message || 'Pending order cancelled');
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Cancel failed');
+    }
+  };
+
+  const visibleSymbols = symbols
+    .filter((row) => {
+      const term = marketQuery.trim().toLowerCase();
+      if (!term) return true;
+      return String(row.symbol || '').toLowerCase().includes(term) ||
+        String(row.display_name || row.underlying || '').toLowerCase().includes(term);
+    })
+    .slice(0, 80);
+
   return (
     <div className="trade-layout">
       <div className="card pad">
@@ -658,13 +1029,20 @@ function Trade({ selectedAccount }) {
             <p>Select a script to trade.</p>
           </div>
         </div>
+        <div className="field sticky-search">
+          <div style={{ position: 'relative' }}>
+            <Search size={16} style={{ position: 'absolute', left: 12, top: 13, color: 'var(--muted)' }} />
+            <input className="input" value={marketQuery} onChange={(event) => setMarketQuery(event.target.value)} placeholder="Search script" style={{ paddingLeft: 38 }} />
+          </div>
+        </div>
         <div className="list">
-          {symbols.slice(0, 40).map((row) => (
-            <button key={row.symbol} className={`row clickable ${form.symbol === row.symbol ? 'active' : ''}`} onClick={() => setForm((prev) => ({ ...prev, symbol: row.symbol }))}>
+          {visibleSymbols.map((row) => (
+            <button key={row.symbol} className={`row clickable ${selectedSymbol === row.symbol ? 'active' : ''}`} onClick={() => setSelectedSymbol(row.symbol)}>
               <div><strong>{row.symbol}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
-              <div className="mono">{Number(row.last_price || row.bid || 0).toFixed(2)}</div>
+              <div className="mono">{getSymbolPrice(row).toFixed(2)}</div>
             </button>
           ))}
+          {!visibleSymbols.length && <div className="meta">No scripts found</div>}
         </div>
       </div>
 
@@ -674,7 +1052,10 @@ function Trade({ selectedAccount }) {
             <h2>Open Positions</h2>
             <p>Monitor and close active trades.</p>
           </div>
-          <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+          <div className="right">
+            <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+            <button className="btn danger" onClick={closeAll} disabled={!positions.length}>Close All</button>
+          </div>
         </div>
         <div className="table-wrap">
           <table>
@@ -690,7 +1071,12 @@ function Trade({ selectedAccount }) {
                   <td>{Number(position.open_price || 0).toFixed(2)}</td>
                   <td>{Number(position.current_price || 0).toFixed(2)}</td>
                   <td className={Number(position.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.profit)}</td>
-                  <td><button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button></td>
+                  <td>
+                    <div className="action-row">
+                      <button className="btn subtle" onClick={() => partialCloseTrade(position)}>Partial</button>
+                      <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!positions.length && <tr><td colSpan="7">No open positions</td></tr>}
@@ -708,7 +1094,10 @@ function Trade({ selectedAccount }) {
           {orders.map((order) => (
             <div className="row" key={order.id}>
               <div><strong>{order.symbol}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
-              <span className="pill gold">{order.status}</span>
+              <div className="action-row">
+                <span className="pill gold">{order.status}</span>
+                <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
+              </div>
             </div>
           ))}
           {!orders.length && <div className="meta">No pending orders</div>}
@@ -722,15 +1111,7 @@ function Trade({ selectedAccount }) {
             <p>Place market or pending orders.</p>
           </div>
         </div>
-        <OrderFields form={form} setForm={setForm} symbols={symbols} />
-        <div className="grid-2">
-          <button className="btn success" disabled={busy} onClick={() => { setForm((prev) => ({ ...prev, type: 'buy' })); setTimeout(place, 0); }}>
-            <ArrowDownCircle size={17} />Buy
-          </button>
-          <button className="btn danger" disabled={busy} onClick={() => { setForm((prev) => ({ ...prev, type: 'sell' })); setTimeout(place, 0); }}>
-            <ArrowUpCircle size={17} />Sell
-          </button>
-        </div>
+        <TradeTicket accountId={accountId} symbols={symbols} initialSymbol={selectedSymbol} onDone={load} />
       </div>
     </div>
   );
@@ -782,14 +1163,36 @@ function OrderFields({ form, setForm, symbols }) {
 
 function TradeHistory({ selectedAccount }) {
   const [rows, setRows] = useState([]);
+  const [orderRows, setOrderRows] = useState([]);
+  const [deals, setDeals] = useState([]);
+  const [dealsSummary, setDealsSummary] = useState(null);
   const [period, setPeriod] = useState('month');
+  const [view, setView] = useState('positions');
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!selectedAccount?.id) return;
+    setLoading(true);
+    try {
+      const [historyRes, orderRes, dealsRes] = await Promise.all([
+        api.get('/trading/history', { params: { accountId: selectedAccount.id, period } }),
+        api.get(`/trading/pending-order-history/${selectedAccount.id}`),
+        api.get('/transactions/deals', { params: { accountId: selectedAccount.id, period, limit: 500 } }),
+      ]);
+      setRows(historyRes.data?.data || []);
+      setOrderRows(orderRes.data?.data || []);
+      setDeals(dealsRes.data?.data?.deals || []);
+      setDealsSummary(dealsRes.data?.data?.summary || null);
+    } catch {
+      toast.error('Failed to load history');
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedAccount?.id, period]);
 
   useEffect(() => {
-    if (!selectedAccount?.id) return;
-    api.get('/trading/history', { params: { accountId: selectedAccount.id, period } })
-      .then((res) => setRows(res.data?.data || []))
-      .catch(() => toast.error('Failed to load history'));
-  }, [selectedAccount?.id, period]);
+    load();
+  }, [load]);
 
   return (
     <div className="card pad">
@@ -800,29 +1203,101 @@ function TradeHistory({ selectedAccount }) {
               <button key={item} className={`tab ${period === item ? 'active' : ''}`} onClick={() => setPeriod(item)}>{item}</button>
             ))}
           </div>
-        </div>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Ledger</th><th>Side</th><th>Qty</th><th>Open</th><th>Close</th><th>Commission</th><th>P&L</th></tr>
-          </thead>
-          <tbody>
-            {rows.map((trade) => (
-              <tr key={trade.id}>
-                <td><strong>{trade.symbol}</strong><div className="meta">{formatDate(trade.open_time)} to {formatDate(trade.close_time)}</div><div className="meta mono">{trade.id}</div></td>
-                <td><span className={`pill ${trade.trade_type === 'buy' ? 'teal' : 'red'}`}>{trade.trade_type}</span></td>
-                <td>{trade.quantity}</td>
-                <td>{Number(trade.open_price || 0).toFixed(2)}</td>
-                <td>{Number(trade.close_price || 0).toFixed(2)}</td>
-                <td>{formatMoney(trade.brokerage)}</td>
-                <td className={Number(trade.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(trade.profit)}</td>
-              </tr>
+          <div className="tabs">
+            {[
+              ['positions', 'Positions'],
+              ['orders', 'Orders'],
+              ['deals', 'Deals'],
+            ].map(([id, label]) => (
+              <button key={id} className={`tab ${view === id ? 'active' : ''}`} onClick={() => setView(id)}>{label}</button>
             ))}
-            {!rows.length && <tr><td colSpan="7">No ledger entries found</td></tr>}
-          </tbody>
-        </table>
+          </div>
+        </div>
+        <button className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
       </div>
+
+      {view === 'positions' && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Ledger</th><th>Side</th><th>Qty</th><th>Open</th><th>Close</th><th>Commission</th><th>P&L</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((trade) => (
+                <tr key={trade.id}>
+                  <td><strong>{trade.symbol}</strong><div className="meta">{formatDate(trade.open_time)} to {formatDate(trade.close_time)}</div><div className="meta mono">{trade.id}</div></td>
+                  <td><span className={`pill ${trade.trade_type === 'buy' ? 'teal' : 'red'}`}>{trade.trade_type}</span></td>
+                  <td>{trade.quantity}</td>
+                  <td>{Number(trade.open_price || 0).toFixed(2)}</td>
+                  <td>{Number(trade.close_price || 0).toFixed(2)}</td>
+                  <td>{formatMoney(trade.brokerage)}</td>
+                  <td className={Number(trade.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(trade.profit)}</td>
+                </tr>
+              ))}
+              {!rows.length && <tr><td colSpan="7">No closed positions found</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view === 'orders' && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Order</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>Time</th></tr>
+            </thead>
+            <tbody>
+              {orderRows.map((order) => (
+                <tr key={order.id}>
+                  <td><strong>{order.symbol}</strong><div className="meta mono">{order.id}</div></td>
+                  <td><span className={`pill ${order.trade_type === 'buy' ? 'teal' : 'red'}`}>{order.trade_type || '-'}</span></td>
+                  <td>{String(order.order_type || order.type || '-').replace('_', ' ')}</td>
+                  <td>{order.quantity || '-'}</td>
+                  <td>{Number(order.price || 0).toFixed(2)}</td>
+                  <td><span className="pill gold">{order.status || '-'}</span></td>
+                  <td>{formatDate(order.created_at || order.updated_at || order.executed_at)}</td>
+                </tr>
+              ))}
+              {!orderRows.length && <tr><td colSpan="7">No order history found</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view === 'deals' && (
+        <>
+          <div className="stats-grid compact-stats">
+            <Stat label="Profit" value={formatMoney(dealsSummary?.totalProfit || 0)} tone="positive" />
+            <Stat label="Loss" value={formatMoney(dealsSummary?.totalLoss || 0)} tone="negative" />
+            <Stat label="Commission" value={formatMoney(dealsSummary?.totalCommission || 0)} />
+            <Stat label="Balance Settled" value={formatMoney(dealsSummary?.balanceSettled || 0)} tone={Number(dealsSummary?.balanceSettled || 0) >= 0 ? 'positive' : 'negative'} />
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Deal</th><th>Side</th><th>Qty</th><th>Price</th><th>Commission</th><th>Amount</th><th>Balance After</th></tr>
+              </thead>
+              <tbody>
+                {deals.map((deal) => {
+                  const amount = Number(deal.amount || deal.profit || 0);
+                  return (
+                    <tr key={deal.id}>
+                      <td><strong>{deal.symbol || deal.dealLabel || deal.type}</strong><div className="meta">{formatDate(deal.time || deal.created_at)}</div><div className="meta">{deal.description || ''}</div></td>
+                      <td><span className={`pill ${deal.side === 'entry' || deal.trade_type === 'buy' ? 'teal' : deal.side === 'settlement' ? 'gold' : 'red'}`}>{deal.side || deal.trade_type || deal.type || '-'}</span></td>
+                      <td>{deal.quantity || '-'}</td>
+                      <td>{deal.price ? Number(deal.price).toFixed(2) : '-'}</td>
+                      <td>{formatMoney(deal.commission || deal.brokerage || 0)}</td>
+                      <td className={amount >= 0 ? 'positive' : 'negative'}>{formatMoney(amount)}</td>
+                      <td>{deal.balance_after !== undefined && deal.balance_after !== null ? formatMoney(deal.balance_after) : '-'}</td>
+                    </tr>
+                  );
+                })}
+                {!deals.length && <tr><td colSpan="7">No deals found</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

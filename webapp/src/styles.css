@@ -30,7 +30,7 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
@@ -244,9 +244,10 @@ button:disabled {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .sidebar {
@@ -259,6 +260,9 @@ button:disabled {
   position: sticky;
   top: 0;
   height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  z-index: 30;
 }
 
 .sidebar .brand-lockup {
@@ -278,6 +282,23 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin: 10px 10px 6px;
+}
+
+.sidebar-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.sidebar-nav::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
 }
 
 .nav-item {
@@ -306,9 +327,10 @@ button:disabled {
 }
 
 .sidebar-footer {
-  margin-top: auto;
   display: grid;
   gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
 }
 
 .user-chip {
@@ -329,6 +351,8 @@ button:disabled {
 
 .main {
   min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
@@ -363,6 +387,20 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.account-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compact-select {
+  min-height: 36px;
+  width: auto;
+  max-width: 190px;
+  padding: 7px 10px;
 }
 
 .content {
@@ -447,6 +485,14 @@ button:disabled {
   align-items: center;
 }
 
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .tabs {
   display: inline-flex;
   background: var(--surface-3);
@@ -489,9 +535,23 @@ button:disabled {
   gap: 16px;
 }
 
+.sticky-search {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--surface);
+  padding-bottom: 8px;
+}
+
 .list {
   display: grid;
   gap: 8px;
+}
+
+.compact-list {
+  max-height: 518px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .row {
@@ -593,6 +653,14 @@ tr:last-child td {
   border-bottom: 0;
 }
 
+.click-row {
+  cursor: pointer;
+}
+
+.click-row:hover td {
+  background: #fbfcff;
+}
+
 .positive {
   color: var(--teal);
 }
@@ -602,22 +670,60 @@ tr:last-child td {
 }
 
 .chart-box {
-  min-height: 420px;
+  min-height: 620px;
   overflow: hidden;
 }
 
+.chart-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+}
+
 .chart-header {
-  height: 52px;
+  min-height: 60px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 0 14px;
 }
 
+.chart-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .chart-stage {
-  height: 430px;
+  height: 560px;
   background: #101828;
+}
+
+.ticket-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.ticket-modal {
+  width: min(100%, 620px);
+}
+
+.small-modal {
+  width: min(100%, 430px);
+}
+
+.compact-stats {
+  margin-bottom: 14px;
+}
+
+.compact-stats .stat {
+  min-height: 82px;
+}
+
+.compact-stats .stat strong {
+  font-size: 19px;
 }
 
 .mobile-menu {
@@ -627,6 +733,7 @@ tr:last-child td {
 .modal-backdrop {
   position: fixed;
   inset: 0;
+  border: 0;
   background: rgba(16, 33, 63, 0.38);
   display: grid;
   place-items: center;
@@ -666,6 +773,10 @@ tr:last-child td {
     grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
   }
 
+  .chart-workspace {
+    grid-template-columns: 1fr;
+  }
+
   .order-column {
     grid-column: 1 / -1;
   }
@@ -688,7 +799,7 @@ tr:last-child td {
     position: fixed;
     inset: 0 auto 0 0;
     width: 280px;
-    z-index: 40;
+    z-index: 80;
     transform: translateX(-100%);
     transition: transform 0.2s ease;
   }
@@ -718,6 +829,20 @@ tr:last-child td {
 
   .topbar-actions {
     gap: 6px;
+    max-width: calc(100vw - 64px);
+    overflow-x: auto;
+  }
+
+  .account-switcher {
+    gap: 6px;
+  }
+
+  .compact-select {
+    max-width: 132px;
+  }
+
+  .account-switcher .btn {
+    min-width: max-content;
   }
 
   .topbar-title h1 {
@@ -726,6 +851,18 @@ tr:last-child td {
 
   .chart-stage {
     height: 360px;
+  }
+
+  .chart-header,
+  .chart-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chart-actions .select,
+  .chart-actions .btn {
+    max-width: none !important;
+    width: 100%;
   }
 }
 

@@ -9,7 +9,10 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('trade_axis_web_token');
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (token && config.skipAuth !== true) config.headers.Authorization = `Bearer ${token}`;
+  if (config.skipAuth === true && config.headers?.Authorization) {
+    delete config.headers.Authorization;
+  }
   return config;
 });
 
