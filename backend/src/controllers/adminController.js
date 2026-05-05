@@ -1412,10 +1412,21 @@ exports.createKiteSession = async (req, res) => {
     // Log the token that's now in memory
     console.log('🔑 New token in memory (first 10):', kiteService.accessToken?.substring(0, 10) + '...');
 
-    // Wait for DB write to complete (generateSession already called saveAccessTokenToDB 
-    // but it's fire-and-forget inside generateSession — let's ensure it's done)
-    await kiteService.saveAccessTokenToDB(kiteService.accessToken);
-    console.log('💾 Token confirmed saved to DB');
+    // generateSession already saves and verifies the token. Avoid a duplicate DB write here.
+    console.log('💾 Token saved by Kite service');
+
+    // ── AUTO-SYNC instruments before stream start ──────────────────
+    // This ensures the stream subscribes to the current valid contracts immediately.
+    let syncResult = null;
+    try {
+      const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
+      syncResult = await syncKiteInstruments();
+      if (syncResult.success) {
+        console.log(`📊 Auto-sync complete. Upserted ${syncResult.upserted || 0} instruments`);
+      }
+    } catch (syncErr) {
+      console.warn('⚠️ Auto-sync failed:', syncErr.message);
+    }
 
     // ── AUTO-RESTART STREAM with new token ──────────────────────────
     let streamResult = null;
@@ -1437,19 +1448,6 @@ exports.createKiteSession = async (req, res) => {
       }
     } catch (streamErr) {
       console.warn('⚠️ Stream restart failed:', streamErr.message);
-    }
-
-    // ── AUTO-SYNC instruments ───────────────────────────────────────
-    let syncResult = null;
-    try {
-      const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
-      syncResult = await syncKiteInstruments();
-      if (syncResult.success && syncResult.upserted > 0) {
-        console.log(`📊 Auto-synced ${syncResult.upserted} instruments`);
-        await kiteStreamService.refreshSubscriptions();
-      }
-    } catch (syncErr) {
-      console.warn('⚠️ Auto-sync failed:', syncErr.message);
     }
 
     let holidayResult = null;

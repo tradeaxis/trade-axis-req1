@@ -749,20 +749,22 @@ function Quotes({ selectedAccount }) {
   const [loading, setLoading] = useState(false);
   const [ticketSymbol, setTicketSymbol] = useState(null);
 
-  const load = async () => {
-    setLoading(true);
+  const load = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     try {
       setSymbols(await loadTradableSymbols());
     } catch {
-      toast.error('Failed to load quotes');
+      if (!silent) toast.error('Failed to load quotes');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     load();
-  }, []);
+    const interval = setInterval(() => load({ silent: true }), 5000);
+    return () => clearInterval(interval);
+  }, [load]);
 
   const visible = symbols
     .filter((symbol) => {
@@ -841,12 +843,18 @@ function ChartWorkspace({ selectedAccount }) {
   const [symbol, setSymbol] = useState('');
   const [showTicket, setShowTicket] = useState(false);
 
-  useEffect(() => {
+  const refreshSymbols = useCallback((silent = true) => {
     loadTradableSymbols({ limit: 5000 }).then((rows) => {
       setSymbols(rows);
-      setSymbol(rows[0]?.symbol || '');
+      setSymbol((prev) => prev || rows[0]?.symbol || '');
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    refreshSymbols(false);
+    const interval = setInterval(() => refreshSymbols(true), 5000);
+    return () => clearInterval(interval);
+  }, [refreshSymbols]);
 
   return (
     <div className="chart-workspace">
@@ -1029,6 +1037,18 @@ function Trade({ selectedAccount }) {
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
+
+  useEffect(() => {
+    if (!accountId) return undefined;
+    const interval = setInterval(async () => {
+      try {
+        const rows = await loadTradableSymbols();
+        setSymbols(rows);
+        setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
+      } catch {}
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [accountId]);
 
   const closeTrade = async (tradeId) => {
     if (!window.confirm('Close this position?')) return;

@@ -86,7 +86,7 @@ class KiteStreamService {
     // Dirty symbols for DB flush
     this.dirtySymbols   = new Set();
     this.dbFlushInterval= null;
-    this.DB_FLUSH_MS      = 8000;   // flush every 8s instead of 3s — reduces DB load by 62%
+    this.DB_FLUSH_MS      = Number(process.env.KITE_DB_FLUSH_MS || 30000);
     this.EMIT_INTERVAL_MS = 3000;   // keep socket emit at 3s for live feel
   }
 
@@ -495,7 +495,7 @@ class KiteStreamService {
 
       // Chunk into groups of 50 — single .in() call per chunk, serialized (not parallel)
       // This keeps connection usage to 1 at a time instead of N simultaneous
-      const CHUNK_SIZE = 50;
+      const CHUNK_SIZE = Number(process.env.KITE_DB_FLUSH_CHUNK_SIZE || 100);
       for (let i = 0; i < updates.length; i += CHUNK_SIZE) {
         const chunk = updates.slice(i, i + CHUNK_SIZE);
         const symbols = chunk.map(u => u.sym);

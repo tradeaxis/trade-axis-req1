@@ -1,9 +1,9 @@
 // backend/src/controllers/authController.js
-const { supabase } = require('../config/supabase');
+const { supabase, withRetry } = require('../config/supabase');
 const jwt = require('jsonwebtoken');
 const { hashPassword, comparePassword, generateToken, generateAccountNumber, generateLoginId } = require('../utils/auth');
 
-const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 15000);
+const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 25000);
 
 const withDbTimeout = async (operationPromise, label = 'Database request') => {
   let timeoutId;
@@ -23,6 +23,18 @@ const withDbTimeout = async (operationPromise, label = 'Database request') => {
     clearTimeout(timeoutId);
   }
 };
+
+const withDbRequest = async (operationFactory, label = 'Database request', options = {}) =>
+  withDbTimeout(
+    withRetry(async () => {
+      const result = await operationFactory();
+      if (result?.error && result.error.code !== 'PGRST116') {
+        throw result.error;
+      }
+      return result;
+    }, options.maxRetries ?? 4, options.baseDelayMs ?? 700),
+    label,
+  );
 
 const isDatabaseUnavailableError = (error) => {
   const message = String(error?.message || '').toLowerCase();
@@ -143,8 +155,8 @@ const login = async (req, res) => {
     const isLoginId = /^TA\d+$/i.test(normalizedInput);
     
     if (isLoginId) {
-      const { data, error } = await withDbTimeout(
-        supabase
+      const { data, error } = await withDbRequest(
+        () => supabase
           .from('users')
           .select('*')
           .eq('login_id', normalizedInput.toUpperCase())
@@ -154,8 +166,8 @@ const login = async (req, res) => {
       user = data;
       if (error && error.code !== 'PGRST116') console.error(error);
     } else {
-      const { data, error } = await withDbTimeout(
-        supabase
+      const { data, error } = await withDbRequest(
+        () => supabase
           .from('users')
           .select('*')
           .eq('email', normalizedInput.toLowerCase())
@@ -179,16 +191,17 @@ const login = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Your account has been deactivated' });
     }
 
-    await withDbTimeout(
-      supabase
+    withDbRequest(
+      () => supabase
         .from('users')
         .update({ last_login: new Date().toISOString() })
         .eq('id', user.id),
       'Login timestamp update',
-    );
+      { maxRetries: 2 },
+    ).catch((error) => console.warn('Login timestamp update skipped:', error.message));
 
-    const { data: accounts } = await withDbTimeout(
-      supabase
+    const { data: accounts } = await withDbRequest(
+      () => supabase
         .from('accounts')
         .select('*')
         .eq('user_id', user.id)
@@ -224,8 +237,8 @@ const login = async (req, res) => {
 
 const getMe = async (req, res) => {
   try {
-    const { data: accounts } = await withDbTimeout(
-      supabase
+    const { data: accounts } = await withDbRequest(
+      () => supabase
         .from('accounts')
         .select('*')
         .eq('user_id', req.user.id)
@@ -233,8 +246,8 @@ const getMe = async (req, res) => {
       'Account list lookup',
     );
 
-    const { data: fullUser } = await withDbTimeout(
-      supabase
+    const { data: fullUser } = await withDbRequest(
+      () => supabase
         .from('users')
         .select('login_id, max_saved_accounts, closing_mode, brokerage_rate, must_change_password, first_name, last_name')
         .eq('id', req.user.id)

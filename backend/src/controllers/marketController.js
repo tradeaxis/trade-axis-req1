@@ -63,6 +63,27 @@ const withQuoteFallback = (symbol) => {
   };
 };
 
+const withLiveQuote = (symbol) => {
+  const live = kiteStreamService.getPrice(symbol?.symbol);
+  if (!live?.last || Number(live.last) <= 0) return withQuoteFallback(symbol);
+
+  return {
+    ...symbol,
+    last_price: Number(live.last || 0),
+    bid: firstPositiveNumber(live.bid, live.last),
+    ask: firstPositiveNumber(live.ask, live.last),
+    open_price: firstPositiveNumber(live.open, symbol?.open_price),
+    high_price: firstPositiveNumber(live.high, symbol?.high_price),
+    low_price: firstPositiveNumber(live.low, symbol?.low_price),
+    previous_close: firstPositiveNumber(live.prevClose, symbol?.previous_close),
+    change_value: Number(live.change || 0),
+    change_percent: Number(live.changePct || 0),
+    volume: Number(live.volume || symbol?.volume || 0),
+    last_update: new Date(Number(live.timestamp || Date.now())).toISOString(),
+    source: 'kite_live',
+  };
+};
+
 // In-memory symbol list cache — avoids repeated full-table scans
 let _symbolCache     = null;
 let _symbolCacheTime = 0;
@@ -77,9 +98,10 @@ exports.getSymbols = async (req, res) => {
     const now = Date.now();
     const useCache = !search && !category && _symbolCache && (now - _symbolCacheTime < SYMBOL_CACHE_TTL_MS);
     if (useCache) {
+      const cachedSymbols = _symbolCache.slice(0, parseInt(limit)).map(withLiveQuote);
       return res.json({
         success: true,
-        symbols: _symbolCache.slice(0, parseInt(limit)),
+        symbols: cachedSymbols,
         source: 'cache',
         total: _symbolCache.length,
       });
@@ -162,7 +184,7 @@ exports.getSymbols = async (req, res) => {
 
     res.json({
       success: true,
-      symbols: allSymbols,
+        symbols: allSymbols.map(withLiveQuote),
       source: 'zerodha',
       total: allSymbols.length,
     });
@@ -279,7 +301,7 @@ exports.searchSymbols = async (req, res) => {
 
     if (error) throw error;
 
-    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow).map(withQuoteFallback);
+    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow).map(withQuoteFallback).map(withLiveQuote);
     res.json({ success: true, symbols: filteredSymbols, total: filteredSymbols.length });
   } catch (error) {
     console.error('searchSymbols error:', error);
