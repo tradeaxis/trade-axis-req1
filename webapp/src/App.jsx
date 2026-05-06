@@ -592,6 +592,7 @@ function App() {
               onSwitchSavedSession={switchSavedSession}
               onAddAccount={() => setShowAddAccount(true)}
               onRefresh={refreshAuth}
+              onLogout={logout}
             />
           )}
           {renderedActive === 'users' && <UsersPanel mode="user" role={role} />}
@@ -1687,6 +1688,7 @@ function SettingsPanel({
   onSwitchSavedSession,
   onAddAccount,
   onRefresh,
+  onLogout,
 }) {
   return (
     <div className="grid-2">
@@ -1723,6 +1725,10 @@ function SettingsPanel({
             onSwitchSavedSession={onSwitchSavedSession}
             onAddAccount={onAddAccount}
           />
+          <button className="btn subtle mobile-settings-logout" type="button" onClick={onLogout}>
+            <LogOut size={16} />
+            Logout
+          </button>
           <div className="list account-list">
             {(accounts || []).map((account) => (
               <div className={`row ${account.id === selectedAccountId ? 'active' : ''}`} key={account.id}>

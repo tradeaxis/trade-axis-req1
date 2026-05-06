@@ -410,6 +410,10 @@ button:disabled {
   flex: 0 0 auto;
 }
 
+.mobile-settings-logout {
+  display: none;
+}
+
 .compact-select {
   min-height: 36px;
   width: auto;
@@ -1430,6 +1434,15 @@ tr:last-child td {
     gap: 8px;
     align-items: stretch;
     overflow: visible;
+  }
+
+  .topbar-actions {
+    display: none;
+  }
+
+  .mobile-settings-logout {
+    display: inline-flex;
+    width: 100%;
   }
 
   .account-switcher {
