@@ -79,6 +79,144 @@ const toNumber = (value, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const firstNonEmptyString = (...values) => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+};
+
+const formatDateInIst = (date) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+  return `${year}-${month}-${day}`;
+};
+
+const getLastSettlementTarget = (referenceDate = new Date()) => {
+  const utcMs = referenceDate.getTime() + referenceDate.getTimezoneOffset() * 60000;
+  const ist = new Date(utcMs + 5.5 * 3600000);
+  const daysAgo = (ist.getDay() + 1) % 7;
+  const lastSat = new Date(ist);
+  lastSat.setDate(lastSat.getDate() - daysAgo);
+  lastSat.setHours(1, 0, 0, 0);
+  return new Date(lastSat.getTime() - 5.5 * 3600000);
+};
+
+const getSettlementBalancesByAccount = async (accountIds = []) => {
+  const ids = [...new Set((accountIds || []).filter(Boolean))];
+  const balances = new Map(ids.map((id) => [id, 0]));
+  if (!ids.length) return balances;
+
+  const dealsByAccount = new Map();
+  const actualDatesByAccount = new Map();
+  const addDeal = (accountId, settlementDate, amount, time) => {
+    if (!accountId || !settlementDate) return;
+    if (!dealsByAccount.has(accountId)) dealsByAccount.set(accountId, []);
+    dealsByAccount.get(accountId).push({
+      settlementDate,
+      amount: toNumber(amount),
+      time: time || `${settlementDate}T01:00:00+05:30`,
+    });
+  };
+
+  try {
+    const { data: settlements, error } = await supabase
+      .from('weekly_settlements')
+      .select('account_id, settlement_date, created_at, updated_at, credit_before, profit_loss')
+      .in('account_id', ids)
+      .order('settlement_date', { ascending: false })
+      .limit(10000);
+
+    if (!error) {
+      const groups = new Map();
+      (settlements || []).forEach((row) => {
+        const settlementDate = firstNonEmptyString(
+          row.settlement_date,
+          row.created_at ? String(row.created_at).slice(0, 10) : '',
+        );
+        if (!row.account_id || !settlementDate) return;
+        const key = `${row.account_id}::${settlementDate}`;
+        if (!groups.has(key)) {
+          groups.set(key, {
+            accountId: row.account_id,
+            settlementDate,
+            time: row.created_at || row.updated_at || `${settlementDate}T01:00:00+05:30`,
+            creditBefore: toNumber(row.credit_before),
+            profitLoss: 0,
+          });
+        }
+        groups.get(key).profitLoss += toNumber(row.profit_loss);
+      });
+
+      groups.forEach((group) => {
+        if (!actualDatesByAccount.has(group.accountId)) actualDatesByAccount.set(group.accountId, new Set());
+        actualDatesByAccount.get(group.accountId).add(group.settlementDate);
+        addDeal(group.accountId, group.settlementDate, group.creditBefore + group.profitLoss, group.time);
+      });
+    }
+  } catch (_) {
+    // Optional settlement table may be missing on older databases.
+  }
+
+  try {
+    const { data: trades, error } = await supabase
+      .from('trades')
+      .select('account_id, settlement_week, close_time, updated_at, profit, status, is_settlement_close, comment')
+      .in('account_id', ids)
+      .eq('status', 'closed')
+      .limit(10000);
+
+    if (!error) {
+      const groups = new Map();
+      (trades || [])
+        .filter((row) => row.is_settlement_close || /weekly settlement close/i.test(String(row.comment || '')))
+        .forEach((row) => {
+          const settlementDate = firstNonEmptyString(
+            row.settlement_week,
+            row.close_time ? String(row.close_time).slice(0, 10) : '',
+          );
+          if (!row.account_id || !settlementDate) return;
+          if (actualDatesByAccount.get(row.account_id)?.has(settlementDate)) return;
+          const key = `${row.account_id}::${settlementDate}`;
+          if (!groups.has(key)) {
+            groups.set(key, {
+              accountId: row.account_id,
+              settlementDate,
+              time: row.close_time || row.updated_at || `${settlementDate}T01:00:00+05:30`,
+              profitLoss: 0,
+            });
+          }
+          groups.get(key).profitLoss += toNumber(row.profit);
+        });
+
+      groups.forEach((group) => {
+        addDeal(group.accountId, group.settlementDate, group.profitLoss, group.time);
+      });
+    }
+  } catch (_) {
+    // Fallback settlement-close trades are best-effort only.
+  }
+
+  const currentSettlementDate = formatDateInIst(getLastSettlementTarget());
+  ids.forEach((accountId) => {
+    const deals = (dealsByAccount.get(accountId) || [])
+      .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+    const currentDeal = deals.find((deal) => deal.settlementDate === currentSettlementDate);
+    const selectedDeal = currentDeal || deals[0];
+    balances.set(accountId, toNumber(selectedDeal?.amount));
+  });
+
+  return balances;
+};
+
 const getManagedUserIds = async (req) => {
   if (isAdmin(req)) return null;
 
@@ -165,12 +303,16 @@ const attachUserAndAccountInfo = async (rows = []) => {
   }
 
   if (accountIds.length) {
+    const settlementBalances = await getSettlementBalancesByAccount(accountIds);
     const { data: accounts, error } = await supabase
       .from('accounts')
       .select('id, account_number, is_demo, balance, credit, equity, margin, free_margin, leverage')
       .in('id', accountIds);
     if (error) throw error;
-    (accounts || []).forEach((account) => accountMap.set(account.id, account));
+    (accounts || []).forEach((account) => accountMap.set(account.id, {
+      ...account,
+      settlement_balance: settlementBalances.get(account.id) || 0,
+    }));
   }
 
   return rows.map((row) => {
@@ -188,6 +330,7 @@ const attachUserAndAccountInfo = async (rows = []) => {
       account_equity: account.equity,
       account_margin: account.margin,
       account_free_margin: account.free_margin,
+      account_settlement_balance: account.settlement_balance,
       account_leverage: account.leverage,
     };
   });
@@ -314,6 +457,7 @@ exports.listUsers = async (req, res) => {
         .in('user_id', userIds);
 
       if (accountsError) throw accountsError;
+      const settlementBalances = await getSettlementBalancesByAccount((accounts || []).map((account) => account.id));
 
       let liveTrades = [];
       const { data: tradeRows, error: tradesError } = await supabase
@@ -353,7 +497,7 @@ exports.listUsers = async (req, res) => {
           dashboard_margin: liveMargin,
           dashboard_free_margin: dashboardFreeMargin,
           dashboard_margin_level: liveMargin > 0 ? (dashboardEquity / liveMargin) * 100 : 0,
-          settlement_balance: dashboardEquity,
+          settlement_balance: settlementBalances.get(account.id) || 0,
         };
         if (!map.has(account.user_id)) map.set(account.user_id, []);
         map.get(account.user_id).push(enrichedAccount);

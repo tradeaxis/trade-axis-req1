@@ -207,7 +207,7 @@ const getAccountMetrics = (account = {}) => {
     margin,
     freeMargin,
     marginLevel,
-    settlementBalance: Number(account.settlement_balance ?? equity),
+    settlementBalance: Number(account.settlement_balance ?? account.account_settlement_balance ?? 0),
   };
 };
 
@@ -1220,6 +1220,7 @@ function Trade({ selectedAccount }) {
   const equity = balance + credit + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+  const totalDrCr = floatingPnl;
 
   return (
     <div className="trade-app-view">
@@ -1233,6 +1234,7 @@ function Trade({ selectedAccount }) {
           <Stat label="Balance" value={formatMoney(balance)} />
           <Stat label="Equity" value={formatMoney(equity)} tone={equity >= balance ? 'positive' : 'negative'} />
           <Stat label="Floating P&L" value={formatMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive' : 'negative'} />
+          <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive' : 'negative'} />
           <Stat label="Free Margin" value={formatMoney(freeMargin)} tone="positive" />
           <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
           <Stat label="Used Margin" value={formatMoney(usedMargin)} tone="gold" />
@@ -2111,7 +2113,11 @@ function UserPositionsModal({ user, onClose }) {
   const equity = balance + credit + openPnl;
   const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
-  const settlementBalance = equity;
+  const settlementBalance = Number(
+    accountRow.account_settlement_balance ??
+    fallbackAccount.settlement_balance ??
+    0
+  );
 
   return (
     <div className="modal-backdrop">
