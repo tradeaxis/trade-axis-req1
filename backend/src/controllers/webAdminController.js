@@ -596,7 +596,7 @@ exports.createUser = async (req, res) => {
         max_saved_accounts: Number(maxSavedAccounts) || 10,
         closing_mode: false,
         must_change_password: true,
-        liquidation_type: liquidationType || 'liquidate',
+        liquidation_type: liquidationType === 'illiquidate' ? 'illiquidate' : 'liquidate',
       }])
       .select()
       .single();

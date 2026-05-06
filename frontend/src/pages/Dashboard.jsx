@@ -283,19 +283,22 @@ const findTradeQuote = (trade, quotes = {}, symbols = []) => {
 
 const getTradeQuotePrice = (trade, quotes = {}, symbols = []) => {
   const quote = findTradeQuote(trade, quotes, symbols);
-  const isSell = String(trade?.trade_type || '').toLowerCase() === 'sell';
-  const closeSidePrice = isSell
-    ? firstPositiveNumber(quote?.ask, quote?.askPrice)
-    : firstPositiveNumber(quote?.bid, quote?.bidPrice);
 
   return firstPositiveNumber(
-    closeSidePrice,
     quote?.last,
     quote?.last_price,
     quote?.lastPrice,
     quote?.current_price,
+    quote?.currentPrice,
     quote?.close_price,
+    quote?.closePrice,
     quote?.previous_close,
+    quote?.previousClose,
+    quote?.ohlc?.close,
+    quote?.bid,
+    quote?.bidPrice,
+    quote?.ask,
+    quote?.askPrice,
     trade?.current_price,
     trade?.close_price,
     trade?.open_price,
@@ -688,6 +691,8 @@ const Dashboard = () => {
   const [messages, setMessages] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [messageCategory, setMessageCategory] = useState('all');
+  const [supportMessageDraft, setSupportMessageDraft] = useState('');
+  const [supportMessageLoading, setSupportMessageLoading] = useState(false);
 
   // Add Account Modal
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
@@ -1784,6 +1789,48 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
   const markAllRead = () => {
     setMessages((prev) => prev.map((m) => ({ ...m, read: true })));
     setUnreadCount(0);
+    api.patch('/messages/read').catch(() => {});
+  };
+
+  const loadSupportMessages = useCallback(async () => {
+    try {
+      const res = await api.get('/messages');
+      const supportRows = (res.data?.data || []).map((row) => ({
+        id: `support-${row.id}`,
+        type: 'support',
+        title: row.sender_role === 'user' ? 'You' : 'Trade Axis Support',
+        message: row.content,
+        time: row.created_at,
+        read: !!row.user_read_at || row.sender_role === 'user',
+      }));
+      setMessages((prev) => {
+        const nonSupport = prev.filter((row) => !String(row.id || '').startsWith('support-'));
+        return [...supportRows, ...nonSupport].slice(0, 200);
+      });
+      setUnreadCount(supportRows.filter((row) => !row.read).length);
+    } catch {
+      // Keep local socket messages visible if support history is temporarily unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'messages') loadSupportMessages();
+  }, [activeTab, loadSupportMessages]);
+
+  const sendSupportMessage = async () => {
+    const content = supportMessageDraft.trim();
+    if (!content) return toast.error('Enter your message');
+    setSupportMessageLoading(true);
+    try {
+      await api.post('/messages', { title: 'Support Query', content });
+      setSupportMessageDraft('');
+      toast.success('Message sent');
+      await loadSupportMessages();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Message failed');
+    } finally {
+      setSupportMessageLoading(false);
+    }
   };
 
     const handleChangePassword = async () => {
@@ -5939,6 +5986,7 @@ const renderOrderConfirmation = () => {
               { id: 'all', label: 'All' },
               { id: 'system', label: 'System' },
               { id: 'trade', label: 'Trade' },
+              { id: 'support', label: 'Support' },
             ].map((c) => (
               <button
                 key={c.id}
@@ -5953,6 +6001,37 @@ const renderOrderConfirmation = () => {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="p-4 border-b" style={{ borderColor: border }}>
+          <div className="text-sm font-semibold mb-2" style={{ color: textPrimary }}>
+            Contact Support
+          </div>
+          <textarea
+            className="w-full rounded-lg p-3 text-sm outline-none"
+            rows={3}
+            value={supportMessageDraft}
+            onChange={(e) => setSupportMessageDraft(e.target.value)}
+            placeholder="Write your account, trade or settlement query"
+            style={{
+              background: bgAlt,
+              border: `1px solid ${border}`,
+              color: textPrimary,
+              resize: 'vertical',
+            }}
+          />
+          <button
+            className="mt-3 w-full rounded-lg py-2.5 text-sm font-semibold"
+            onClick={sendSupportMessage}
+            disabled={supportMessageLoading}
+            style={{
+              background: '#2962ff',
+              color: '#ffffff',
+              opacity: supportMessageLoading ? 0.7 : 1,
+            }}
+          >
+            Send Message
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto">

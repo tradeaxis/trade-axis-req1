@@ -722,8 +722,80 @@ tr:last-child td {
   color: var(--red);
 }
 
+.price-stale,
+.quote-stale-row td {
+  color: var(--faint) !important;
+}
+
 .muted-value {
   color: var(--muted);
+}
+
+.watchlist-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.scroll-tabs {
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.watchlist-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 360px;
+}
+
+.danger-text {
+  color: var(--red);
+}
+
+.watch-star.active {
+  color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.messages-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.message-thread {
+  display: grid;
+  gap: 10px;
+}
+
+.message-bubble {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-2);
+}
+
+.message-bubble.mine {
+  border-color: rgba(36, 87, 214, 0.25);
+  background: var(--blue-soft);
+}
+
+.message-bubble.support {
+  border-color: rgba(6, 122, 114, 0.22);
+  background: var(--teal-soft);
+}
+
+.message-bubble-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
 }
 
 .chart-box {
@@ -1110,6 +1182,37 @@ tr:last-child td {
 
 .support-list {
   border-right: 1px solid var(--border);
+}
+
+.support-message-list {
+  display: grid;
+  gap: 8px;
+}
+
+.support-message-item {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  color: var(--ink);
+}
+
+.support-message-item span {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.support-message-item small {
+  color: var(--faint);
+}
+
+.support-message-item.needs-reply {
+  border-color: rgba(180, 35, 47, 0.28);
 }
 
 .empty-state {
@@ -1807,6 +1910,19 @@ tr:last-child td {
   .user-update-shell,
   .support-shell {
     grid-template-columns: 1fr;
+  }
+
+  .watchlist-bar,
+  .messages-layout {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .watchlist-create {
+    min-width: 0;
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
   .admin-update-modal {

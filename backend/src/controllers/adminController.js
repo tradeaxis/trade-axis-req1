@@ -548,7 +548,7 @@ exports.createUser = async (req, res) => {
         max_saved_accounts: Number(maxSavedAccounts) || 10,
         closing_mode: false,
         must_change_password: true,
-        liquidation_type: liquidationType || 'liquidate',
+        liquidation_type: liquidationType === 'illiquidate' ? 'illiquidate' : 'liquidate',
       }])
       .select()
       .single();
@@ -868,6 +868,24 @@ exports.toggleClosingMode = async (req, res) => {
     if (error) throw error;
 
     res.json({ success: true, message: `Closing mode ${closingMode ? 'enabled' : 'disabled'}` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateLiquidationMode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const mode = req.body?.liquidationType === 'illiquidate' ? 'illiquidate' : 'liquidate';
+
+    const { error } = await supabase
+      .from('users')
+      .update({ liquidation_type: mode })
+      .eq('id', id);
+
+    if (error) throw error;
+
+    res.json({ success: true, message: `Liquidation mode set to ${mode}` });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

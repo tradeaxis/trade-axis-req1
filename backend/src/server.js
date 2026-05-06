@@ -32,6 +32,7 @@ const transactionRoutes = require('./routes/transactions');
 const marketRoutes      = require('./routes/market');
 const tradingRoutes     = require('./routes/trading');
 const watchlistRoutes   = require('./routes/watchlists');
+const messageRoutes     = require('./routes/messages');
 const webAdminRoutes    = require('./routes/webAdmin');
 
 const SocketHandler       = require('./websocket/socketHandler');
@@ -269,6 +270,7 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/market',       marketRoutes);
 app.use('/api/trading',      tradingRoutes);
 app.use('/api/watchlists',   watchlistRoutes);
+app.use('/api/messages',     messageRoutes);
 app.use('/api/web-admin',    webAdminRoutes);
 
 // ✅ Manual settlement trigger (admin only)

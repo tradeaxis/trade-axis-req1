@@ -17,6 +17,7 @@ router.patch('/users/:id/equity', adminAuth, adminController.updateAccountEquity
 router.patch('/users/:id/brokerage', adminAuth, adminController.updateBrokerageRate);
 router.patch('/users/:id/max-saved-accounts', adminAuth, adminController.updateMaxSavedAccounts);
 router.patch('/users/:id/closing-mode', adminAuth, adminController.toggleClosingMode);
+router.patch('/users/:id/liquidation-mode', adminAuth, adminController.updateLiquidationMode);
 router.post('/users/:id/add-balance', adminAuth, adminController.addBalanceToAccount);
 router.delete('/users/:id', adminAuth, adminController.deleteUser);
 

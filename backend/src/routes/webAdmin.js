@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const webAdminController = require('../controllers/webAdminController');
 const adminController = require('../controllers/adminController');
+const messageController = require('../controllers/messageController');
 const { protect, adminOnly, adminOrSubBroker } = require('../middleware/auth');
 
 const webAdminAuth = [protect, adminOrSubBroker];
@@ -37,5 +38,9 @@ router.post('/kite/create-session', webAdminAuth, adminController.createKiteSess
 router.post('/kite/sync-symbols', webAdminAuth, adminController.syncKiteSymbols);
 router.post('/kite/start-stream', webAdminAuth, adminController.startKiteStream);
 router.post('/kite/stop-stream', webAdminAuth, adminController.stopKiteStream);
+
+router.get('/support-messages', webAdminAuth, messageController.listSupportMessages);
+router.post('/support-messages', webAdminAuth, messageController.sendSupportReply);
+router.patch('/support-messages/read', webAdminAuth, messageController.markSupportRead);
 
 module.exports = router;

@@ -30,6 +30,9 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   SquareStack,
+  Send,
+  Star,
+  Trash2,
   UserCog,
   Users,
   Wallet,
@@ -186,13 +189,8 @@ const findPositionSymbol = (position, symbols = []) => {
 
 const getLivePositionPrice = (position, symbols = []) => {
   const symbol = findPositionSymbol(position, symbols);
-  const isSell = String(position?.trade_type || '').toLowerCase() === 'sell';
-  const closingSidePrice = isSell
-    ? firstPositiveNumber(symbol?.ask, symbol?.askPrice)
-    : firstPositiveNumber(symbol?.bid, symbol?.bidPrice);
 
   return firstPositiveNumber(
-    closingSidePrice,
     symbol?.last,
     symbol?.last_price,
     symbol?.lastPrice,
@@ -203,6 +201,10 @@ const getLivePositionPrice = (position, symbols = []) => {
     symbol?.close_price,
     symbol?.closePrice,
     symbol?.ohlc?.close,
+    symbol?.bid,
+    symbol?.bidPrice,
+    symbol?.ask,
+    symbol?.askPrice,
     position?.current_price,
     position?.close_price,
     position?.open_price,
@@ -261,7 +263,52 @@ const getAccountMetrics = (account = {}) => {
 
 const loadTradableSymbols = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
-  return filterTradableSymbols(res.data?.symbols || []);
+  return dedupeTradableSymbols(filterTradableSymbols(res.data?.symbols || []));
+};
+
+const getQuoteAgeMs = (symbol = {}) => {
+  const raw = symbol.last_update || symbol.updated_at || symbol.timestamp;
+  const time = typeof raw === 'number' ? raw : Date.parse(raw || '');
+  return Number.isFinite(time) && time > 0 ? Date.now() - time : Number.POSITIVE_INFINITY;
+};
+
+const isQuoteStale = (symbol = {}) => getQuoteAgeMs(symbol) > 10_000;
+
+const getContractFamily = (symbol = {}) => {
+  const base = symbol.underlying || symbol.symbol || symbol.display_name || '';
+  return String(base || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/-I$/i, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+};
+
+const getSymbolIdentityKey = (symbol = {}) => {
+  const underlying = getContractFamily(symbol);
+  const expiry = symbol.expiry_date ? String(symbol.expiry_date).slice(0, 10) : '';
+  return `${symbol.category || symbol.exchange || ''}|${underlying}|${expiry}`;
+};
+
+const isAliasSymbol = (value = '') => /-[A-Z]$/i.test(String(value || ''));
+
+const dedupeTradableSymbols = (rows = []) => {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = getSymbolIdentityKey(row);
+    const current = map.get(key);
+    if (!current) {
+      map.set(key, row);
+      return;
+    }
+
+    const currentAlias = isAliasSymbol(current.symbol);
+    const nextAlias = isAliasSymbol(row.symbol);
+    if (currentAlias && !nextAlias) map.set(key, row);
+  });
+  return Array.from(map.values());
 };
 
 const readAuth = () => {
@@ -895,9 +942,14 @@ function Stat({ label, value, tone = '' }) {
 
 function Quotes({ selectedAccount }) {
   const [symbols, setSymbols] = useState([]);
+  const [watchlists, setWatchlists] = useState([]);
+  const [watchlistSymbols, setWatchlistSymbols] = useState([]);
+  const [activeWatchlistId, setActiveWatchlistId] = useState('all');
+  const [newWatchlistName, setNewWatchlistName] = useState('');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [ticketSymbol, setTicketSymbol] = useState(null);
+  const [staleTick, setStaleTick] = useState(0);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -910,13 +962,101 @@ function Quotes({ selectedAccount }) {
     }
   }, []);
 
+  const loadWatchlists = useCallback(async () => {
+    try {
+      const res = await api.get('/watchlists');
+      const rows = res.data?.data || [];
+      setWatchlists(rows);
+      if (activeWatchlistId !== 'all' && !rows.some((row) => row.id === activeWatchlistId)) {
+        setActiveWatchlistId('all');
+      }
+    } catch {
+      toast.error('Failed to load watchlists');
+    }
+  }, [activeWatchlistId]);
+
+  const loadWatchlistSymbols = useCallback(async () => {
+    if (!activeWatchlistId || activeWatchlistId === 'all') {
+      setWatchlistSymbols([]);
+      return;
+    }
+    try {
+      const res = await api.get(`/watchlists/${activeWatchlistId}/symbols`);
+      setWatchlistSymbols((res.data?.data || []).map((row) => String(row.symbol || '').toUpperCase()));
+    } catch {
+      toast.error('Failed to load watchlist scripts');
+    }
+  }, [activeWatchlistId]);
+
   useEffect(() => {
     load();
     const interval = setInterval(() => load({ silent: true }), 5000);
     return () => clearInterval(interval);
   }, [load]);
 
+  useEffect(() => {
+    loadWatchlists();
+  }, [loadWatchlists]);
+
+  useEffect(() => {
+    loadWatchlistSymbols();
+  }, [loadWatchlistSymbols]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setStaleTick((value) => value + 1), 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const createWatchlist = async () => {
+    const name = newWatchlistName.trim();
+    if (!name) return toast.error('Enter watchlist name');
+    try {
+      const res = await api.post('/watchlists', { name });
+      const watchlist = res.data?.data;
+      toast.success('Watchlist created');
+      setNewWatchlistName('');
+      await loadWatchlists();
+      if (watchlist?.id) setActiveWatchlistId(watchlist.id);
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Create watchlist failed');
+    }
+  };
+
+  const deleteWatchlist = async (id) => {
+    if (!window.confirm('Delete this watchlist?')) return;
+    try {
+      await api.delete(`/watchlists/${id}`);
+      toast.success('Watchlist deleted');
+      setActiveWatchlistId('all');
+      await loadWatchlists();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Delete watchlist failed');
+    }
+  };
+
+  const toggleWatchlistSymbol = async (symbol) => {
+    if (activeWatchlistId === 'all') return toast.error('Select or create a watchlist first');
+    const normalized = String(symbol || '').toUpperCase();
+    const exists = watchlistSymbols.includes(normalized);
+    try {
+      if (exists) {
+        await api.delete(`/watchlists/${activeWatchlistId}/symbols/${normalized}`);
+        toast.success('Removed from watchlist');
+      } else {
+        await api.post(`/watchlists/${activeWatchlistId}/symbols`, { symbol: normalized });
+        toast.success('Added to watchlist');
+      }
+      await loadWatchlistSymbols();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Watchlist update failed');
+    }
+  };
+
   const visible = symbols
+    .filter((symbol) => {
+      if (activeWatchlistId === 'all') return true;
+      return watchlistSymbols.includes(String(symbol.symbol || '').toUpperCase());
+    })
     .filter((symbol) => {
       const term = query.toLowerCase();
       return String(symbol.symbol || '').toLowerCase().includes(term) ||
@@ -924,6 +1064,7 @@ function Quotes({ selectedAccount }) {
     })
     .slice(0, 120);
   const getQuotePriceTone = (symbol) => {
+    if (isQuoteStale(symbol)) return 'price-stale';
     const movement = Number(symbol.change_percent ?? symbol.change ?? symbol.change_value ?? 0);
     if (movement > 0) return 'price-positive';
     if (movement < 0) return 'price-negative';
@@ -931,7 +1072,7 @@ function Quotes({ selectedAccount }) {
   };
 
   return (
-    <div className="card pad">
+    <div className="card pad quotes-panel">
       <div className="toolbar">
         <div className="left">
           <div className="field" style={{ margin: 0, minWidth: 280 }}>
@@ -947,10 +1088,29 @@ function Quotes({ selectedAccount }) {
         </button>
       </div>
 
+      <div className="watchlist-bar">
+        <div className="tabs scroll-tabs">
+          <button className={`tab ${activeWatchlistId === 'all' ? 'active' : ''}`} onClick={() => setActiveWatchlistId('all')}>All Scripts</button>
+          {watchlists.map((watchlist) => (
+            <button key={watchlist.id} className={`tab ${activeWatchlistId === watchlist.id ? 'active' : ''}`} onClick={() => setActiveWatchlistId(watchlist.id)}>
+              {watchlist.name}
+            </button>
+          ))}
+        </div>
+        <div className="watchlist-create">
+          <input className="input" value={newWatchlistName} onChange={(event) => setNewWatchlistName(event.target.value)} placeholder="New watchlist" />
+          <button className="btn primary" onClick={createWatchlist}><Plus size={16} />Create</button>
+          {activeWatchlistId !== 'all' && (
+            <button className="icon-btn danger-text" onClick={() => deleteWatchlist(activeWatchlistId)} title="Delete watchlist"><Trash2 size={16} /></button>
+          )}
+        </div>
+      </div>
+
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
+              <th></th>
               <th>Script</th>
               <th>Bid</th>
               <th>Ask</th>
@@ -962,8 +1122,15 @@ function Quotes({ selectedAccount }) {
           <tbody>
             {visible.map((symbol) => {
               const priceTone = getQuotePriceTone(symbol);
+              const inWatchlist = watchlistSymbols.includes(String(symbol.symbol || '').toUpperCase());
+              const stale = isQuoteStale(symbol);
               return (
-                <tr key={symbol.symbol} className="click-row" onClick={() => setTicketSymbol(symbol)}>
+                <tr key={symbol.symbol} className={`click-row ${stale ? 'quote-stale-row' : ''}`} onClick={() => setTicketSymbol(symbol)}>
+                  <td>
+                    <button className={`icon-btn watch-star ${inWatchlist ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); toggleWatchlistSymbol(symbol.symbol); }} title={inWatchlist ? 'Remove from watchlist' : 'Add to watchlist'}>
+                      <Star size={16} />
+                    </button>
+                  </td>
                   <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
                   <td className={priceTone}>{getSymbolBid(symbol).toFixed(2)}</td>
                   <td className={priceTone}>{getSymbolAsk(symbol).toFixed(2)}</td>
@@ -976,7 +1143,7 @@ function Quotes({ selectedAccount }) {
               );
             })}
             {!visible.length && (
-              <tr><td colSpan="6">No scripts found</td></tr>
+              <tr><td colSpan="7">No scripts found</td></tr>
             )}
           </tbody>
         </table>
@@ -1116,10 +1283,10 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
   }, [initialSymbol, symbols, form.symbol]);
 
   useEffect(() => {
-    if ((form.orderType === 'market' || form.orderType === 'instant') && runningPrice && !Number(form.price || 0)) {
+    if ((form.orderType === 'market' || form.orderType === 'instant') && runningPrice) {
       setForm((prev) => ({ ...prev, price: String(runningPrice) }));
     }
-  }, [form.orderType, form.price, runningPrice]);
+  }, [form.orderType, form.symbol, runningPrice]);
 
   const place = async (side) => {
     if (!accountId) return toast.error('Select an account first');
@@ -1133,7 +1300,9 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
         orderType.startsWith('sell_') ? 'sell' :
         side;
 
-      const orderPrice = Number(form.price || runningPrice || 0);
+      const orderPrice = orderType === 'market' || orderType === 'instant'
+        ? Number((resolvedSide === 'sell' ? sellPrice : buyPrice) || runningPrice || 0)
+        : Number(form.price || runningPrice || 0);
       const res = await api.post('/trading/order', {
         accountId,
         symbol: form.symbol,
@@ -1166,14 +1335,6 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
         </button>
       </div>
       <OrderFields form={form} setForm={setForm} symbols={symbols} />
-      <div className="grid-2">
-        <button className="btn success" disabled={busy} onClick={() => place('buy')}>
-          <ArrowDownCircle size={17} />Buy
-        </button>
-        <button className="btn danger" disabled={busy} onClick={() => place('sell')}>
-          <ArrowUpCircle size={17} />Sell
-        </button>
-      </div>
     </div>
   );
 }
@@ -1185,6 +1346,7 @@ function Trade({ selectedAccount }) {
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [showOrder, setShowOrder] = useState(false);
   const [expandedPositionId, setExpandedPositionId] = useState('');
+  const [closeTarget, setCloseTarget] = useState(null);
 
   const accountId = selectedAccount?.id;
 
@@ -1218,11 +1380,16 @@ function Trade({ selectedAccount }) {
     return () => clearInterval(interval);
   }, [accountId]);
 
-  const closeTrade = async (tradeId) => {
-    if (!window.confirm('Close this position?')) return;
+  const closeTrade = async (trade, quantity) => {
+    const closeQty = Number(quantity || trade.quantity || 0);
+    if (!closeQty || closeQty <= 0) return toast.error('Enter quantity to close');
     try {
-      const res = await api.post(`/trading/close/${tradeId}`, { accountId });
-      toast.success(res.data?.message || 'Position closed');
+      const totalQty = Number(trade.quantity || 0);
+      const res = closeQty < totalQty
+        ? await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: closeQty })
+        : await api.post(`/trading/close/${trade.id}`, { accountId });
+      toast.success(res.data?.message || (closeQty < totalQty ? 'Position partially closed' : 'Position closed'));
+      setCloseTarget(null);
       await load();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Close failed');
@@ -1328,7 +1495,7 @@ function Trade({ selectedAccount }) {
             {isExpanded && (
               <div className="position-card-actions">
                 <button className="btn primary" onClick={() => setShowOrder(true)}>New Order</button>
-                <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
+                <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
               </div>
             )}
           </div>
@@ -1363,6 +1530,13 @@ function Trade({ selectedAccount }) {
           subtitle="Trade Axis order ticket"
           onClose={() => setShowOrder(false)}
           onDone={() => { setShowOrder(false); load(); }}
+        />
+      )}
+      {closeTarget && (
+        <ClosePositionModal
+          trade={closeTarget}
+          onClose={() => setCloseTarget(null)}
+          onSubmit={(quantity) => closeTrade(closeTarget, quantity)}
         />
       )}
     </div>
@@ -1512,6 +1686,47 @@ function OrderFields({ form, setForm, symbols }) {
   );
 }
 
+function ClosePositionModal({ trade, onClose, onSubmit }) {
+  const [quantity, setQuantity] = useState(String(trade?.quantity || 1));
+  const qty = Number(quantity || 0);
+  const totalQty = Number(trade?.quantity || 0);
+  const closePrice = Number(trade?.livePrice || trade?.current_price || trade?.open_price || 0);
+  const isPartial = qty > 0 && qty < totalQty;
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal close-modal">
+        <div className="modal-head">
+          <div>
+            <strong>Close Position</strong>
+            <div className="meta">{trade?.symbol}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="close-preview">
+            <div><span>Side</span><strong className={trade?.trade_type === 'buy' ? 'positive-blue' : 'negative'}>{String(trade?.trade_type || '').toUpperCase()}</strong></div>
+            <div><span>Open Qty</span><strong>{totalQty}</strong></div>
+            <div><span>Market Price</span><strong>{closePrice.toFixed(2)}</strong></div>
+            <div><span>Live P&L</span><strong className={Number(trade?.livePnl || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(trade?.livePnl)}</strong></div>
+          </div>
+          <div className="field">
+            <label>Quantity to Close</label>
+            <input className="input" type="number" min="1" max={totalQty} value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+            <div className="meta">{isPartial ? 'This will partially close the position.' : 'This will close the full position.'}</div>
+          </div>
+          <div className="grid-2">
+            <button className="btn subtle" onClick={onClose}>Cancel</button>
+            <button className="btn danger" disabled={!qty || qty > totalQty} onClick={() => onSubmit(qty)}>
+              {isPartial ? 'Partial Close' : 'Close Position'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TradeHistory({ selectedAccount }) {
   const [rows, setRows] = useState([]);
   const [orderRows, setOrderRows] = useState([]);
@@ -1571,21 +1786,32 @@ function TradeHistory({ selectedAccount }) {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Ledger</th><th>Side</th><th>Qty</th><th>Open</th><th>Close</th><th>Commission</th><th>P&L</th></tr>
+              <tr>
+                <th>Order ID</th><th>Script</th><th>Side</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th>
+                <th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Stop Loss</th><th>Take Profit</th>
+                <th>Brokerage</th><th>P&L</th><th>Comment</th>
+              </tr>
             </thead>
             <tbody>
               {rows.map((trade) => (
                 <tr key={trade.id}>
-                  <td><strong>{trade.symbol}</strong><div className="meta">{formatDate(trade.open_time)} to {formatDate(trade.close_time)}</div><div className="meta mono">{trade.id}</div></td>
+                  <td className="mono">{trade.id}</td>
+                  <td><strong>{trade.symbol}</strong><div className="meta">{trade.exchange || trade.category || '-'}</div></td>
                   <td><span className={`pill ${trade.trade_type === 'buy' ? 'teal' : 'red'}`}>{trade.trade_type}</span></td>
                   <td>{trade.quantity}</td>
+                  <td>{formatDate(trade.open_time || trade.created_at)}</td>
+                  <td>{formatDate(trade.close_time || trade.updated_at)}</td>
                   <td>{Number(trade.open_price || 0).toFixed(2)}</td>
                   <td>{Number(trade.close_price || 0).toFixed(2)}</td>
+                  <td>{Number(trade.current_price || trade.close_price || 0).toFixed(2)}</td>
+                  <td>{Number(trade.stop_loss || 0) > 0 ? Number(trade.stop_loss).toFixed(2) : '-'}</td>
+                  <td>{Number(trade.take_profit || 0) > 0 ? Number(trade.take_profit).toFixed(2) : '-'}</td>
                   <td>{formatMoney(trade.brokerage)}</td>
                   <td className={Number(trade.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(trade.profit)}</td>
+                  <td>{trade.comment || '-'}</td>
                 </tr>
               ))}
-              {!rows.length && <tr><td colSpan="7">No closed positions found</td></tr>}
+              {!rows.length && <tr><td colSpan="14">No closed positions found</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1595,21 +1821,29 @@ function TradeHistory({ selectedAccount }) {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Order</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>Time</th></tr>
+              <tr>
+                <th>Order ID</th><th>Script</th><th>Side</th><th>Order Type</th><th>Qty</th><th>Price</th>
+                <th>Stop Loss</th><th>Take Profit</th><th>Status</th><th>Created</th><th>Updated</th><th>Reason</th>
+              </tr>
             </thead>
             <tbody>
               {orderRows.map((order) => (
                 <tr key={order.id}>
-                  <td><strong>{order.symbol}</strong><div className="meta mono">{order.id}</div></td>
+                  <td className="mono">{order.id}</td>
+                  <td><strong>{order.symbol}</strong></td>
                   <td><span className={`pill ${order.trade_type === 'buy' ? 'teal' : 'red'}`}>{order.trade_type || '-'}</span></td>
                   <td>{String(order.order_type || order.type || '-').replace('_', ' ')}</td>
                   <td>{order.quantity || '-'}</td>
                   <td>{Number(order.price || 0).toFixed(2)}</td>
+                  <td>{Number(order.stop_loss || 0) > 0 ? Number(order.stop_loss).toFixed(2) : '-'}</td>
+                  <td>{Number(order.take_profit || 0) > 0 ? Number(order.take_profit).toFixed(2) : '-'}</td>
                   <td><span className="pill gold">{order.status || '-'}</span></td>
                   <td>{formatDate(order.created_at || order.updated_at || order.executed_at)}</td>
+                  <td>{formatDate(order.updated_at || order.executed_at)}</td>
+                  <td>{order.rejection_reason || order.comment || '-'}</td>
                 </tr>
               ))}
-              {!orderRows.length && <tr><td colSpan="7">No order history found</td></tr>}
+              {!orderRows.length && <tr><td colSpan="12">No order history found</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1626,24 +1860,32 @@ function TradeHistory({ selectedAccount }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Deal</th><th>Side</th><th>Qty</th><th>Price</th><th>Commission</th><th>Amount</th><th>Balance After</th></tr>
+                <tr>
+                  <th>Date & Time</th><th>Deal ID</th><th>Type</th><th>Description</th><th>Script</th><th>Side</th>
+                  <th>Qty</th><th>Price</th><th>Commission</th><th>Amount</th><th>Balance Before</th><th>Balance After</th>
+                </tr>
               </thead>
               <tbody>
                 {deals.map((deal) => {
                   const amount = Number(deal.amount || deal.profit || 0);
                   return (
                     <tr key={deal.id}>
-                      <td><strong>{deal.symbol || deal.dealLabel || deal.type}</strong><div className="meta">{formatDate(deal.time || deal.created_at)}</div><div className="meta">{deal.description || ''}</div></td>
+                      <td>{formatDate(deal.time || deal.created_at)}</td>
+                      <td className="mono">{deal.id}</td>
+                      <td>{deal.type || deal.side || '-'}</td>
+                      <td>{deal.description || deal.remarks || '-'}</td>
+                      <td><strong>{deal.symbol || deal.dealLabel || '-'}</strong></td>
                       <td><span className={`pill ${deal.side === 'entry' || deal.trade_type === 'buy' ? 'teal' : deal.side === 'settlement' ? 'gold' : 'red'}`}>{deal.side || deal.trade_type || deal.type || '-'}</span></td>
                       <td>{deal.quantity || '-'}</td>
                       <td>{deal.price ? Number(deal.price).toFixed(2) : '-'}</td>
                       <td>{formatMoney(deal.commission || deal.brokerage || 0)}</td>
                       <td className={amount >= 0 ? 'positive' : 'negative'}>{formatMoney(amount)}</td>
+                      <td>{deal.balance_before !== undefined && deal.balance_before !== null ? formatMoney(deal.balance_before) : '-'}</td>
                       <td>{deal.balance_after !== undefined && deal.balance_after !== null ? formatMoney(deal.balance_after) : '-'}</td>
                     </tr>
                   );
                 })}
-                {!deals.length && <tr><td colSpan="7">No deals found</td></tr>}
+                {!deals.length && <tr><td colSpan="12">No deals found</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1654,17 +1896,71 @@ function TradeHistory({ selectedAccount }) {
 }
 
 function Messages() {
+  const [rows, setRows] = useState([]);
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get('/messages');
+      setRows(res.data?.data || []);
+    } catch {
+      toast.error('Failed to load messages');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const send = async () => {
+    if (!content.trim()) return toast.error('Enter your message');
+    setLoading(true);
+    try {
+      await api.post('/messages', { title: 'Support Query', content });
+      setContent('');
+      toast.success('Message sent');
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Message failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="card pad">
+    <div className="messages-layout">
+      <div className="card pad message-compose-card">
       <div className="section-head">
         <div>
           <h2>Messages</h2>
-          <p>Operational notifications and user announcements will appear here.</p>
+          <p>Contact support for account, trade or settlement queries.</p>
         </div>
-        <Bell size={22} color="var(--blue)" />
+        <MessageSquare size={22} color="var(--blue)" />
       </div>
-      <div className="list">
-        <div className="row"><div><strong>System status</strong><div className="meta">No active announcements.</div></div><span className="pill teal">Clear</span></div>
+        <div className="field">
+          <label>Your Query</label>
+          <textarea className="input textarea" value={content} onChange={(event) => setContent(event.target.value)} placeholder="Write your message to Trade Axis support" />
+        </div>
+        <button className="btn primary" onClick={send} disabled={loading}><Send size={16} />Send Message</button>
+      </div>
+      <div className="card pad">
+        <div className="section-head"><div><h2>Inbox</h2><p>{rows.length} messages</p></div></div>
+        <div className="message-thread">
+          {rows.map((row) => {
+            const mine = row.sender_role === 'user';
+            return (
+              <div key={row.id} className={`message-bubble ${mine ? 'mine' : 'support'}`}>
+                <div className="message-bubble-head">
+                  <strong>{mine ? 'You' : 'Trade Axis Support'}</strong>
+                  <span>{formatDate(row.created_at)}</span>
+                </div>
+                <div>{row.content}</div>
+              </div>
+            );
+          })}
+          {!rows.length && <div className="empty-state compact-empty"><span>No messages yet</span></div>}
+        </div>
       </div>
     </div>
   );
@@ -2021,6 +2317,7 @@ function CreateUserModal({ mode, onClose, onCreated }) {
     demoBalance: 100000,
     createDemo: true,
     createLive: true,
+    liquidationType: 'liquidate',
   });
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -2065,6 +2362,13 @@ function CreateUserModal({ mode, onClose, onCreated }) {
               <label className="row"><span>Create Live</span><input type="checkbox" checked={form.createLive} onChange={(event) => update('createLive', event.target.checked)} /></label>
             </div>
           )}
+          <div className="field">
+            <label>Account Liquidation Mode</label>
+            <select className="select" value={form.liquidationType} onChange={(event) => update('liquidationType', event.target.value)}>
+              <option value="liquidate">Liquidate</option>
+              <option value="illiquidate">Illiquidate</option>
+            </select>
+          </div>
           <button className="btn primary" onClick={create}>Create</button>
         </div>
       </div>
@@ -2492,6 +2796,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
     brokerageRate: user.brokerage_rate ?? 0.0006,
     maxSavedAccounts: user.max_saved_accounts ?? 10,
     closingMode: Boolean(user.closing_mode),
+    liquidationType: user.liquidation_type === 'illiquidate' ? 'illiquidate' : 'liquidate',
     password: '',
   });
 
@@ -2534,6 +2839,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
         api.patch(`/admin/users/${user.id}/brokerage`, { brokerageRate: Number(form.brokerageRate) }),
         api.patch(`/admin/users/${user.id}/max-saved-accounts`, { maxSavedAccounts: Number(form.maxSavedAccounts) }),
         api.patch(`/admin/users/${user.id}/closing-mode`, { closingMode: Boolean(form.closingMode) }),
+        api.patch(`/admin/users/${user.id}/liquidation-mode`, { liquidationType: form.liquidationType }),
       ]);
       toast.success('Trading settings updated');
       onSaved?.();
@@ -2559,6 +2865,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
           <div className="field"><label>Leverage</label><input className="input" value={form.leverage} onChange={(event) => setForm((prev) => ({ ...prev, leverage: event.target.value }))} /></div>
           <div className="field"><label>Brokerage Rate</label><input className="input" value={form.brokerageRate} onChange={(event) => setForm((prev) => ({ ...prev, brokerageRate: event.target.value }))} /></div>
           <div className="field"><label>Max Saved Accounts</label><input className="input" value={form.maxSavedAccounts} onChange={(event) => setForm((prev) => ({ ...prev, maxSavedAccounts: event.target.value }))} /></div>
+          <div className="field"><label>Liquidation Mode</label><select className="select" value={form.liquidationType} onChange={(event) => setForm((prev) => ({ ...prev, liquidationType: event.target.value }))}><option value="liquidate">Liquidate</option><option value="illiquidate">Illiquidate</option></select></div>
           <label className="row"><span>Closing Mode</span><input type="checkbox" checked={form.closingMode} onChange={(event) => setForm((prev) => ({ ...prev, closingMode: event.target.checked }))} /></label>
         </div>
         <button className="btn primary block" onClick={saveTradingSettings}>Save Trading Settings</button>
@@ -2985,14 +3292,77 @@ function ActionLedgerPanel() {
 }
 
 function CustomerSupportPanel() {
+  const [messages, setMessages] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [msgRes, userRes] = await Promise.all([
+        api.get('/web-admin/support-messages'),
+        api.get('/web-admin/users'),
+      ]);
+      setMessages(msgRes.data?.data || []);
+      const userRows = userRes.data?.data || userRes.data?.users || [];
+      setUsers(userRows);
+      setSelectedUserId((prev) => prev || userRows[0]?.id || '');
+    } catch {
+      toast.error('Failed to load support');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const send = async () => {
+    if (!selectedUserId) return toast.error('Select user');
+    if (!content.trim()) return toast.error('Enter message');
+    setLoading(true);
+    try {
+      await api.post('/web-admin/support-messages', { userId: selectedUserId, title: 'Trade Axis Support', content });
+      setContent('');
+      toast.success('Message sent');
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Message failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="support-shell card">
       <div className="support-list">
-        <div className="section-head"><div><h2>Support Inbox</h2><p>0 conversations</p></div></div>
-        <div className="empty-state"><MessageSquare size={34} /><span>No support messages yet</span></div>
+        <div className="section-head"><div><h2>Support Inbox</h2><p>{messages.length} messages</p></div></div>
+        <div className="support-message-list">
+          {messages.map((row) => (
+            <button key={row.id} className={`support-message-item ${row.sender_role === 'user' ? 'needs-reply' : ''}`} onClick={() => setSelectedUserId(row.user_id)}>
+              <strong>{row.user_login_id || row.user_name || 'User'}</strong>
+              <span>{row.content}</span>
+              <small>{formatDate(row.created_at)}</small>
+            </button>
+          ))}
+          {!messages.length && <div className="empty-state"><MessageSquare size={34} /><span>No support messages yet</span></div>}
+        </div>
       </div>
       <div className="support-thread">
-        <div className="empty-state"><span>Select a user query to respond.</span></div>
+        <div className="section-head"><div><h2>Send Message</h2><p>Reply to a selected user or send a support update.</p></div></div>
+        <div className="field">
+          <label>User</label>
+          <select className="select" value={selectedUserId} onChange={(event) => setSelectedUserId(event.target.value)}>
+            {users.map((user) => (
+              <option key={user.id} value={user.id}>{getUserName(user)} - {user.login_id || user.email}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Message</label>
+          <textarea className="input textarea" value={content} onChange={(event) => setContent(event.target.value)} placeholder="Write support response" />
+        </div>
+        <button className="btn primary" onClick={send} disabled={loading}><Send size={16} />Send Message</button>
       </div>
     </div>
   );
