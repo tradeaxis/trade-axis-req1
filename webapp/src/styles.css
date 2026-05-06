@@ -986,14 +986,41 @@ tr:last-child td {
 
 .multiple-settings-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(320px, 0.75fr);
-  gap: 18px;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+.multiple-main-panel {
+  background: #1b1d35;
+}
+
+.risk-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
+  gap: 14px;
 }
 
 .segment-filter-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
   gap: 8px;
+}
+
+.user-select-panel {
+  min-height: 260px;
+}
+
+.user-select-panel > .input {
+  margin-bottom: 12px;
+}
+
+.admin-update-modal .user-select-table table {
+  min-width: 520px;
+}
+
+.admin-update-modal .user-select-table th,
+.admin-update-modal .user-select-table td {
+  padding: 13px 16px;
 }
 
 .delete-list {

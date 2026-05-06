@@ -2579,24 +2579,31 @@ function MultipleSettingsEditor({ users, isBrokerUpdate }) {
   const clientRows = users.filter((row) => isBrokerUpdate ? row.role === 'user' && row.created_by : row.role === 'user');
   return (
     <div className="multiple-settings-grid">
-      <div className="admin-dark-panel">
+      <div className="admin-dark-panel multiple-main-panel">
         <div className="section-head"><div><h2>Multiple Settings</h2><p>Apply risk settings to multiple users and symbols at once.</p></div></div>
-        <div className="field"><label>Ledger Balance Close (%)</label><input className="input" placeholder="Input in %, e.g. 80" /></div>
-        <div className="field"><label>Profit Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for profitable trade" /></div>
-        <div className="field"><label>Loss Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for losing trade" /></div>
+        <div className="risk-settings-grid">
+          <div className="field"><label>Ledger Balance Close (%)</label><input className="input" placeholder="Input in %, e.g. 80" /></div>
+          <div className="field"><label>Profit Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for profitable trade" /></div>
+          <div className="field"><label>Loss Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for losing trade" /></div>
+        </div>
+      </div>
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Segment Filter</h2><p>Choose market segments before applying multiple settings.</p></div></div>
         <div className="segment-filter-grid">
           {['Show MCX', 'Show MCXOPTBUY', 'Show MCXOPTSELL', 'Show MCXOPT', 'Show NSE', 'Show IDXNSE', 'Show IDXOPTBUY', 'Show IDXOPTSELL'].map((label) => <button className="btn subtle" key={label}>{label}</button>)}
         </div>
-        <div className="admin-dark-panel nested-panel">
-          <h2>Block Limits</h2>
+      </div>
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Block Limits</h2><p>Limit blocking rules for high-low price conditions.</p></div></div>
+        <div className="risk-settings-grid">
           <label className="row"><span>Block Limit Above/Below High Low</span><input type="checkbox" /></label>
           <label className="row"><span>Block Limit Between High Low</span><input type="checkbox" /></label>
         </div>
       </div>
-      <div className="admin-dark-panel">
+      <div className="admin-dark-panel user-select-panel">
         <div className="section-head"><div><h2>Select Users</h2><p>{clientRows.length} clients available.</p></div><button className="btn subtle">Select All</button></div>
         <input className="input" placeholder="Search Client" />
-        <div className="table-wrap update-table">
+        <div className="table-wrap update-table user-select-table">
           <table><thead><tr><th>Checkbox</th><th>UserId</th><th>Username</th></tr></thead><tbody>{clientRows.slice(0, 12).map((row) => <tr key={row.id}><td><input type="checkbox" /></td><td className="gold-text">{row.login_id}</td><td>{getUserName(row)}</td></tr>)}{!clientRows.length && <tr><td colSpan="3">No clients found</td></tr>}</tbody></table></div>
       </div>
     </div>
