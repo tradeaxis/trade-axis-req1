@@ -140,6 +140,16 @@ const firstPositiveNumber = (...values) => {
   return 0;
 };
 
+const normalizeLiveUnderlyingKey = (value = '') =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[-_]/g, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
 const getSymbolPrice = (symbol) =>
   firstPositiveNumber(
     symbol?.last_price,
@@ -159,9 +169,44 @@ const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPri
 
 const getSymbolAsk = (symbol) => firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol));
 
+const findPositionSymbol = (position, symbols = []) => {
+  const raw = String(position?.symbol || '').toUpperCase();
+  if (!raw) return null;
+
+  const exact = symbols.find((row) => String(row?.symbol || '').toUpperCase() === raw);
+  if (exact) return exact;
+
+  const positionKey = normalizeLiveUnderlyingKey(raw);
+  return symbols.find((row) => {
+    const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
+    const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name || row?.name);
+    return symbolKey === positionKey || underlyingKey === positionKey;
+  }) || null;
+};
+
 const getLivePositionPrice = (position, symbols = []) => {
-  const symbol = symbols.find((row) => String(row.symbol).toUpperCase() === String(position.symbol).toUpperCase());
-  return getSymbolPrice(symbol) || Number(position.current_price || position.close_price || position.open_price || 0);
+  const symbol = findPositionSymbol(position, symbols);
+  const isSell = String(position?.trade_type || '').toLowerCase() === 'sell';
+  const closingSidePrice = isSell
+    ? firstPositiveNumber(symbol?.ask, symbol?.askPrice)
+    : firstPositiveNumber(symbol?.bid, symbol?.bidPrice);
+
+  return firstPositiveNumber(
+    closingSidePrice,
+    symbol?.last,
+    symbol?.last_price,
+    symbol?.lastPrice,
+    symbol?.current_price,
+    symbol?.currentPrice,
+    symbol?.previous_close,
+    symbol?.previousClose,
+    symbol?.close_price,
+    symbol?.closePrice,
+    symbol?.ohlc?.close,
+    position?.current_price,
+    position?.close_price,
+    position?.open_price,
+  );
 };
 
 const getPositionPnl = (position, symbols = []) => {
