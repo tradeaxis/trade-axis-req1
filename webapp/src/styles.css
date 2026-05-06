@@ -877,14 +877,15 @@ tr:last-child td {
   width: min(100%, 980px);
 }
 
-.full-screen-modal {
+.modal.full-screen-modal {
   width: calc(100vw - 24px);
   max-width: none;
   height: calc(100vh - 24px);
   max-height: calc(100vh - 24px);
+  overflow: hidden;
 }
 
-.full-screen-modal .modal-body {
+.modal.full-screen-modal .modal-body {
   max-height: calc(100vh - 82px);
   overflow: auto;
 }
@@ -938,7 +939,7 @@ tr:last-child td {
   font-size: 1rem;
 }
 
-.admin-update-modal {
+.modal.admin-update-modal {
   width: calc(100vw - 24px);
   max-width: none;
   height: calc(100vh - 24px);
@@ -954,7 +955,7 @@ tr:last-child td {
   border-bottom-color: #2b2e4d;
 }
 
-.admin-update-modal .modal-body {
+.modal.admin-update-modal .modal-body {
   max-height: calc(100vh - 90px);
   overflow: hidden;
 }
@@ -1999,7 +2000,7 @@ tr:last-child td {
     width: min(100%, 96vw);
   }
 
-  .full-screen-modal {
+  .modal.full-screen-modal {
     width: calc(100vw - 20px);
     height: calc(100dvh - 20px);
     max-height: calc(100dvh - 20px);
@@ -2029,7 +2030,7 @@ tr:last-child td {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
-  .admin-update-modal {
+  .modal.admin-update-modal {
     width: calc(100vw - 20px);
     height: calc(100dvh - 20px);
     max-height: calc(100dvh - 20px);

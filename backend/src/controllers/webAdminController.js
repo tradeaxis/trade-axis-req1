@@ -427,7 +427,7 @@ exports.actionLedger = async (req, res) => {
 
     let transactionQuery = supabase
       .from('transactions')
-      .select('id, user_id, account_id, type, transaction_type, amount, status, description, note, admin_note, balance_before, balance_after, created_at, updated_at, processed_at')
+      .select('id, user_id, account_id, type, transaction_type, amount, status, description, admin_note, balance_before, balance_after, created_at, updated_at, processed_at')
       .order('created_at', { ascending: false })
       .limit(maxRows);
     transactionQuery = applyDateRange(applyUserScope(transactionQuery), 'created_at');
@@ -454,7 +454,7 @@ exports.actionLedger = async (req, res) => {
         action: String(row.type || row.transaction_type || 'ledger').toUpperCase(),
         amount: toNumber(row.amount),
         status: row.status || '-',
-        message: firstNonEmptyString(row.description, row.note, row.admin_note, `${row.type || row.transaction_type || 'Ledger'} ${row.status || ''}`),
+        message: firstNonEmptyString(row.description, row.admin_note, `${row.type || row.transaction_type || 'Ledger'} ${row.status || ''}`),
         balanceBefore: row.balance_before,
         balanceAfter: row.balance_after,
       })),
