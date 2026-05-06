@@ -1792,7 +1792,7 @@ function UsersPanel({ mode, role }) {
   const [dialog, setDialog] = useState(null);
 
   const load = useCallback(async () => {
-    const res = await api.get('/web-admin/users', { params: { q, role: mode === 'sub_broker' ? 'sub_broker' : 'all' } });
+    const res = await api.get('/web-admin/users', { params: { q, role: 'all' } });
     const data = res.data?.data || [];
     setAllUsers(data);
     setUsers(data.filter((user) => mode === 'sub_broker' ? user.role === 'sub_broker' : user.role !== 'sub_broker' && user.role !== 'admin'));
@@ -1827,7 +1827,7 @@ function UsersPanel({ mode, role }) {
       {dialog?.type === 'positions' && <UserPositionsModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'brokerage' && <BrokerageModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} />}
-      {dialog?.type === 'update' && <UserUpdateModal user={dialog.user} brokers={allUsers.filter((user) => user.role === 'sub_broker')} onClose={() => setDialog(null)} onSaved={load} />}
+      {dialog?.type === 'update' && <UserUpdateModal mode={mode} user={dialog.user} users={allUsers} brokers={allUsers.filter((user) => user.role === 'sub_broker')} onClose={() => setDialog(null)} onSaved={load} />}
     </div>
   );
 }
@@ -2300,26 +2300,45 @@ function LedgerModal({ user, onClose }) {
   );
 }
 
-function UserUpdateModal({ user, brokers, onClose, onSaved }) {
+function UserUpdateModal({ mode = 'users', user, users = [], brokers = [], onClose, onSaved }) {
   const [tab, setTab] = useState('details');
+  const isBrokerUpdate = mode === 'sub_broker' || user.role === 'sub_broker';
+  const tabItems = [
+    ['details', isBrokerUpdate ? 'Sub Broker Details' : 'User Details'],
+    ['segment', 'Segment Settings'],
+    ['script', 'Script Settings'],
+    ['ledger', 'Ledger Update'],
+    ['copy', isBrokerUpdate ? 'Client Transfer' : 'Copy Settings'],
+    ['multiple', 'Multiple Settings'],
+    ['notifications', 'Notifications'],
+    ['delete', isBrokerUpdate ? 'Delete Sub Broker' : 'Delete User'],
+  ];
 
   return (
     <div className="modal-backdrop">
-      <div className="modal wide-modal">
-        <div className="modal-head"><strong>Update User - {getUserName(user)}</strong><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
+      <div className="modal admin-update-modal">
+        <div className="modal-head dark-modal-head">
+          <div>
+            <strong>{isBrokerUpdate ? 'Update Sub Broker' : 'Update User'} - {getUserName(user)}</strong>
+            <div className="meta">{user.login_id} {isBrokerUpdate ? 'broker console controls' : 'client trading controls'}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
         <div className="modal-body user-update-shell">
           <div className="settings-menu">
-            {['details', 'segment', 'script', 'ledger', 'copy', 'multiple', 'notifications', 'delete'].map((item) => (
-              <button key={item} className={`settings-menu-item ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>{item}</button>
+            {tabItems.map(([item, label]) => (
+              <button key={item} className={`settings-menu-item ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>{label}</button>
             ))}
           </div>
           <div className="settings-content">
-            {tab === 'details' && <UserDetailsEditor user={user} brokers={brokers} onSaved={onSaved} />}
-            {tab === 'segment' && <SegmentSettingsEditor user={user} />}
-            {tab === 'notifications' && <NotificationEditor user={user} />}
-            {tab !== 'details' && tab !== 'segment' && tab !== 'notifications' && (
-              <div className="card pad"><h2>{tab}</h2><p className="meta">This section is prepared in the web UI. Backend write endpoints can be added next for full persistence.</p></div>
-            )}
+            {tab === 'details' && <UserDetailsEditor user={user} users={users} brokers={brokers} isBrokerUpdate={isBrokerUpdate} onSaved={onSaved} />}
+            {tab === 'segment' && <SegmentSettingsEditor user={user} isBrokerUpdate={isBrokerUpdate} />}
+            {tab === 'script' && <ScriptSettingsEditor user={user} />}
+            {tab === 'ledger' && <LedgerUpdateEditor user={user} onSaved={onSaved} />}
+            {tab === 'copy' && <CopySettingsEditor user={user} users={users} brokers={brokers} isBrokerUpdate={isBrokerUpdate} onSaved={onSaved} />}
+            {tab === 'multiple' && <MultipleSettingsEditor users={users} isBrokerUpdate={isBrokerUpdate} />}
+            {tab === 'notifications' && <NotificationEditor user={user} users={users} brokers={brokers} />}
+            {tab === 'delete' && <DeleteUserEditor user={user} users={users} isBrokerUpdate={isBrokerUpdate} onSaved={onSaved} onClose={onClose} />}
           </div>
         </div>
       </div>
@@ -2327,10 +2346,16 @@ function UserUpdateModal({ user, brokers, onClose, onSaved }) {
   );
 }
 
-function UserDetailsEditor({ user, brokers, onSaved }) {
+function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved }) {
+  const primary = (user.accounts || [])[0] || {};
   const [form, setForm] = useState({
     active: user.is_active !== false,
     brokerId: user.created_by || '',
+    leverage: user.leverage || primary.leverage || 30,
+    brokerageRate: user.brokerage_rate ?? 0.0006,
+    maxSavedAccounts: user.max_saved_accounts ?? 10,
+    closingMode: Boolean(user.closing_mode),
+    password: '',
   });
 
   const saveActive = async () => {
@@ -2353,29 +2378,127 @@ function UserDetailsEditor({ user, brokers, onSaved }) {
     }
   };
 
+  const resetPassword = async () => {
+    if (form.password && String(form.password).length < 4) return toast.error('Password must be at least 4 characters');
+    try {
+      const res = await api.post(`/admin/users/${user.id}/reset-password`, form.password ? { newPassword: form.password } : {});
+      toast.success(`Password updated${res.data?.data?.tempPassword ? `: ${res.data.data.tempPassword}` : ''}`);
+      setForm((prev) => ({ ...prev, password: '' }));
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Password reset failed');
+    }
+  };
+
+  const saveTradingSettings = async () => {
+    try {
+      await Promise.all([
+        api.patch(`/admin/users/${user.id}/leverage`, { leverage: Number(form.leverage) }),
+        api.patch(`/admin/users/${user.id}/brokerage`, { brokerageRate: Number(form.brokerageRate) }),
+        api.patch(`/admin/users/${user.id}/max-saved-accounts`, { maxSavedAccounts: Number(form.maxSavedAccounts) }),
+        api.patch(`/admin/users/${user.id}/closing-mode`, { closingMode: Boolean(form.closingMode) }),
+      ]);
+      toast.success('Trading settings updated');
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Settings update failed');
+    }
+  };
+
   return (
-    <div className="grid-2">
-      <div className="card pad">
-        <div className="section-head"><div><h2>User Settings</h2><p>Activation and password management.</p></div></div>
+    <div className="update-grid">
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>{isBrokerUpdate ? 'Sub Broker Settings' : 'User Settings'}</h2><p>Activation, password and role level controls.</p></div></div>
         <div className="field"><label>Username</label><input className="input" readOnly value={getUserName(user)} /></div>
+        <div className="field"><label>Login ID</label><input className="input" readOnly value={user.login_id || ''} /></div>
         <label className="row"><span>Activation</span><input type="checkbox" checked={form.active} onChange={(event) => setForm((prev) => ({ ...prev, active: event.target.checked }))} /></label>
-        <button className="btn primary" onClick={saveActive}>Save Changes</button>
+        <div className="action-row left-actions"><button className="btn primary" onClick={saveActive}>Save Activation</button></div>
+        <div className="field"><label>New Password</label><input className="input" type="password" placeholder="Enter password or leave blank for temp password" value={form.password} onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))} /></div>
+        <button className="btn success block" onClick={resetPassword}>Reset Password</button>
       </div>
-      <div className="card pad">
-        <div className="section-head"><div><h2>Link User To Broker</h2><p>Assign client under a sub broker.</p></div></div>
-        <div className="field"><label>Select Broker</label><select className="select" value={form.brokerId} onChange={(event) => setForm((prev) => ({ ...prev, brokerId: event.target.value }))}><option value="">Admin direct</option>{brokers.map((broker) => <option key={broker.id} value={broker.id}>{broker.login_id} - {getUserName(broker)}</option>)}</select></div>
-        <button className="btn primary" onClick={saveBroker}>Transfer User</button>
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Trading Controls</h2><p>Leverage, brokerage, saved accounts and closing mode.</p></div></div>
+        <div className="grid-2 tight-grid">
+          <div className="field"><label>Leverage</label><input className="input" value={form.leverage} onChange={(event) => setForm((prev) => ({ ...prev, leverage: event.target.value }))} /></div>
+          <div className="field"><label>Brokerage Rate</label><input className="input" value={form.brokerageRate} onChange={(event) => setForm((prev) => ({ ...prev, brokerageRate: event.target.value }))} /></div>
+          <div className="field"><label>Max Saved Accounts</label><input className="input" value={form.maxSavedAccounts} onChange={(event) => setForm((prev) => ({ ...prev, maxSavedAccounts: event.target.value }))} /></div>
+          <label className="row"><span>Closing Mode</span><input type="checkbox" checked={form.closingMode} onChange={(event) => setForm((prev) => ({ ...prev, closingMode: event.target.checked }))} /></label>
+        </div>
+        <button className="btn primary block" onClick={saveTradingSettings}>Save Trading Settings</button>
+      </div>
+      {!isBrokerUpdate && (
+        <div className="admin-dark-panel full-span">
+          <div className="section-head"><div><h2>Link User To Broker</h2><p>Assign this client under a sub broker or keep direct under admin.</p></div></div>
+          <div className="field"><label>Select Broker</label><select className="select" value={form.brokerId} onChange={(event) => setForm((prev) => ({ ...prev, brokerId: event.target.value }))}><option value="">Admin direct</option>{brokers.map((broker) => <option key={broker.id} value={broker.id}>{broker.login_id} - {getUserName(broker)}</option>)}</select></div>
+          <button className="btn primary" onClick={saveBroker}>Transfer User</button>
+        </div>
+      )}
+      {isBrokerUpdate && (
+        <div className="admin-dark-panel full-span">
+          <div className="section-head"><div><h2>Broker Scope</h2><p>Sub broker manages only assigned clients and their positions.</p></div></div>
+          <div className="stats-grid compact-stats">
+            <Stat label="Role" value="Sub Broker" />
+            <Stat label="Clients" value={users.filter((client) => client.created_by === user.id && client.role === 'user').length || 0} />
+            <Stat label="Created On" value={formatDate(user.created_at)} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LedgerUpdateEditor({ user, onSaved }) {
+  const account = (user.accounts || [])[0] || {};
+  const [form, setForm] = useState({ crdr: 0, remarks: 'Adjustment' });
+  const amount = Number(form.crdr || 0);
+
+  const submit = async () => {
+    if (!amount) return toast.error('Enter CRDR amount');
+    try {
+      await api.post(`/admin/users/${user.id}/add-balance`, {
+        accountId: account.id,
+        amount,
+        note: form.remarks,
+      });
+      toast.success('Ledger updated');
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Ledger update failed');
+    }
+  };
+
+  return (
+    <div className="admin-dark-panel">
+      <div className="section-head"><div><h2>Ledger Update</h2><p>Credit positive amount or debit negative amount.</p></div></div>
+      <div className="update-grid">
+        <div className="field"><label>Username</label><input className="input" readOnly value={user.login_id || ''} /></div>
+        <div className="field"><label>CRDR (Credit +ve / Debit -ve)</label><input className="input" value={form.crdr} onChange={(event) => setForm((prev) => ({ ...prev, crdr: event.target.value }))} /></div>
+        <div className="field"><label>Deposit Balance</label><input className="input" readOnly value={account.balance || 0} /></div>
+        <div className="field"><label>Margin Available</label><input className="input" readOnly value={account.free_margin || 0} /></div>
+        <div className="field"><label>Ledger Balance</label><input className="input" readOnly value={account.balance || 0} /></div>
+        <div className="field"><label>Pnl (-) Settlement</label><input className="input" readOnly value={account.credit || 0} /></div>
+        <div className="field"><label>Margin Used</label><input className="input" readOnly value={account.margin || 0} /></div>
+        <div className="field"><label>Remarks</label><select className="select" value={form.remarks} onChange={(event) => setForm((prev) => ({ ...prev, remarks: event.target.value }))}>{['Select Type', 'Register Balance', 'Deposit', 'Withdraw', 'Settlement', 'Adjustment'].map((item) => <option key={item}>{item}</option>)}</select></div>
+      </div>
+      <button className="btn primary block" onClick={submit}>Submit</button>
+      <div className="table-wrap update-table">
+        <table>
+          <thead><tr><th>Date</th><th>CR/DR</th><th>Amount</th><th>Balance</th><th>Remarks</th><th>Delete</th></tr></thead>
+          <tbody>
+            <tr><td>{formatDate(new Date())}</td><td className={amount >= 0 ? 'positive' : 'negative'}>{amount >= 0 ? 'CR' : 'DR'}</td><td>{amount.toFixed(2)}</td><td>{Number(account.balance || 0).toFixed(2)}</td><td>{form.remarks}</td><td><button className="mini-action red" disabled>Delete</button></td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
 
 function SegmentSettingsEditor({ user }) {
-  const segments = ['NSE Index', 'NSE Index Options', 'MCX Futures', 'NSE Futures Options'];
+  const segments = ['NSE Index (NSEFUT)', 'NSE Index Options (NSEOPT)', 'MCX Futures (MCXFUT)', 'NSE Futures Options'];
   return (
     <div className="segment-settings">
       {segments.map((segment) => (
-        <div className="card pad" key={segment}>
+        <div className="admin-dark-panel segment-card" key={segment}>
           <div className="section-head"><div><h2>{segment}</h2><p>0 means use global setting.</p></div><button className="btn primary" onClick={() => toast.error('Segment settings endpoint is not enabled yet')}>Save</button></div>
           <div className="grid-3">
             {['Intraday Margin %', 'Holding Margin %', 'Brokerage /Cr', 'Max Lots', 'Order Lots'].map((label) => <div className="field" key={label}><label>{label}</label><input className="input" defaultValue="0" /></div>)}
@@ -2387,15 +2510,145 @@ function SegmentSettingsEditor({ user }) {
   );
 }
 
-function NotificationEditor({ user }) {
+function ScriptSettingsEditor({ user }) {
+  const [symbols, setSymbols] = useState([]);
+  const [symbolSearch, setSymbolSearch] = useState('');
+  const filtered = symbols.filter((row) => String(row.symbol || '').toLowerCase().includes(symbolSearch.toLowerCase())).slice(0, 8);
+
+  useEffect(() => {
+    loadTradableSymbols({ limit: 5000 }).then(setSymbols).catch(() => {});
+  }, []);
+
+  return (
+    <div className="admin-dark-panel">
+      <div className="section-head"><div><h2>Create New Setting</h2><p>Custom symbol-level rule for {user.login_id}.</p></div></div>
+      <div className="update-grid">
+        <div className="field"><label>Type Select</label><select className="select" defaultValue="NSE"><option>NSE</option><option>MCX</option><option>NSEOPT</option><option>MCXOPT</option><option>Crypto</option></select></div>
+        <div className="field"><label>Symbol ({symbols.length} available)</label><input className="input" placeholder="Search symbol" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} /></div>
+        <div className="field"><label>Type Select</label><select className="select" defaultValue="Value Settings"><option>Value Settings</option><option>Quantity Settings</option><option>Block Settings</option></select></div>
+        <div className="field"><label>Select Symbol</label><select className="select">{filtered.map((row) => <option key={row.symbol}>{row.symbol}</option>)}</select></div>
+        <div className="field"><label>Per Order Value</label><input className="input" placeholder="Per Order Value" /></div>
+        <div className="field"><label>Max Value Holding</label><input className="input" placeholder="Max Value Holding" /></div>
+        <div className="field"><label>Fix OPTSELL HO</label><input className="input" defaultValue="0" /></div>
+        <div className="field"><label>Fix OPTSELL INT</label><input className="input" defaultValue="0" /></div>
+      </div>
+      <button className="btn primary block" onClick={() => toast.error('Script settings endpoint is not enabled yet')}>Submit</button>
+      <div className="table-wrap update-table">
+        <table>
+          <thead><tr><th>Symbol</th><th>Max/Order/Min Lot</th><th>Max/Order Qty</th><th>Max/Order Value</th><th>Fix INT/HO</th><th>Per Crore/Lot</th><th>Spread</th><th>Limit Point</th><th>Block</th><th>OPT Block</th></tr></thead>
+          <tbody><tr><td colSpan="10">No settings configured yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CopySettingsEditor({ user, users, brokers, isBrokerUpdate, onSaved }) {
+  const [copyFrom, setCopyFrom] = useState('');
+  const [brokerId, setBrokerId] = useState(user.created_by || '');
+
+  const transfer = async () => {
+    try {
+      await api.post('/web-admin/assign-broker', { userId: user.id, brokerId: brokerId || null });
+      toast.success('Broker assignment updated');
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Transfer failed');
+    }
+  };
+
+  return (
+    <div className="update-grid">
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Transfer Settings</h2><p>Copy trading controls from another client.</p></div></div>
+        <div className="field"><label>UserId</label><input className="input" readOnly value={user.email || user.login_id || ''} /></div>
+        <div className="field"><label>User to Copy From</label><select className="select" value={copyFrom} onChange={(event) => setCopyFrom(event.target.value)}><option value="">Select or search a user</option>{users.filter((row) => row.id !== user.id && row.role !== 'admin').map((row) => <option key={row.id} value={row.id}>{row.login_id} - {getUserName(row)}</option>)}</select></div>
+        <button className="btn primary block" onClick={() => toast.error('Copy settings endpoint is not enabled yet')}>Copy User</button>
+      </div>
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>{isBrokerUpdate ? 'Broker Client Scope' : 'Link User to Broker'}</h2><p>{isBrokerUpdate ? 'Use Sub Broker Management to assign clients under this broker.' : 'Move this client under a selected broker.'}</p></div></div>
+        <div className="field"><label>Username</label><input className="input" readOnly value={user.email || user.login_id || ''} /></div>
+        {!isBrokerUpdate && <div className="field"><label>Select Broker</label><select className="select" value={brokerId} onChange={(event) => setBrokerId(event.target.value)}><option value="">Admin direct</option>{brokers.map((broker) => <option key={broker.id} value={broker.id}>{broker.login_id} - {getUserName(broker)}</option>)}</select></div>}
+        <button className="btn primary block" disabled={isBrokerUpdate} onClick={transfer}>Transfer User</button>
+      </div>
+    </div>
+  );
+}
+
+function MultipleSettingsEditor({ users, isBrokerUpdate }) {
+  const clientRows = users.filter((row) => isBrokerUpdate ? row.role === 'user' && row.created_by : row.role === 'user');
+  return (
+    <div className="multiple-settings-grid">
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Multiple Settings</h2><p>Apply risk settings to multiple users and symbols at once.</p></div></div>
+        <div className="field"><label>Ledger Balance Close (%)</label><input className="input" placeholder="Input in %, e.g. 80" /></div>
+        <div className="field"><label>Profit Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for profitable trade" /></div>
+        <div className="field"><label>Loss Trade Hold Min Seconds</label><input className="input" placeholder="Minimum seconds for losing trade" /></div>
+        <div className="segment-filter-grid">
+          {['Show MCX', 'Show MCXOPTBUY', 'Show MCXOPTSELL', 'Show MCXOPT', 'Show NSE', 'Show IDXNSE', 'Show IDXOPTBUY', 'Show IDXOPTSELL'].map((label) => <button className="btn subtle" key={label}>{label}</button>)}
+        </div>
+        <div className="admin-dark-panel nested-panel">
+          <h2>Block Limits</h2>
+          <label className="row"><span>Block Limit Above/Below High Low</span><input type="checkbox" /></label>
+          <label className="row"><span>Block Limit Between High Low</span><input type="checkbox" /></label>
+        </div>
+      </div>
+      <div className="admin-dark-panel">
+        <div className="section-head"><div><h2>Select Users</h2><p>{clientRows.length} clients available.</p></div><button className="btn subtle">Select All</button></div>
+        <input className="input" placeholder="Search Client" />
+        <div className="table-wrap update-table">
+          <table><thead><tr><th>Checkbox</th><th>UserId</th><th>Username</th></tr></thead><tbody>{clientRows.slice(0, 12).map((row) => <tr key={row.id}><td><input type="checkbox" /></td><td className="gold-text">{row.login_id}</td><td>{getUserName(row)}</td></tr>)}{!clientRows.length && <tr><td colSpan="3">No clients found</td></tr>}</tbody></table></div>
+      </div>
+    </div>
+  );
+}
+
+function NotificationEditor({ user, users = [], brokers = [] }) {
   const [form, setForm] = useState({ title: '', content: '' });
   return (
-    <div className="card pad">
+    <div className="admin-dark-panel">
       <div className="section-head"><div><h2>Send Notification</h2><p>Custom message to selected user.</p></div></div>
       <div className="field"><label>Title</label><input className="input" value={form.title} onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))} /></div>
       <div className="field"><label>Content</label><textarea className="textarea" value={form.content} onChange={(event) => setForm((prev) => ({ ...prev, content: event.target.value }))} /></div>
-      <div className="meta">Selected client: {user.login_id} - {getUserName(user)}</div>
+      <div className="stats-grid compact-stats">
+        <Stat label="Selected" value={`${user.login_id} - ${getUserName(user)}`} />
+        <Stat label="Clients" value={users.filter((row) => row.role === 'user').length} />
+        <Stat label="Brokers" value={brokers.length} />
+      </div>
       <button className="btn primary" onClick={() => toast.error('Notification endpoint is not enabled yet')}>Send Message</button>
+    </div>
+  );
+}
+
+function DeleteUserEditor({ user, users, isBrokerUpdate, onSaved, onClose }) {
+  const [confirm, setConfirm] = useState('');
+  const rows = isBrokerUpdate ? users.filter((row) => row.role === 'sub_broker') : users.filter((row) => row.role !== 'admin' && row.role !== 'sub_broker');
+
+  const remove = async (target) => {
+    if (confirm !== target.login_id) return toast.error(`Type ${target.login_id} to confirm delete`);
+    if (!window.confirm(`Delete ${target.login_id}? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/admin/users/${target.id}`);
+      toast.success('Deleted');
+      onSaved?.();
+      if (target.id === user.id) onClose?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Delete failed');
+    }
+  };
+
+  return (
+    <div className="admin-dark-panel">
+      <div className="section-head"><div><h2>{isBrokerUpdate ? 'Delete Sub Broker' : 'Delete User'}</h2><p>Type the Login ID before deleting. This action cannot be undone.</p></div></div>
+      <div className="field"><label>Confirm Login ID</label><input className="input" value={confirm} onChange={(event) => setConfirm(event.target.value.toUpperCase())} placeholder={user.login_id} /></div>
+      <div className="delete-list">
+        {rows.map((row) => (
+          <div className="delete-row" key={row.id}>
+            <div><strong>{getUserName(row)}</strong><div className="meta">{row.login_id} {row.email || ''}</div></div>
+            <button className="mini-action red" onClick={() => remove(row)}>Delete</button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

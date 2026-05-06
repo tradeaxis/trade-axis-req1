@@ -527,6 +527,10 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.left-actions {
+  justify-content: flex-start;
+}
+
 .tabs {
   display: inline-flex;
   background: var(--surface-3);
@@ -758,6 +762,74 @@ tr:last-child td {
   width: min(100%, 980px);
 }
 
+.admin-update-modal {
+  width: min(100%, 1180px);
+  max-height: 92vh;
+  background: #101225;
+  color: #f7f8ff;
+  border-color: #2b2e4d;
+  overflow: hidden;
+}
+
+.dark-modal-head {
+  background: #0b0d1d;
+  border-bottom-color: #2b2e4d;
+}
+
+.admin-update-modal .modal-body {
+  max-height: calc(92vh - 66px);
+  overflow: hidden;
+}
+
+.admin-update-modal .meta,
+.admin-update-modal .section-head p,
+.admin-update-modal .field label {
+  color: #a6aec5;
+}
+
+.admin-update-modal .input,
+.admin-update-modal .select,
+.admin-update-modal .textarea {
+  background: #262743;
+  border-color: #3a3d61;
+  color: #f7f8ff;
+}
+
+.admin-update-modal .input::placeholder,
+.admin-update-modal .textarea::placeholder {
+  color: #7f879d;
+}
+
+.admin-update-modal .row {
+  background: #262743;
+  border-color: #3a3d61;
+  color: #f7f8ff;
+}
+
+.admin-update-modal .stat {
+  background: #17192f;
+  border-color: #2b2e4d;
+}
+
+.admin-update-modal .table-wrap {
+  border-color: #303354;
+}
+
+.admin-update-modal table {
+  min-width: 920px;
+}
+
+.admin-update-modal th {
+  background: #252743;
+  color: #b3bad0;
+}
+
+.admin-update-modal td {
+  background: #17192f;
+  border-bottom-color: #2b2e4d;
+  color: #f7f8ff;
+}
+
 .nested {
   z-index: 120;
   background: rgba(8, 13, 28, 0.62);
@@ -815,6 +887,12 @@ tr:last-child td {
   background: var(--surface-2);
 }
 
+.admin-update-modal .settings-menu {
+  background: #17192f;
+  border: 1px solid #2b2e4d;
+  padding: 12px;
+}
+
 .settings-menu-item {
   border: 0;
   border-radius: 7px;
@@ -833,19 +911,113 @@ tr:last-child td {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
+.admin-update-modal .settings-menu-item {
+  color: #a6aec5;
+  background: transparent;
+  min-height: 42px;
+}
+
+.admin-update-modal .settings-menu-item.active,
+.admin-update-modal .settings-menu-item:hover {
+  color: #fff;
+  background: #2a2c4b;
+}
+
 .user-update-shell {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
   gap: 18px;
 }
 
+.admin-update-modal .user-update-shell {
+  grid-template-columns: 200px minmax(0, 1fr);
+  padding: 18px;
+}
+
 .settings-content {
   min-width: 0;
+}
+
+.admin-update-modal .settings-content {
+  overflow: auto;
+  max-height: calc(92vh - 104px);
+  padding-right: 4px;
 }
 
 .segment-settings {
   display: grid;
   gap: 12px;
+}
+
+.admin-dark-panel {
+  min-width: 0;
+  background: #17192f;
+  border: 1px solid #2b2e4d;
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.nested-panel {
+  margin-top: 16px;
+  background: #242641;
+}
+
+.update-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.tight-grid {
+  gap: 12px;
+}
+
+.full-span {
+  grid-column: 1 / -1;
+}
+
+.segment-card {
+  overflow-x: auto;
+}
+
+.update-table {
+  margin-top: 18px;
+}
+
+.multiple-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(320px, 0.75fr);
+  gap: 18px;
+}
+
+.segment-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.delete-list {
+  display: grid;
+  gap: 10px;
+  max-height: 430px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.delete-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border-radius: 8px;
+  background: #22243e;
+  border: 1px solid #303354;
+}
+
+.gold-text {
+  color: #f59e0b;
+  font-weight: 800;
 }
 
 .side-switch {
@@ -1573,6 +1745,29 @@ tr:last-child td {
   .user-update-shell,
   .support-shell {
     grid-template-columns: 1fr;
+  }
+
+  .admin-update-modal {
+    width: 96vw;
+    max-height: 94vh;
+  }
+
+  .admin-update-modal .modal-body {
+    max-height: calc(94vh - 66px);
+  }
+
+  .admin-update-modal .settings-content {
+    max-height: calc(94vh - 168px);
+  }
+
+  .admin-update-modal .user-update-shell,
+  .update-grid,
+  .multiple-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-dark-panel {
+    padding: 14px;
   }
 
   .settings-menu {
