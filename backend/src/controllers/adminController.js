@@ -1106,18 +1106,72 @@ exports.approveWithdrawal = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Transaction is not pending' });
     }
 
+    const txnType = String(txn.type || txn.transaction_type || '').toLowerCase();
+    if (!['withdraw', 'withdrawal'].includes(txnType)) {
+      return res.status(400).json({ success: false, message: 'Transaction is not a withdrawal request' });
+    }
+
+    const { data: account, error: accountError } = await supabase
+      .from('accounts')
+      .select('*')
+      .eq('id', txn.account_id)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+
+    const amount = Number(txn.amount || 0);
+    const currentBalance = Number(account.balance || 0);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid withdrawal amount' });
+    }
+    const alreadyDebited = txn.balance_after !== null
+      && txn.balance_after !== undefined
+      && Number(txn.balance_after) < Number(txn.balance_before ?? txn.balance_after);
+    if (!alreadyDebited && amount > currentBalance) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient balance. Available: INR ${currentBalance.toFixed(2)}`,
+      });
+    }
+
+    const processedAt = new Date().toISOString();
+    const balanceBefore = alreadyDebited ? Number(txn.balance_before ?? currentBalance + amount) : currentBalance;
+    const newBalance = alreadyDebited ? currentBalance : currentBalance - amount;
+
+    if (!alreadyDebited) {
+      const { error: accountUpdateError } = await supabase
+        .from('accounts')
+        .update({
+          balance: newBalance,
+          updated_at: processedAt,
+        })
+        .eq('id', txn.account_id);
+
+      if (accountUpdateError) throw accountUpdateError;
+    }
+
+    await recalculateAccountSnapshot(txn.account_id, processedAt);
+
     const { error: updateError } = await supabase
       .from('transactions')
       .update({
         status: 'completed',
         admin_note: adminNote || 'Approved by admin',
-        processed_at: new Date().toISOString(),
+        balance_before: balanceBefore,
+        balance_after: newBalance,
+        processed_at: processedAt,
       })
       .eq('id', id);
 
     if (updateError) throw updateError;
 
-    res.json({ success: true, message: 'Withdrawal approved' });
+    res.json({
+      success: true,
+      message: `Withdrawal approved. New balance: INR ${newBalance.toFixed(2)}`,
+      newBalance,
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -1142,31 +1196,34 @@ exports.rejectWithdrawal = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Transaction is not pending' });
     }
 
-    const { data: account } = await supabase
-      .from('accounts')
-      .select('*')
-      .eq('id', txn.account_id)
-      .single();
+    const wasPreviouslyHeld = txn.balance_after !== null
+      && txn.balance_after !== undefined
+      && Number(txn.balance_after) < Number(txn.balance_before ?? txn.balance_after);
+    let balanceAfter = txn.balance_after;
 
-    if (account) {
-      const newBalance = parseFloat(account.balance || 0) + parseFloat(txn.amount || 0);
-      const newEquity = parseFloat(account.equity || 0) + parseFloat(txn.amount || 0);
-
-      await supabase
+    if (wasPreviouslyHeld) {
+      const { data: account } = await supabase
         .from('accounts')
-        .update({
-          balance: newBalance,
-          equity: newEquity,
-          free_margin: newEquity - parseFloat(account.margin || 0),
-        })
-        .eq('id', txn.account_id);
+        .select('*')
+        .eq('id', txn.account_id)
+        .single();
+
+      if (account) {
+        balanceAfter = Number(account.balance || 0) + Number(txn.amount || 0);
+        await supabase
+          .from('accounts')
+          .update({
+            balance: balanceAfter,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', txn.account_id);
+        await recalculateAccountSnapshot(txn.account_id);
+      }
     }
 
     await updateTransactionAsRejected(id, {
       admin_note: adminNote || 'Rejected by admin',
-      balance_after: account
-        ? parseFloat(account.balance || 0) + parseFloat(txn.amount || 0)
-        : txn.balance_after,
+      balance_after: balanceAfter,
     });
 
     res.json({ success: true, message: 'Withdrawal rejected and amount refunded' });
@@ -1647,7 +1704,7 @@ exports.getMarketHoliday = async (req, res) => {
 // ============ ADMIN MANUAL CLOSE POSITION ============
 exports.adminClosePosition = async (req, res) => {
   try {
-    const { tradeId, closePrice: manualPrice, reason } = req.body;
+    const { tradeId, closePrice: manualPrice, reason, closeQuantity } = req.body;
 
     if (!tradeId) {
       return res.status(400).json({ success: false, message: 'Trade ID is required' });
@@ -1665,7 +1722,18 @@ exports.adminClosePosition = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
     }
 
+    const requestedCloseQuantity = Number(closeQuantity || trade.quantity || 0);
+    const totalTradeQuantity = Number(trade.quantity || 0);
+
+    if (!Number.isFinite(requestedCloseQuantity) || requestedCloseQuantity <= 0) {
+      return res.status(400).json({ success: false, message: 'Close quantity must be greater than 0' });
+    }
+    if (requestedCloseQuantity > totalTradeQuantity) {
+      return res.status(400).json({ success: false, message: 'Close quantity cannot exceed open quantity' });
+    }
+
     const preview = await tradingService.previewClosePosition(trade, {
+      quantity: requestedCloseQuantity,
       closePrice: manualPrice && Number(manualPrice) > 0 ? Number(manualPrice) : undefined,
     });
 
@@ -1677,6 +1745,73 @@ exports.adminClosePosition = async (req, res) => {
     }
 
     const closeTime = new Date().toISOString();
+
+    if (requestedCloseQuantity < totalTradeQuantity) {
+      const remainingQuantity = totalTradeQuantity - requestedCloseQuantity;
+      const remainingMargin = Math.max(0, Number(trade.margin || 0) - Number(preview.marginFreed || 0));
+      const remainingBuyBrokerage = Math.max(0, Number(trade.buy_brokerage || trade.brokerage || 0) - Number(preview.buyBrokerage || 0));
+      const direction = trade.trade_type === 'buy' ? 1 : -1;
+      const currentPrice = Number(trade.current_price || trade.open_price || 0);
+      const remainingProfit = ((currentPrice - Number(trade.open_price || 0)) * direction * remainingQuantity * Number(preview.lotSize || trade.lot_size || 1)) - remainingBuyBrokerage;
+
+      const { data: closedTrade, error: closedError } = await supabase
+        .from('trades')
+        .insert({
+          user_id: trade.user_id,
+          account_id: trade.account_id,
+          symbol: trade.symbol,
+          exchange: trade.exchange,
+          trade_type: trade.trade_type,
+          quantity: requestedCloseQuantity,
+          lot_size: preview.lotSize || trade.lot_size || 1,
+          open_price: trade.open_price,
+          close_price: preview.closePrice,
+          current_price: preview.closePrice,
+          stop_loss: trade.stop_loss || 0,
+          take_profit: trade.take_profit || 0,
+          margin: preview.marginFreed,
+          buy_brokerage: preview.buyBrokerage,
+          sell_brokerage: preview.sellBrokerage,
+          brokerage: preview.totalBrokerage,
+          profit: preview.netProfit,
+          status: 'closed',
+          open_time: trade.open_time,
+          close_time: closeTime,
+          updated_at: closeTime,
+          comment: buildAdminTradeComment('Admin partial close', reason || 'Partial close by admin'),
+        })
+        .select()
+        .single();
+
+      if (closedError) throw closedError;
+
+      const { error: updateRemainingError } = await supabase
+        .from('trades')
+        .update({
+          quantity: remainingQuantity,
+          margin: remainingMargin,
+          buy_brokerage: remainingBuyBrokerage,
+          brokerage: remainingBuyBrokerage,
+          profit: remainingProfit,
+          updated_at: closeTime,
+        })
+        .eq('id', tradeId);
+
+      if (updateRemainingError) throw updateRemainingError;
+
+      await tradingService.settleAccount(
+        trade.account_id,
+        preview.netProfit,
+        preview.marginFreed,
+        closeTime,
+      );
+
+      return res.json({
+        success: true,
+        data: closedTrade,
+        message: `Admin closed ${requestedCloseQuantity} of ${trade.symbol} @ Rs.${preview.closePrice.toFixed(2)}. Remaining: ${remainingQuantity}`,
+      });
+    }
 
     // Close the trade
     const { data: closedTrade, error: updateError } = await supabase
@@ -1901,11 +2036,10 @@ exports.adminUpdatePosition = async (req, res) => {
       .from('trades')
       .select('*, accounts!inner(user_id, leverage)')
       .eq('id', tradeId)
-      .eq('status', 'open')
       .single();
 
     if (tradeError || !trade) {
-      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
+      return res.status(404).json({ success: false, message: 'Trade not found' });
     }
 
     const nextQuantity = quantity !== undefined && quantity !== null && quantity !== ''
@@ -1940,13 +2074,19 @@ exports.adminUpdatePosition = async (req, res) => {
     const updates = {
       quantity: nextQuantity,
       open_price: nextOpenPrice,
-      current_price: nextCurrentPrice,
       margin: nextMargin,
       buy_brokerage: nextBuyBrokerage,
       brokerage: nextBuyBrokerage,
       profit: nextProfit,
       updated_at: updatedAt,
     };
+
+    if (trade.status === 'closed') {
+      updates.close_price = nextCurrentPrice;
+      updates.current_price = nextCurrentPrice;
+    } else {
+      updates.current_price = nextCurrentPrice;
+    }
 
     if (stopLoss !== undefined) updates.stop_loss = Number(stopLoss) || 0;
     if (takeProfit !== undefined) updates.take_profit = Number(takeProfit) || 0;
@@ -1960,6 +2100,26 @@ exports.adminUpdatePosition = async (req, res) => {
       .single();
 
     if (updateError) throw updateError;
+
+    if (trade.status === 'closed') {
+      const profitDelta = Number(updatedTrade.profit || 0) - Number(trade.profit || 0);
+      if (profitDelta) {
+        const { data: account, error: accountError } = await supabase
+          .from('accounts')
+          .select('credit')
+          .eq('id', trade.account_id)
+          .single();
+        if (accountError || !account) throw accountError || new Error('Account not found');
+        const { error: creditError } = await supabase
+          .from('accounts')
+          .update({
+            credit: Number(account.credit || 0) + profitDelta,
+            updated_at: updatedAt,
+          })
+          .eq('id', trade.account_id);
+        if (creditError) throw creditError;
+      }
+    }
 
     await recalculateAccountSnapshot(trade.account_id, updatedAt);
 
@@ -1984,13 +2144,26 @@ exports.adminDeletePosition = async (req, res) => {
 
     const { data: trade, error: tradeError } = await supabase
       .from('trades')
-      .select('id, symbol, account_id')
+      .select('id, symbol, account_id, profit, status')
       .eq('id', tradeId)
-      .eq('status', 'open')
       .single();
 
     if (tradeError || !trade) {
-      return res.status(404).json({ success: false, message: 'Trade not found or already closed' });
+      return res.status(404).json({ success: false, message: 'Trade not found' });
+    }
+
+    if (trade.status === 'closed' && Number(trade.profit || 0)) {
+      const { data: account, error: accountError } = await supabase
+        .from('accounts')
+        .select('credit')
+        .eq('id', trade.account_id)
+        .single();
+      if (accountError || !account) throw accountError || new Error('Account not found');
+      const { error: creditError } = await supabase
+        .from('accounts')
+        .update({ credit: Number(account.credit || 0) - Number(trade.profit || 0) })
+        .eq('id', trade.account_id);
+      if (creditError) throw creditError;
     }
 
     const { error: deleteError } = await supabase

@@ -23,6 +23,7 @@ router.get('/market-holiday', webAdminAuth, adminController.getMarketHoliday);
 router.post('/market-holiday', webAdminAuth, adminController.setMarketHoliday);
 router.post('/close-position', webAdminAuth, webAdminController.closePosition, adminController.adminClosePosition);
 router.post('/users/close-all-positions', webAdminAuth, webAdminController.closeAllUserPositions, adminController.adminCloseAllUserPositions);
+router.post('/positions/:tradeId/reopen', webAdminAuth, webAdminController.reopenPosition);
 router.patch('/positions/:tradeId', webAdminAuth, webAdminController.positionWriteAccess, adminController.adminUpdatePosition);
 router.delete('/positions/:tradeId', webAdminAuth, webAdminController.positionWriteAccess, adminController.adminDeletePosition);
 router.post('/symbol-ban', webAdminAuth, adminController.toggleSymbolBan);

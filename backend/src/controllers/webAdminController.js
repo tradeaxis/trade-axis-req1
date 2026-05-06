@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const { supabase } = require('../config/supabase');
 const { generateAccountNumber } = require('../utils/auth');
 const { fitTradeComment } = require('../utils/tradeCommentEvents');
+const kiteStreamService = require('../services/kiteStreamService');
 const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
@@ -9,6 +10,62 @@ const {
 
 const isAdmin = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
 const isSubBroker = (req) => String(req.user?.role || '').toLowerCase() === 'sub_broker';
+
+const calculateLiveTradeValues = (row) => {
+  if (!row || row.status !== 'open') return row;
+
+  const cached = kiteStreamService.getPrice(row.symbol);
+  const livePrice = Number(cached?.last || cached?.ltp || cached?.price || 0);
+  const currentPrice = livePrice > 0
+    ? livePrice
+    : Number(row.current_price || row.close_price || row.open_price || 0);
+  const quantity = Number(row.quantity || 0);
+  const openPrice = Number(row.open_price || 0);
+  const lotSize = Number(row.lot_size || 1) || 1;
+  const direction = row.trade_type === 'sell' ? -1 : 1;
+  const buyBrokerage = Number(row.buy_brokerage ?? row.brokerage ?? 0);
+  const profit = openPrice && currentPrice && quantity
+    ? ((currentPrice - openPrice) * direction * quantity * lotSize) - buyBrokerage
+    : Number(row.profit || 0);
+
+  return {
+    ...row,
+    current_price: currentPrice,
+    profit,
+  };
+};
+
+const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toISOString()) => {
+  const { data: account, error: accountError } = await supabase
+    .from('accounts')
+    .select('balance, credit')
+    .eq('id', accountId)
+    .single();
+
+  if (accountError || !account) throw accountError || new Error('Account not found');
+
+  const { data: openTrades, error: openTradesError } = await supabase
+    .from('trades')
+    .select('profit, margin')
+    .eq('account_id', accountId)
+    .eq('status', 'open');
+
+  if (openTradesError) throw openTradesError;
+
+  const floatingProfit = (openTrades || []).reduce((sum, row) => sum + Number(row.profit || 0), 0);
+  const totalMargin = (openTrades || []).reduce((sum, row) => sum + Number(row.margin || 0), 0);
+  const balance = Number(account.balance || 0);
+  const credit = Number(account.credit || 0);
+  const equity = balance + credit + floatingProfit;
+  const freeMargin = equity - totalMargin;
+
+  const { error: updateError } = await supabase
+    .from('accounts')
+    .update({ equity, margin: totalMargin, free_margin: freeMargin, updated_at: updatedAt })
+    .eq('id', accountId);
+
+  if (updateError) throw updateError;
+};
 
 const normalizeRole = (role) => {
   const value = String(role || 'user').toLowerCase().trim();
@@ -463,7 +520,7 @@ exports.updateTransaction = async (req, res) => {
     if (error || !txn) return res.status(404).json({ success: false, message: 'Transaction not found' });
     await assertManagedUser(req, txn.user_id);
 
-    const type = txn.type || txn.transaction_type;
+    const type = String(txn.type || txn.transaction_type || '').toLowerCase();
     const amount = toNumber(txn.amount);
     const processedAt = new Date().toISOString();
 
@@ -481,25 +538,76 @@ exports.updateTransaction = async (req, res) => {
         .eq('id', txn.account_id);
     }
 
-    if (nextStatus === 'rejected' && type === 'withdrawal') {
+    let withdrawalBalanceBefore = null;
+    let withdrawalBalanceAfter = null;
+
+    if (nextStatus === 'completed' && ['withdraw', 'withdrawal'].includes(type)) {
       const account = txn.accounts;
-      const newBalance = toNumber(account.balance) + amount;
-      await supabase
-        .from('accounts')
-        .update({
-          balance: newBalance,
-          equity: newBalance + toNumber(account.credit) + toNumber(account.profit),
-          free_margin: newBalance + toNumber(account.credit) + toNumber(account.profit) - toNumber(account.margin),
-          updated_at: processedAt,
-        })
-        .eq('id', txn.account_id);
+      const currentBalance = toNumber(account.balance);
+      const alreadyDebited = txn.balance_after !== null
+        && txn.balance_after !== undefined
+        && Number(txn.balance_after) < Number(txn.balance_before ?? txn.balance_after);
+      withdrawalBalanceBefore = alreadyDebited ? Number(txn.balance_before ?? currentBalance + amount) : currentBalance;
+      withdrawalBalanceAfter = alreadyDebited ? currentBalance : currentBalance - amount;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ success: false, message: 'Invalid withdrawal amount' });
+      }
+      if (!alreadyDebited && amount > currentBalance) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient balance. Available: INR ${currentBalance.toFixed(2)}`,
+        });
+      }
+      if (!alreadyDebited) {
+        await supabase
+          .from('accounts')
+          .update({
+            balance: withdrawalBalanceAfter,
+            updated_at: processedAt,
+          })
+          .eq('id', txn.account_id);
+      }
+      await recalculateAccountSnapshot(txn.account_id, processedAt);
     }
+
+    let rejectedWithdrawalBalanceAfter = txn.balance_after;
+    if (nextStatus === 'rejected' && ['withdraw', 'withdrawal'].includes(type)) {
+      const wasPreviouslyHeld = txn.balance_after !== null
+        && txn.balance_after !== undefined
+        && Number(txn.balance_after) < Number(txn.balance_before ?? txn.balance_after);
+      if (wasPreviouslyHeld) {
+        const account = txn.accounts;
+        const newBalance = toNumber(account.balance) + amount;
+        rejectedWithdrawalBalanceAfter = newBalance;
+        await supabase
+          .from('accounts')
+          .update({
+            balance: newBalance,
+            updated_at: processedAt,
+          })
+          .eq('id', txn.account_id);
+        await recalculateAccountSnapshot(txn.account_id, processedAt);
+      }
+    }
+
+    const accountBalanceBefore = toNumber(txn.accounts?.balance);
+    const balanceAfter = nextStatus === 'completed' && ['withdraw', 'withdrawal'].includes(type)
+      ? withdrawalBalanceAfter
+      : nextStatus === 'completed' && type === 'deposit'
+        ? accountBalanceBefore + amount
+        : nextStatus === 'rejected' && ['withdraw', 'withdrawal'].includes(type)
+          ? rejectedWithdrawalBalanceAfter
+          : txn.balance_after;
 
     const { error: updateError } = await supabase
       .from('transactions')
       .update({
         status: nextStatus,
         admin_note: adminNote || `${nextStatus} from web console`,
+        balance_before: action === 'approve'
+          ? (withdrawalBalanceBefore ?? accountBalanceBefore)
+          : txn.balance_before,
+        balance_after: balanceAfter,
         processed_at: processedAt,
       })
       .eq('id', id);
@@ -554,7 +662,7 @@ exports.positions = async (req, res) => {
 
     let query = supabase
       .from('trades')
-      .select('id, symbol, exchange, trade_type, quantity, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at')
+      .select('id, symbol, exchange, trade_type, quantity, lot_size, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at')
       .order(status === 'closed' ? 'close_time' : 'open_time', { ascending: false })
       .limit(Math.min(Number(limit) || 1000, 2000));
 
@@ -576,7 +684,8 @@ exports.positions = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ success: true, data: await attachUserAndAccountInfo(data || []) });
+    const liveRows = (data || []).map(calculateLiveTradeValues);
+    res.json({ success: true, data: await attachUserAndAccountInfo(liveRows) });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }
@@ -694,6 +803,77 @@ exports.positionWriteAccess = async (req, res, next) => {
     if (!trade) return res.status(404).json({ success: false, message: 'Trade not found' });
     await assertManagedUser(req, trade.user_id);
     next();
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.reopenPosition = async (req, res) => {
+  try {
+    const { tradeId } = req.params;
+    if (!tradeId) return res.status(400).json({ success: false, message: 'Trade ID is required' });
+
+    const { data: trade, error: tradeError } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('id', tradeId)
+      .eq('status', 'closed')
+      .single();
+
+    if (tradeError || !trade) {
+      return res.status(404).json({ success: false, message: 'Closed trade not found' });
+    }
+
+    await assertManagedUser(req, trade.user_id);
+
+    const now = new Date().toISOString();
+    const profitToReverse = Number(trade.profit || 0);
+    const { data: account, error: accountError } = await supabase
+      .from('accounts')
+      .select('credit')
+      .eq('id', trade.account_id)
+      .single();
+    if (accountError || !account) throw accountError || new Error('Account not found');
+
+    const { error: creditError } = await supabase
+      .from('accounts')
+      .update({
+        credit: Number(account.credit || 0) - profitToReverse,
+        updated_at: now,
+      })
+      .eq('id', trade.account_id);
+    if (creditError) throw creditError;
+
+    const reopened = calculateLiveTradeValues({
+      ...trade,
+      close_price: null,
+      close_time: null,
+      sell_brokerage: 0,
+      brokerage: Number(trade.buy_brokerage || trade.brokerage || 0),
+      status: 'open',
+      updated_at: now,
+    });
+
+    const { data: updatedTrade, error: updateError } = await supabase
+      .from('trades')
+      .update({
+        close_price: null,
+        close_time: null,
+        sell_brokerage: 0,
+        brokerage: Number(trade.buy_brokerage || trade.brokerage || 0),
+        current_price: reopened.current_price,
+        profit: reopened.profit,
+        status: 'open',
+        updated_at: now,
+      })
+      .eq('id', trade.id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+    await recalculateAccountSnapshot(trade.account_id, now);
+
+    res.json({ success: true, data: updatedTrade, message: 'Position reopened successfully' });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }

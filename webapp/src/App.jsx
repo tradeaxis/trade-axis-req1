@@ -43,9 +43,9 @@ import api from './services/api';
 const authStorageKey = 'trade_axis_web_auth';
 const tokenStorageKey = 'trade_axis_web_token';
 const savedSessionsKey = 'trade_axis_web_saved_sessions';
+const activeTabStorageKey = 'trade_axis_web_active_tab';
 
 const commonTabs = [
-  { id: 'overview', label: 'Overview', icon: Home },
   { id: 'quotes', label: 'Quotes', icon: Activity },
   { id: 'chart', label: 'Chart', icon: LineChart },
   { id: 'trade', label: 'Trade', icon: ArrowLeftRight },
@@ -56,6 +56,7 @@ const commonTabs = [
 ];
 
 const adminTabs = [
+  { id: 'workspace', label: 'Workspace', icon: Home },
   { id: 'adminPositions', label: 'Positions', icon: SquareStack },
   { id: 'adminOrders', label: 'Orders', icon: ClipboardList },
   { id: 'users', label: 'User Management', icon: Users },
@@ -119,8 +120,17 @@ const isVisibleContract = (symbol, referenceDate = new Date()) => {
   return allowedMonths.has(getMonthKey(expiry));
 };
 
-const filterTradableSymbols = (symbols = []) =>
-  (symbols || []).filter((symbol) => symbol?.is_active !== false && isVisibleContract(symbol));
+const filterTradableSymbols = (symbols = []) => {
+  const seen = new Set();
+  return (symbols || [])
+    .filter((symbol) => symbol?.is_active !== false && isVisibleContract(symbol))
+    .filter((symbol) => {
+      const key = String(symbol?.symbol || '').toUpperCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
 
 const firstPositiveNumber = (...values) => {
   for (const value of values) {
@@ -148,6 +158,20 @@ const getSymbolPrice = (symbol) =>
 const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPrice, getSymbolPrice(symbol));
 
 const getSymbolAsk = (symbol) => firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol));
+
+const getLivePositionPrice = (position, symbols = []) => {
+  const symbol = symbols.find((row) => String(row.symbol).toUpperCase() === String(position.symbol).toUpperCase());
+  return getSymbolPrice(symbol) || Number(position.current_price || position.close_price || position.open_price || 0);
+};
+
+const getPositionPnl = (position, symbols = []) => {
+  const currentPrice = getLivePositionPrice(position, symbols);
+  const qty = Number(position.quantity || 0);
+  const openPrice = Number(position.open_price || 0);
+  const direction = position.trade_type === 'sell' ? -1 : 1;
+  if (!qty || !openPrice || !currentPrice) return Number(position.profit || 0);
+  return (currentPrice - openPrice) * qty * direction;
+};
 
 const loadTradableSymbols = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
@@ -365,7 +389,7 @@ function PriceChart({ symbol }) {
 function App() {
   const cached = readAuth();
   const [auth, setAuth] = useState(cached);
-  const [active, setActive] = useState('overview');
+  const [active, setActiveState] = useState(() => localStorage.getItem(activeTabStorageKey) || 'trade');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [accounts, setAccounts] = useState(cached?.accounts || []);
   const [selectedAccountId, setSelectedAccountId] = useState(cached?.selectedAccountId || cached?.accounts?.[0]?.id || '');
@@ -376,15 +400,22 @@ function App() {
   const role = String(user?.role || 'user').toLowerCase();
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) || accounts[0] || null;
 
+  const setActive = useCallback((tabId) => {
+    setActiveState(tabId);
+    localStorage.setItem(activeTabStorageKey, tabId);
+  }, []);
+
   const applySession = (session) => {
     const nextAccountId = session?.selectedAccountId || session?.accounts?.[0]?.id || '';
+    const nextRole = String(session?.user?.role || 'user').toLowerCase();
+    const nextTab = nextRole === 'admin' || nextRole === 'sub_broker' ? 'adminPositions' : 'trade';
     localStorage.setItem(tokenStorageKey, session.token);
     localStorage.setItem(authStorageKey, JSON.stringify({ ...session, selectedAccountId: nextAccountId }));
     setAuth(session);
     setAccounts(session?.accounts || []);
     setSelectedAccountId(nextAccountId);
     setSavedSessions(readSavedSessions());
-    setActive('overview');
+    setActive(nextTab);
     setSidebarOpen(false);
   };
 
@@ -424,7 +455,7 @@ function App() {
     setAuth(null);
     setAccounts([]);
     setSelectedAccountId('');
-    setActive('overview');
+    setActive('trade');
     setSidebarOpen(false);
   };
 
@@ -460,14 +491,17 @@ function App() {
 
   if (!auth) return <Login onLogin={handleLogin} />;
 
-  const navTabs = role === 'admin' || role === 'sub_broker'
-    ? [...commonTabs, ...adminTabs.filter((tab) => !tab.adminOnly || role === 'admin')]
+  const isOperator = role === 'admin' || role === 'sub_broker';
+  const navTabs = isOperator
+    ? [...adminTabs.filter((tab) => !tab.adminOnly || role === 'admin'), ...commonTabs]
     : commonTabs;
-  const safeActive = navTabs.some((tab) => tab.id === active) ? active : 'overview';
+  const fallbackTab = isOperator ? 'adminPositions' : 'trade';
+  const safeActive = navTabs.some((tab) => tab.id === active) ? active : fallbackTab;
+  const renderedActive = safeActive === 'workspace' ? 'trade' : safeActive;
   const activeTab = navTabs.find((tab) => tab.id === safeActive) || navTabs[0];
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isOperator ? 'operator-shell' : 'user-shell'}`}>
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand-lockup">
           <div className="brand-mark">TA</div>
@@ -511,7 +545,7 @@ function App() {
           </button>
           <div className="topbar-title">
             <h1>{activeTab.label}</h1>
-            <p>{roleLabel(role)} console with live trading controls</p>
+            <p>Trade Axis {getLoginId(user) ? getLoginId(user) : roleLabel(role)}</p>
           </div>
           <div className="topbar-actions">
             <AccountSelect
@@ -525,15 +559,24 @@ function App() {
           </div>
         </header>
 
+        {isOperator && (
+          <nav className="operator-top-nav">
+            {adminTabs
+              .filter((tab) => !tab.adminOnly || role === 'admin')
+              .map((tab) => (
+                <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => setActive(tab.id)} />
+              ))}
+          </nav>
+        )}
+
         <section className="content">
-          {safeActive === 'overview' && <Overview role={role} selectedAccount={selectedAccount} />}
-          {safeActive === 'quotes' && <Quotes selectedAccount={selectedAccount} />}
-          {safeActive === 'chart' && <ChartWorkspace selectedAccount={selectedAccount} />}
-          {safeActive === 'trade' && <Trade selectedAccount={selectedAccount} />}
-          {safeActive === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
-          {safeActive === 'messages' && <Messages />}
-          {safeActive === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
-          {safeActive === 'settings' && (
+          {renderedActive === 'quotes' && <Quotes selectedAccount={selectedAccount} />}
+          {renderedActive === 'chart' && <ChartWorkspace selectedAccount={selectedAccount} />}
+          {renderedActive === 'trade' && <Trade selectedAccount={selectedAccount} />}
+          {renderedActive === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
+          {renderedActive === 'messages' && <Messages user={user} />}
+          {renderedActive === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
+          {renderedActive === 'settings' && (
             <SettingsPanel
               user={user}
               accounts={accounts}
@@ -546,24 +589,32 @@ function App() {
               onRefresh={refreshAuth}
             />
           )}
-          {safeActive === 'users' && <UsersPanel mode="user" role={role} />}
-          {safeActive === 'adminPositions' && <AdminPositionsPanel />}
-          {safeActive === 'adminOrders' && <AdminOrdersPanel />}
-          {safeActive === 'leverageMargin' && <LeverageMarginPanel />}
-          {safeActive === 'autoClose' && <AutoClosePanel />}
-          {safeActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
-          {safeActive === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
-          {safeActive === 'qrDeposits' && <QrDepositsPanel />}
-          {safeActive === 'settlement' && <SettlementPanel />}
-          {safeActive === 'marketHoliday' && <MarketHolidayPanel />}
-          {safeActive === 'manualClose' && <ManualClosePanel />}
-          {safeActive === 'scriptBan' && <ScriptBanPanel />}
-          {safeActive === 'kiteSetup' && <KiteSetupPanel />}
-          {safeActive === 'tradeOnBehalf' && <TradeOnBehalfPanel />}
-          {safeActive === 'actionLedger' && <ActionLedgerPanel />}
-          {safeActive === 'customerSupport' && <CustomerSupportPanel />}
+          {renderedActive === 'users' && <UsersPanel mode="user" role={role} />}
+          {renderedActive === 'adminPositions' && <AdminPositionsPanel />}
+          {renderedActive === 'adminOrders' && <AdminOrdersPanel />}
+          {renderedActive === 'leverageMargin' && <LeverageMarginPanel />}
+          {renderedActive === 'autoClose' && <AutoClosePanel />}
+          {renderedActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
+          {renderedActive === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
+          {renderedActive === 'qrDeposits' && <QrDepositsPanel />}
+          {renderedActive === 'settlement' && <SettlementPanel />}
+          {renderedActive === 'marketHoliday' && <MarketHolidayPanel />}
+          {renderedActive === 'manualClose' && <ManualClosePanel />}
+          {renderedActive === 'scriptBan' && <ScriptBanPanel />}
+          {renderedActive === 'kiteSetup' && <KiteSetupPanel />}
+          {renderedActive === 'tradeOnBehalf' && <TradeOnBehalfPanel />}
+          {renderedActive === 'actionLedger' && <ActionLedgerPanel />}
+          {renderedActive === 'customerSupport' && <CustomerSupportPanel />}
         </section>
       </main>
+
+      {!isOperator && (
+        <nav className="bottom-nav">
+          {commonTabs.map((tab) => (
+            <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => setActive(tab.id)} />
+          ))}
+        </nav>
+      )}
 
       {sidebarOpen && <button aria-label="Close menu" className="modal-backdrop" onClick={() => setSidebarOpen(false)} />}
       {showAddAccount && (
@@ -694,6 +745,13 @@ function Overview({ role, selectedAccount }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (status === 'open' || status === 'all') load();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [load, status]);
 
   if (!isOperator) {
     return (
@@ -945,6 +1003,8 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
   const [busy, setBusy] = useState(false);
   const selectedSymbol = symbols.find((row) => row.symbol === form.symbol);
   const runningPrice = getSymbolPrice(selectedSymbol);
+  const sellPrice = getSymbolBid(selectedSymbol) || runningPrice;
+  const buyPrice = getSymbolAsk(selectedSymbol) || runningPrice;
 
   useEffect(() => {
     if (initialSymbol) {
@@ -994,9 +1054,15 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
 
   return (
     <div className="ticket-stack">
-      <div className="price-strip">
-        <span>Running Price</span>
-        <strong>{runningPrice ? runningPrice.toFixed(2) : '0.00'}</strong>
+      <div className="deal-price-strip">
+        <button className="deal-price sell" type="button" disabled={busy} onClick={() => place('sell')}>
+          <span>Sell by Market</span>
+          <strong>{sellPrice ? sellPrice.toFixed(2) : '0.00'}</strong>
+        </button>
+        <button className="deal-price buy" type="button" disabled={busy} onClick={() => place('buy')}>
+          <span>Buy by Market</span>
+          <strong>{buyPrice ? buyPrice.toFixed(2) : '0.00'}</strong>
+        </button>
       </div>
       <OrderFields form={form} setForm={setForm} symbols={symbols} />
       <div className="grid-2">
@@ -1016,7 +1082,7 @@ function Trade({ selectedAccount }) {
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
-  const [marketQuery, setMarketQuery] = useState('');
+  const [showOrder, setShowOrder] = useState(false);
 
   const accountId = selectedAccount?.id;
 
@@ -1096,14 +1162,105 @@ function Trade({ selectedAccount }) {
     }
   };
 
-  const visibleSymbols = symbols
-    .filter((row) => {
-      const term = marketQuery.trim().toLowerCase();
-      if (!term) return true;
-      return String(row.symbol || '').toLowerCase().includes(term) ||
-        String(row.display_name || row.underlying || '').toLowerCase().includes(term);
-    })
-    .slice(0, 80);
+  const enrichedPositions = positions.map((position) => ({
+    ...position,
+    livePrice: getLivePositionPrice(position, symbols),
+    livePnl: getPositionPnl(position, symbols),
+  }));
+  const floatingPnl = enrichedPositions.reduce((sum, row) => sum + Number(row.livePnl || 0), 0);
+  const usedMargin = Number(selectedAccount?.margin || enrichedPositions.reduce((sum, row) => sum + Number(row.margin || 0), 0));
+  const balance = Number(selectedAccount?.balance || 0);
+  const credit = Number(selectedAccount?.credit || 0);
+  const equity = balance + credit + floatingPnl;
+  const freeMargin = Math.max(0, equity - usedMargin);
+  const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+
+  return (
+    <div className="trade-app-view">
+      <div className="trade-summary-card">
+        <div className="trade-account-line">
+          <span>Trade Axis</span>
+          <strong>{selectedAccount?.account_number || 'Account'}</strong>
+          <span className={`pill ${selectedAccount?.is_demo ? 'gold' : 'teal'}`}>{selectedAccount?.is_demo ? 'Demo' : 'Live'}</span>
+        </div>
+        <div className="trade-metric-grid">
+          <Stat label="Balance" value={formatMoney(balance)} />
+          <Stat label="Equity" value={formatMoney(equity)} tone={equity >= balance ? 'positive' : 'negative'} />
+          <Stat label="Floating P&L" value={formatMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive' : 'negative'} />
+          <Stat label="Free Margin" value={formatMoney(freeMargin)} tone="positive" />
+          <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
+          <Stat label="Used Margin" value={formatMoney(usedMargin)} tone="gold" />
+          <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} tone="positive" />
+        </div>
+      </div>
+
+      <div className="trade-action-bar">
+        <button className="btn primary" onClick={() => setShowOrder(true)}><Plus size={16} />New Order</button>
+        <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+        <button className="btn danger" onClick={closeAll} disabled={!positions.length}>Close All</button>
+      </div>
+
+      <div className="trade-position-tabs">
+        <button className="tab active">Positions ({enrichedPositions.length})</button>
+        <button className="tab">Pending ({orders.length})</button>
+      </div>
+
+      <div className="position-card-list">
+        {enrichedPositions.map((position) => (
+          <div className="position-card" key={position.id}>
+            <div className="position-card-main">
+              <div>
+                <div className="position-title">
+                  <strong>{position.symbol}</strong>
+                  <span className={`pill ${position.trade_type === 'buy' ? 'teal' : 'red'}`}>{position.trade_type} {position.quantity}</span>
+                </div>
+                <div className="position-prices">
+                  <span>Open: {Number(position.open_price || 0).toFixed(2)}</span>
+                  <span>Current: {Number(position.livePrice || 0).toFixed(2)}</span>
+                </div>
+              </div>
+              <strong className={Number(position.livePnl || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.livePnl)}</strong>
+            </div>
+            <div className="position-card-actions">
+              <button className="btn primary" onClick={() => setShowOrder(true)}>New Order</button>
+              <button className="btn subtle" onClick={() => partialCloseTrade(position)}>Partial</button>
+              <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
+            </div>
+          </div>
+        ))}
+        {!enrichedPositions.length && <div className="empty-state compact-empty"><span>No open positions</span></div>}
+      </div>
+
+      {orders.length > 0 && (
+        <div className="card pad">
+          <div className="section-head"><div><h2>Pending Orders</h2><p>Limit and stop orders waiting for execution.</p></div></div>
+          <div className="list">
+            {orders.map((order) => (
+              <div className="row" key={order.id}>
+                <div><strong>{order.symbol}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
+                <div className="action-row">
+                  <span className="pill gold">{order.status}</span>
+                  <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showOrder && (
+        <TradeTicketModal
+          accountId={accountId}
+          symbols={symbols}
+          initialSymbol={selectedSymbol}
+          title="New Order"
+          subtitle="Trade Axis order ticket"
+          onClose={() => setShowOrder(false)}
+          onDone={() => { setShowOrder(false); load(); }}
+        />
+      )}
+    </div>
+  );
 
   return (
     <div className="trade-layout">
@@ -1204,6 +1361,7 @@ function Trade({ selectedAccount }) {
 
 function OrderFields({ form, setForm, symbols }) {
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const isMarket = form.orderType === 'market' || form.orderType === 'instant';
   return (
     <>
       <div className="field">
@@ -1228,11 +1386,13 @@ function OrderFields({ form, setForm, symbols }) {
           <input className="input" type="number" value={form.quantity} onChange={(event) => update('quantity', event.target.value)} />
         </div>
       </div>
-      <div className="grid-3">
-        <div className="field">
-          <label>Price</label>
-          <input className="input" type="number" value={form.price} onChange={(event) => update('price', event.target.value)} placeholder="Market" />
-        </div>
+      <div className={isMarket ? 'grid-2' : 'grid-3'}>
+        {!isMarket && (
+          <div className="field">
+            <label>Price</label>
+            <input className="input" type="number" value={form.price} onChange={(event) => update('price', event.target.value)} placeholder="Limit or stop price" />
+          </div>
+        )}
         <div className="field">
           <label>Stop Loss</label>
           <input className="input" type="number" value={form.stopLoss} onChange={(event) => update('stopLoss', event.target.value)} />
@@ -1540,9 +1700,10 @@ function SettingsPanel({
       </div>
       <div className="card pad">
         <div className="section-head">
-          <div><h2>Security</h2><p>Password changes remain available in the mobile app flow.</p></div>
+          <div><h2>Security</h2><p>Change your dashboard password.</p></div>
           <Lock color="var(--blue)" />
         </div>
+        <ChangePasswordForm />
       </div>
       <div className="card pad">
         <div className="section-head">
@@ -1577,6 +1738,39 @@ function SettingsPanel({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ChangePasswordForm() {
+  const [form, setForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [busy, setBusy] = useState(false);
+  const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  const submit = async () => {
+    if (!form.currentPassword || !form.newPassword) return toast.error('Enter current and new password');
+    if (form.newPassword !== form.confirmPassword) return toast.error('New password confirmation does not match');
+    setBusy(true);
+    try {
+      await api.post('/auth/change-password', {
+        currentPassword: form.currentPassword,
+        newPassword: form.newPassword,
+      });
+      toast.success('Password changed');
+      setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Password change failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="list">
+      <div className="field"><label>Current Password</label><input className="input" type="password" value={form.currentPassword} onChange={(event) => update('currentPassword', event.target.value)} /></div>
+      <div className="field"><label>New Password</label><input className="input" type="password" value={form.newPassword} onChange={(event) => update('newPassword', event.target.value)} /></div>
+      <div className="field"><label>Confirm Password</label><input className="input" type="password" value={form.confirmPassword} onChange={(event) => update('confirmPassword', event.target.value)} /></div>
+      <button className="btn primary" onClick={submit} disabled={busy}>Change Password</button>
     </div>
   );
 }
@@ -1644,12 +1838,14 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Open PNL</th><th>M2M</th><th>Margin Used</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Update</th></tr>
+          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>M2M</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Update</th></tr>
         </thead>
         <tbody>
           {users.map((user) => {
             const primary = (user.accounts || [])[0] || {};
             const openPnl = (user.accounts || []).reduce((sum, account) => sum + Number(account.equity || 0) - Number(account.balance || 0) - Number(account.credit || 0), 0);
+            const closedPnl = (user.accounts || []).reduce((sum, account) => sum + Number(account.credit || 0), 0);
+            const marginLevel = Number(primary.margin || 0) > 0 ? (Number(primary.equity || 0) / Number(primary.margin || 0)) * 100 : 0;
             return (
             <tr key={user.id}>
               <td>
@@ -1662,9 +1858,12 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td><strong className="mono">{user.login_id}</strong></td>
               <td><strong>{getUserName(user)}</strong><div className="meta">{user.email || user.phone || '-'}</div></td>
               <td>{Number(primary.balance || 0).toLocaleString('en-IN')}</td>
+              <td>{Number(primary.equity || 0).toLocaleString('en-IN')}</td>
               <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
+              <td className={closedPnl >= 0 ? 'positive' : 'negative'}>{closedPnl.toFixed(2)}</td>
               <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td>{Number(primary.margin || 0).toLocaleString('en-IN')}</td>
+              <td>{marginLevel ? marginLevel.toFixed(2) : '-'}</td>
               <td>{Number(primary.free_margin || 0).toLocaleString('en-IN')}</td>
               <td>
                 {showBroker ? (
@@ -1685,7 +1884,7 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td><button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button></td>
             </tr>
           )})}
-          {!users.length && <tr><td colSpan="16">No users found</td></tr>}
+          {!users.length && <tr><td colSpan="19">No users found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -1828,6 +2027,11 @@ function UserPositionsModal({ user, onClose }) {
 
   const openPnl = rows.filter((row) => row.status === 'open').reduce((sum, row) => sum + Number(row.profit || 0), 0);
   const closedPnl = rows.filter((row) => row.status === 'closed').reduce((sum, row) => sum + Number(row.profit || 0), 0);
+  const account = (user.accounts || [])[0] || {};
+  const usedMargin = Number(account.margin || 0);
+  const equity = Number(account.equity || account.balance || 0);
+  const freeMargin = Number(account.free_margin || 0);
+  const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
 
   return (
     <div className="modal-backdrop">
@@ -1837,10 +2041,16 @@ function UserPositionsModal({ user, onClose }) {
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="modal-body">
-          <div className="grid-3 compact-stats">
+          <div className="stats-grid compact-stats">
             <Stat label="User" value={user.login_id} />
-            <Stat label="Open P&L" value={openPnl.toFixed(2)} />
-            <Stat label="Closed P&L" value={closedPnl.toFixed(2)} />
+            <Stat label="Balance" value={formatMoney(account.balance || 0)} />
+            <Stat label="Equity" value={formatMoney(equity)} />
+            <Stat label="Floating P&L" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive' : 'negative'} />
+            <Stat label="Free Margin" value={formatMoney(freeMargin)} />
+            <Stat label="P&L" value={formatMoney(closedPnl)} tone={closedPnl >= 0 ? 'positive' : 'negative'} />
+            <Stat label="Used Margin" value={formatMoney(usedMargin)} />
+            <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
+            <Stat label="Settlement Balance" value={formatMoney(account.balance || 0)} />
           </div>
           <div className="toolbar">
             <div className="left">
@@ -1874,8 +2084,15 @@ function AdminPositionTable({ rows, status, onReload }) {
     }
   };
 
-  const reopenTrade = () => {
-    toast.error('Reopen needs backend rollback support before enabling safely');
+  const reopenTrade = async (trade) => {
+    if (!window.confirm(`Reopen ${trade.symbol} position?`)) return;
+    try {
+      await api.post(`/web-admin/positions/${trade.id}/reopen`);
+      toast.success('Position reopened');
+      onReload();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Reopen failed');
+    }
   };
 
   return (
@@ -1883,7 +2100,7 @@ function AdminPositionTable({ rows, status, onReload }) {
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>User ID</th><th>Order ID</th><th>Type</th><th>Script</th><th>B/S</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th><th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Live P&L</th><th>Actions</th></tr>
+            <tr><th>User ID</th><th>Order ID</th><th>Type</th><th>Script</th><th>B/S</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th><th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Live P&L</th><th>Brokerage</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {rows.map((row) => (
@@ -1900,11 +2117,12 @@ function AdminPositionTable({ rows, status, onReload }) {
                 <td>{row.close_price ? Number(row.close_price).toFixed(2) : '-'}</td>
                 <td>{Number(row.current_price || row.close_price || row.open_price || 0).toFixed(2)}</td>
                 <td className={Number(row.profit || 0) >= 0 ? 'positive' : 'negative'}>{Number(row.profit || 0).toFixed(2)}</td>
+                <td>{Number(row.brokerage || 0).toFixed(2)}</td>
                 <td>
                   <div className="quick-actions">
                     <button className="mini-action blue" onClick={() => setEditTrade(row)}>Edit</button>
                     {row.status === 'closed' ? (
-                      <button className="mini-action orange" onClick={reopenTrade}>Reopen</button>
+                      <button className="mini-action orange" onClick={() => reopenTrade(row)}>Reopen</button>
                     ) : (
                       <button className="mini-action orange" onClick={() => setExitTrade(row)}>Exit</button>
                     )}
@@ -1913,7 +2131,7 @@ function AdminPositionTable({ rows, status, onReload }) {
                 </td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan="13">No positions found</td></tr>}
+            {!rows.length && <tr><td colSpan="14">No positions found</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1934,6 +2152,11 @@ function EditPositionModal({ trade, onClose, onSaved }) {
   });
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const qty = Number(form.quantity || 0);
+  const entryRate = Number(form.openPrice || 0);
+  const exitRate = Number(form.currentPrice || 0);
+  const direction = trade.trade_type === 'sell' ? -1 : 1;
+  const livePnl = qty && entryRate && exitRate ? (exitRate - entryRate) * direction * qty : 0;
   const save = async () => {
     try {
       await api.patch(`/web-admin/positions/${trade.id}`, form);
@@ -1954,12 +2177,16 @@ function EditPositionModal({ trade, onClose, onSaved }) {
             {[
               ['quantity', 'Quantity'],
               ['openPrice', 'Entry Rate'],
-              ['currentPrice', 'Current Rate'],
+              ['currentPrice', 'Exit Rate'],
               ['stopLoss', 'Stop Loss'],
               ['takeProfit', 'Take Profit'],
             ].map(([key, label]) => (
               <div className="field" key={key}><label>{label}</label><input className="input" value={form[key]} onChange={(event) => update(key, event.target.value)} /></div>
             ))}
+            <div className="field">
+              <label>Live P&L</label>
+              <input className={`input ${livePnl >= 0 ? 'positive-input' : 'negative-input'}`} readOnly value={livePnl.toFixed(2)} />
+            </div>
           </div>
           <div className="field"><label>Comment</label><textarea className="textarea" value={form.comment} onChange={(event) => update('comment', event.target.value)} /></div>
           <div className="grid-2"><button className="btn primary" onClick={save}>Submit</button><button className="btn subtle" onClick={onClose}>Cancel</button></div>
@@ -1971,6 +2198,7 @@ function EditPositionModal({ trade, onClose, onSaved }) {
 
 function ExitPositionModal({ trade, onClose, onSaved }) {
   const [mode, setMode] = useState('market');
+  const [quantity, setQuantity] = useState(trade.quantity || '');
   const [closePrice, setClosePrice] = useState('');
   const [reason, setReason] = useState('Manual close from web console');
 
@@ -1978,6 +2206,7 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
     try {
       await api.post('/web-admin/close-position', {
         tradeId: trade.id,
+        closeQuantity: Number(quantity),
         closePrice: mode === 'manual' ? Number(closePrice) : undefined,
         reason,
       });
@@ -1998,6 +2227,7 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
             <button className={`tab ${mode === 'market' ? 'active' : ''}`} onClick={() => setMode('market')}>Market Price</button>
             <button className={`tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>Manual Price</button>
           </div>
+          <div className="field"><label>Quantity</label><input className="input" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></div>
           {mode === 'manual' && <div className="field"><label>Close Price</label><input className="input" value={closePrice} onChange={(event) => setClosePrice(event.target.value)} /></div>}
           <div className="field"><label>Reason</label><input className="input" value={reason} onChange={(event) => setReason(event.target.value)} /></div>
           <button className="btn danger block" onClick={close}>Close Position</button>
