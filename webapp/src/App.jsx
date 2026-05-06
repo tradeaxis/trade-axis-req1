@@ -652,13 +652,11 @@ function App() {
         </section>
       </main>
 
-      {!isOperator && (
-        <nav className="bottom-nav">
-          {commonTabs.map((tab) => (
-            <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => setActive(tab.id)} />
-          ))}
-        </nav>
-      )}
+      <nav className="bottom-nav">
+        {commonTabs.map((tab) => (
+          <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => setActive(tab.id)} />
+        ))}
+      </nav>
 
       {sidebarOpen && <button aria-label="Close menu" className="modal-backdrop" onClick={() => setSidebarOpen(false)} />}
       {showAddAccount && (

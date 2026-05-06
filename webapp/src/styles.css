@@ -1529,6 +1529,10 @@ tr:last-child td {
     padding-bottom: 84px;
   }
 
+  .operator-shell .content {
+    padding-bottom: 84px;
+  }
+
   .operator-top-nav {
     position: static;
     top: auto;
@@ -1572,6 +1576,15 @@ tr:last-child td {
   .bottom-nav .nav-item.active {
     color: #3f7bff;
     background: transparent;
+  }
+
+  .operator-shell .settings-account-panel .account-switcher {
+    grid-template-columns: 1fr;
+  }
+
+  .operator-shell .settings-account-panel .btn,
+  .operator-shell .settings-account-panel .select {
+    min-height: 42px;
   }
 
   .trade-app-view {
