@@ -3434,72 +3434,156 @@ const getLedgerExportRows = (rows = []) =>
 
 const exportLedgerExcel = (rows, label) => {
   const exportRows = getLedgerExportRows(rows);
-  const headers = ['Date', 'User ID', 'User Name', 'Account', 'Source', 'Action', 'Amount', 'Status', 'Message'];
+  const columns = [
+    ['Date & Time', 'date', 150],
+    ['User ID', 'userId', 90],
+    ['User Name', 'userName', 150],
+    ['Account', 'account', 120],
+    ['Source', 'source', 95],
+    ['Action', 'action', 120],
+    ['Amount', 'amount', 95],
+    ['Status', 'status', 95],
+    ['Message', 'message', 420],
+  ];
+  const totalAmount = exportRows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2);
   const html = `<!doctype html><html><head><meta charset="utf-8" /><style>
-    body{font-family:Arial,sans-serif;color:#172033}
-    h2{margin:0 0 12px}
-    table{border-collapse:collapse;width:100%}
-    th,td{border:1px solid #cdd6e4;padding:8px;text-align:left;font-size:12px}
-    th{background:#10213f;color:#fff}
+    body{font-family:Arial,sans-serif;color:#172033;background:#fff}
+    h1{margin:0;color:#10213f;font-size:22px}
+    .sub{margin:6px 0 16px;color:#657083;font-size:12px}
+    .summary td{border:0;padding:6px 14px 10px 0;font-weight:700}
+    table.report{border-collapse:collapse;width:100%;table-layout:fixed}
+    .report th,.report td{border:1px solid #cdd6e4;padding:8px;text-align:left;font-size:12px;vertical-align:top;white-space:normal}
+    .report th{background:#10213f;color:#fff;font-weight:700}
+    .report tr:nth-child(even) td{background:#f6f8fb}
+    .amount-pos{color:#2457d6;font-weight:700;mso-number-format:"0.00"}
+    .amount-neg{color:#b4232f;font-weight:700;mso-number-format:"0.00"}
+    .status{font-weight:700}
   </style></head><body>
-    <h2>Trade Axis Action Ledger</h2>
-    <p>${escapeHtml(label)}</p>
-    <table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
-    <tbody>${exportRows.map((row) => `<tr>${[
-      row.date,
-      row.userId,
-      row.userName,
-      row.account,
-      row.source,
-      row.action,
-      row.amount,
-      row.status,
-      row.message,
-    ].map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+    <h1>Trade Axis Action Ledger</h1>
+    <div class="sub">${escapeHtml(label)} &nbsp; | &nbsp; Generated: ${escapeHtml(formatDate(new Date()))}</div>
+    <table class="summary"><tr><td>Total Rows: ${exportRows.length}</td><td>Total Amount: ${escapeHtml(totalAmount)}</td></tr></table>
+    <table class="report">
+      <colgroup>${columns.map(([, , width]) => `<col style="width:${width}px" />`).join('')}</colgroup>
+      <thead><tr>${columns.map(([header]) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+      <tbody>${exportRows.map((row) => `<tr>${columns.map(([, key]) => {
+        const value = row[key];
+        if (key === 'amount') {
+          return `<td class="${Number(value) >= 0 ? 'amount-pos' : 'amount-neg'}">${escapeHtml(value)}</td>`;
+        }
+        if (key === 'status') return `<td class="status">${escapeHtml(value)}</td>`;
+        return `<td>${escapeHtml(value)}</td>`;
+      }).join('')}</tr>`).join('')}</tbody>
+    </table>
   </body></html>`;
   downloadBlob(html, `trade-axis-action-ledger-${safeFilePart(label)}.xls`, 'application/vnd.ms-excel;charset=utf-8');
 };
 
 const escapePdfText = (value) => String(value ?? '').replace(/[\\()]/g, '\\$&').replace(/[^\x20-\x7E]/g, ' ');
 
-const wrapPdfLine = (line, width = 128) => {
-  const text = String(line || '');
-  if (text.length <= width) return [text];
-  const chunks = [];
-  for (let i = 0; i < text.length; i += width) chunks.push(text.slice(i, i + width));
-  return chunks;
+const splitText = (value, maxChars, maxLines = 2) => {
+  const words = String(value ?? '-').replace(/\s+/g, ' ').trim().split(' ');
+  const lines = [];
+  let current = '';
+  words.forEach((word) => {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > maxChars && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  });
+  if (current) lines.push(current);
+  if (!lines.length) lines.push('-');
+  const limited = lines.slice(0, maxLines);
+  if (lines.length > maxLines) limited[maxLines - 1] = `${limited[maxLines - 1].slice(0, Math.max(0, maxChars - 3))}...`;
+  return limited;
+};
+
+const pdfText = (text, x, y, size = 8, font = 'F1', color = '0.09 0.13 0.20') =>
+  `${color} rg BT /${font} ${size} Tf ${x} ${y} Td (${escapePdfText(text)}) Tj ET`;
+
+const pdfRect = (x, y, width, height, fill = '1 1 1', stroke = '0.80 0.84 0.89') =>
+  `${fill} rg ${x} ${y} ${width} ${height} re f ${stroke} RG ${x} ${y} ${width} ${height} re S`;
+
+const buildPdfPageStream = ({ pageRows, pageNumber, pageCount, label, generatedAt, totalRows, totalAmount }) => {
+  const columns = [
+    { key: 'date', label: 'Date & Time', x: 28, width: 100, max: 18 },
+    { key: 'userId', label: 'User ID', x: 128, width: 56, max: 10 },
+    { key: 'userName', label: 'User', x: 184, width: 92, max: 15 },
+    { key: 'account', label: 'Account', x: 276, width: 74, max: 12 },
+    { key: 'source', label: 'Source', x: 350, width: 62, max: 10 },
+    { key: 'action', label: 'Action', x: 412, width: 82, max: 14 },
+    { key: 'amount', label: 'Amount', x: 494, width: 64, max: 11 },
+    { key: 'status', label: 'Status', x: 558, width: 64, max: 11 },
+    { key: 'message', label: 'Message', x: 622, width: 192, max: 34 },
+  ];
+
+  const commands = [
+    pdfRect(0, 0, 842, 595, '1 1 1', '1 1 1'),
+    pdfText('Trade Axis Action Ledger', 28, 562, 16, 'F2', '0.06 0.13 0.25'),
+    pdfText(label, 28, 544, 8, 'F1', '0.34 0.40 0.50'),
+    pdfText(`Generated: ${generatedAt}`, 28, 531, 8, 'F1', '0.34 0.40 0.50'),
+    pdfText(`Rows: ${totalRows}`, 660, 562, 9, 'F2', '0.06 0.13 0.25'),
+    pdfText(`Total Amount: ${totalAmount}`, 660, 546, 9, 'F2', Number(totalAmount) >= 0 ? '0.14 0.34 0.84' : '0.71 0.14 0.18'),
+    pdfRect(28, 502, 786, 22, '0.06 0.13 0.25', '0.06 0.13 0.25'),
+  ];
+
+  columns.forEach((column) => {
+    commands.push(pdfText(column.label, column.x + 5, 510, 7, 'F2', '1 1 1'));
+  });
+
+  let y = 470;
+  pageRows.forEach((row, index) => {
+    const fill = index % 2 === 0 ? '0.98 0.99 1' : '0.94 0.96 0.99';
+    commands.push(pdfRect(28, y - 7, 786, 32, fill, '0.80 0.84 0.89'));
+    columns.forEach((column) => {
+      const value = row[column.key];
+      const color = column.key === 'amount'
+        ? (Number(value) >= 0 ? '0.14 0.34 0.84' : '0.71 0.14 0.18')
+        : '0.09 0.13 0.20';
+      splitText(value, column.max, column.key === 'message' ? 2 : 1).forEach((line, lineIndex) => {
+        commands.push(pdfText(line, column.x + 5, y + 10 - (lineIndex * 10), 7, column.key === 'amount' ? 'F2' : 'F1', color));
+      });
+    });
+    y -= 32;
+  });
+
+  commands.push(pdfText(`Page ${pageNumber} of ${pageCount}`, 760, 24, 8, 'F1', '0.34 0.40 0.50'));
+  return commands.join('\n');
 };
 
 const exportLedgerPdf = (rows, label) => {
   const exportRows = getLedgerExportRows(rows);
-  const lines = [
-    'Trade Axis Action Ledger',
-    label,
-    `Generated: ${formatDate(new Date())}`,
-    '',
-    'Date | User ID | Name | Account | Source | Action | Amount | Status | Message',
-    '-'.repeat(128),
-  ];
-  exportRows.forEach((row) => {
-    wrapPdfLine(`${row.date} | ${row.userId} | ${row.userName} | ${row.account} | ${row.source} | ${row.action} | ${row.amount} | ${row.status} | ${row.message}`).forEach((line) => lines.push(line));
-  });
-  if (!exportRows.length) lines.push('No ledger rows found for this filter.');
-
+  const generatedAt = formatDate(new Date());
+  const totalAmount = exportRows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2);
   const pages = [];
-  for (let i = 0; i < lines.length; i += 42) pages.push(lines.slice(i, i + 42));
+  const rowsPerPage = 13;
+  const sourceRows = exportRows.length ? exportRows : [{ date: '-', userId: '-', userName: '-', account: '-', source: '-', action: '-', amount: '0.00', status: '-', message: 'No ledger rows found for this filter.' }];
+  for (let i = 0; i < sourceRows.length; i += rowsPerPage) pages.push(sourceRows.slice(i, i + rowsPerPage));
   const objects = [];
   const addObject = (id, body) => objects.push({ id, body });
   const fontId = 3;
+  const boldFontId = 4;
   const pageIds = pages.map((_, index) => 4 + index);
   const contentIds = pages.map((_, index) => 4 + pages.length + index);
 
   addObject(1, '<< /Type /Catalog /Pages 2 0 R >>');
   addObject(2, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`);
-  addObject(fontId, '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
+  addObject(fontId, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  addObject(boldFontId, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
 
-  pages.forEach((pageLines, index) => {
-    const stream = `BT /F1 8 Tf 28 560 Td 10 TL ${pageLines.map((line) => `(${escapePdfText(line)}) Tj T*`).join(' ')} ET`;
-    addObject(pageIds[index], `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`);
+  pages.forEach((pageRows, index) => {
+    const stream = buildPdfPageStream({
+      pageRows,
+      pageNumber: index + 1,
+      pageCount: pages.length,
+      label,
+      generatedAt,
+      totalRows: exportRows.length,
+      totalAmount,
+    });
+    addObject(pageIds[index], `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 ${fontId} 0 R /F2 ${boldFontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`);
     addObject(contentIds[index], `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
   });
 
