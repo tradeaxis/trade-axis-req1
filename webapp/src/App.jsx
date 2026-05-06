@@ -186,17 +186,20 @@ const getDisplayAccount = (accounts = []) => {
 };
 
 const getAccountTotalDrCr = (account = {}) => {
+  const balance = Number(account.balance || 0);
+  const equityValue = account.dashboard_equity ?? account.equity;
+  if (equityValue !== undefined && equityValue !== null) return Number(equityValue || 0) - balance;
   if (account.total_dr_cr !== undefined && account.total_dr_cr !== null) return Number(account.total_dr_cr || 0);
   if (account.open_pnl !== undefined && account.open_pnl !== null) return Number(account.open_pnl || 0);
-  return Number(account.equity || 0) - Number(account.balance || 0) - Number(account.credit || 0);
+  return 0;
 };
 
 const getAccountMetrics = (account = {}) => {
-  const totalDrCr = getAccountTotalDrCr(account);
   const balance = Number(account.balance || 0);
   const credit = Number(account.credit || 0);
   const margin = Number(account.dashboard_margin ?? account.margin ?? 0);
-  const equity = Number(account.dashboard_equity ?? (balance + credit + totalDrCr));
+  const equity = Number(account.dashboard_equity ?? account.equity ?? (balance + credit + getAccountTotalDrCr(account)));
+  const totalDrCr = equity - balance;
   const freeMargin = Number(account.dashboard_free_margin ?? (equity - margin));
   const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
   return {
@@ -826,7 +829,7 @@ function Overview({ role, selectedAccount }) {
         <Stat label="Total Equity" value={formatMoney(summary?.equity || 0)} />
         <Stat label="Used Margin" value={formatMoney(summary?.margin || 0)} />
         <Stat label="Margin Level" value={summary?.margin ? `${Number(summary?.marginLevel || 0).toFixed(2)}%` : '-'} />
-        <Stat label="Total Dr/Cr" value={formatMoney(summary?.totalDrCr || 0)} tone={summary?.totalDrCr >= 0 ? 'positive' : 'negative'} />
+        <Stat label="Total Dr/Cr" value={formatMoney(summary?.totalDrCr || 0)} tone={summary?.totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
       </div>
       <div className="stats-grid">
         <Stat label="Pending Withdrawals" value={summary?.pendingWithdrawals || 0} />
@@ -875,6 +878,12 @@ function Quotes({ selectedAccount }) {
         String(symbol.display_name || '').toLowerCase().includes(term);
     })
     .slice(0, 120);
+  const getQuotePriceTone = (symbol) => {
+    const movement = Number(symbol.change_percent ?? symbol.change ?? symbol.change_value ?? 0);
+    if (movement > 0) return 'price-positive';
+    if (movement < 0) return 'price-negative';
+    return '';
+  };
 
   return (
     <div className="card pad">
@@ -906,18 +915,21 @@ function Quotes({ selectedAccount }) {
             </tr>
           </thead>
           <tbody>
-            {visible.map((symbol) => (
-              <tr key={symbol.symbol} className="click-row" onClick={() => setTicketSymbol(symbol)}>
-                <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
-                <td>{getSymbolBid(symbol).toFixed(2)}</td>
-                <td>{getSymbolAsk(symbol).toFixed(2)}</td>
-                <td>{getSymbolPrice(symbol).toFixed(2)}</td>
-                <td className={Number(symbol.change_percent || 0) >= 0 ? 'positive' : 'negative'}>
-                  {Number(symbol.change_percent || 0).toFixed(2)}%
-                </td>
-                <td>{symbol.category || symbol.exchange || '-'}</td>
-              </tr>
-            ))}
+            {visible.map((symbol) => {
+              const priceTone = getQuotePriceTone(symbol);
+              return (
+                <tr key={symbol.symbol} className="click-row" onClick={() => setTicketSymbol(symbol)}>
+                  <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
+                  <td className={priceTone}>{getSymbolBid(symbol).toFixed(2)}</td>
+                  <td className={priceTone}>{getSymbolAsk(symbol).toFixed(2)}</td>
+                  <td className={priceTone}>{getSymbolPrice(symbol).toFixed(2)}</td>
+                  <td className={priceTone || 'muted-value'}>
+                    {Number(symbol.change_percent || 0).toFixed(2)}%
+                  </td>
+                  <td>{symbol.category || symbol.exchange || '-'}</td>
+                </tr>
+              );
+            })}
             {!visible.length && (
               <tr><td colSpan="6">No scripts found</td></tr>
             )}
@@ -1127,6 +1139,7 @@ function Trade({ selectedAccount }) {
   const [orders, setOrders] = useState([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [showOrder, setShowOrder] = useState(false);
+  const [expandedPositionId, setExpandedPositionId] = useState('');
 
   const accountId = selectedAccount?.id;
 
@@ -1218,7 +1231,7 @@ function Trade({ selectedAccount }) {
   const equity = balance + credit + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
-  const totalDrCr = floatingPnl;
+  const totalDrCr = equity - balance;
 
   return (
     <div className="trade-app-view">
@@ -1230,20 +1243,14 @@ function Trade({ selectedAccount }) {
         </div>
         <div className="trade-metric-grid">
           <Stat label="Balance" value={formatMoney(balance)} />
-          <Stat label="Equity" value={formatMoney(equity)} tone={equity >= balance ? 'positive' : 'negative'} />
-          <Stat label="Floating P&L" value={formatMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive' : 'negative'} />
-          <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive' : 'negative'} />
+          <Stat label="Equity" value={formatMoney(equity)} tone={equity >= balance ? 'positive-blue' : 'negative'} />
+          <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+          <Stat label="Floating P&L" value={formatMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive-blue' : 'negative'} />
           <Stat label="Free Margin" value={formatMoney(freeMargin)} tone="positive" />
           <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
           <Stat label="Used Margin" value={formatMoney(usedMargin)} tone="gold" />
           <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} tone="positive" />
         </div>
-      </div>
-
-      <div className="trade-action-bar">
-        <button className="btn primary" onClick={() => setShowOrder(true)}><Plus size={16} />New Order</button>
-        <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
-        <button className="btn danger" onClick={closeAll} disabled={!positions.length}>Close All</button>
       </div>
 
       <div className="trade-position-tabs">
@@ -1252,9 +1259,15 @@ function Trade({ selectedAccount }) {
       </div>
 
       <div className="position-card-list">
-        {enrichedPositions.map((position) => (
-          <div className="position-card" key={position.id}>
-            <div className="position-card-main">
+        {enrichedPositions.map((position) => {
+          const isExpanded = expandedPositionId === position.id;
+          return (
+          <div className={`position-card ${isExpanded ? 'expanded' : ''}`} key={position.id}>
+            <button
+              type="button"
+              className="position-card-main"
+              onClick={() => setExpandedPositionId(isExpanded ? '' : position.id)}
+            >
               <div>
                 <div className="position-title">
                   <strong>{position.symbol}</strong>
@@ -1266,14 +1279,16 @@ function Trade({ selectedAccount }) {
                 </div>
               </div>
               <strong className={Number(position.livePnl || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.livePnl)}</strong>
-            </div>
-            <div className="position-card-actions">
-              <button className="btn primary" onClick={() => setShowOrder(true)}>New Order</button>
-              <button className="btn subtle" onClick={() => partialCloseTrade(position)}>Partial</button>
-              <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
-            </div>
+            </button>
+            {isExpanded && (
+              <div className="position-card-actions">
+                <button className="btn primary" onClick={() => setShowOrder(true)}>New Order</button>
+                <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
         {!enrichedPositions.length && <div className="empty-state compact-empty"><span>No open positions</span></div>}
       </div>
 
@@ -1917,7 +1932,7 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td><strong>{getUserName(user)}</strong><div className="meta">{user.email || user.phone || '-'}</div></td>
               <td>{metrics.balance.toLocaleString('en-IN')}</td>
               <td>{metrics.equity.toLocaleString('en-IN')}</td>
-              <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
+              <td className={openPnl >= 0 ? 'positive-blue' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td className={closedPnl >= 0 ? 'positive' : 'negative'}>{closedPnl.toFixed(2)}</td>
               <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td>{metrics.margin.toLocaleString('en-IN')}</td>
@@ -2109,6 +2124,7 @@ function UserPositionsModal({ user, onClose }) {
   const balance = Number(account.balance || 0);
   const credit = Number(account.credit || 0);
   const equity = balance + credit + openPnl;
+  const totalDrCr = equity - balance;
   const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
   const settlementBalance = Number(
@@ -2135,7 +2151,7 @@ function UserPositionsModal({ user, onClose }) {
             <Stat label="Used Margin" value={formatMoney(usedMargin)} />
             <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
             <Stat label="Settlement Balance" value={formatMoney(settlementBalance)} />
-            <Stat label="Total Dr/Cr" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive' : 'negative'} />
+            <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
           </div>
           <div className="toolbar">
             <div className="left">

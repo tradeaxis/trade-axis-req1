@@ -252,6 +252,66 @@ const normalizeLiveUnderlyingKey = (value) =>
     .replace(/FUT$/i, '')
     .replace(/[^A-Z0-9]/g, '');
 
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+};
+
+const findTradeQuote = (trade, quotes = {}, symbols = []) => {
+  const raw = String(trade?.symbol || '').toUpperCase();
+  if (!raw) return null;
+
+  const exactQuote = quotes?.[raw];
+  if (exactQuote) return exactQuote;
+
+  const exactSymbol = (symbols || []).find((row) => String(row?.symbol || '').toUpperCase() === raw);
+  if (exactSymbol) return { ...exactSymbol, ...(quotes?.[String(exactSymbol.symbol).toUpperCase()] || {}) };
+
+  const tradeKey = normalizeLiveUnderlyingKey(raw);
+  const matchedSymbol = (symbols || []).find((row) => {
+    const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
+    const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name);
+    return symbolKey === tradeKey || underlyingKey === tradeKey;
+  });
+
+  if (!matchedSymbol) return null;
+  return { ...matchedSymbol, ...(quotes?.[String(matchedSymbol.symbol).toUpperCase()] || {}) };
+};
+
+const getTradeQuotePrice = (trade, quotes = {}, symbols = []) => {
+  const quote = findTradeQuote(trade, quotes, symbols);
+  const isSell = String(trade?.trade_type || '').toLowerCase() === 'sell';
+  const closeSidePrice = isSell
+    ? firstPositiveNumber(quote?.ask, quote?.askPrice)
+    : firstPositiveNumber(quote?.bid, quote?.bidPrice);
+
+  return firstPositiveNumber(
+    closeSidePrice,
+    quote?.last,
+    quote?.last_price,
+    quote?.lastPrice,
+    quote?.current_price,
+    quote?.close_price,
+    quote?.previous_close,
+    trade?.current_price,
+    trade?.close_price,
+    trade?.open_price,
+  );
+};
+
+const getTradeLivePnl = (trade, currentPrice) => {
+  const quantity = Number(trade?.quantity || 0);
+  const openPrice = Number(trade?.open_price || 0);
+  const lotSize = Number(trade?.lot_size || 1) || 1;
+  const direction = String(trade?.trade_type || '').toLowerCase() === 'sell' ? -1 : 1;
+  const brokerage = Number(trade?.buy_brokerage ?? trade?.brokerage ?? 0);
+  if (!quantity || !openPrice || !currentPrice) return Number(trade?.profit || 0);
+  return (currentPrice - openPrice) * quantity * lotSize * direction - brokerage;
+};
+
 const findScrollableParent = (element) => {
   let node = element;
 
@@ -1127,14 +1187,24 @@ const Dashboard = () => {
 
   const bid = Number(currentQuote?.bid || 0);
   const ask = Number(currentQuote?.ask || 0);
-  // ✅ Net Floating P&L (already includes brokerage deduction in DB)
-  const totalPnL = (openTrades || []).reduce(
-    (sum, t) => sum + Number(t.profit || 0),  // ← profit already net of entry brokerage
-    0
+  const quoteSymbols = allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
+  const liveOpenTrades = useMemo(
+    () => (openTrades || []).map((trade) => {
+      const currentPrice = getTradeQuotePrice(trade, quotes, quoteSymbols);
+      const liveProfit = getTradeLivePnl(trade, currentPrice);
+      return {
+        ...trade,
+        current_price: currentPrice,
+        profit: liveProfit,
+        live_profit: liveProfit,
+      };
+    }),
+    [openTrades, quotes, quoteSymbols],
   );
+  const totalPnL = liveOpenTrades.reduce((sum, t) => sum + Number(t.live_profit ?? t.profit ?? 0), 0);
 
   // Total commission from open trades (for display purposes only)
-  const totalCommission = (openTrades || []).reduce(
+  const totalCommission = liveOpenTrades.reduce(
     (sum, t) => sum + Number(t.brokerage || 0),
     0
   );
@@ -4650,7 +4720,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       {[
           {
             id: 'positions',
-            label: `Positions (${openTrades.length})`,
+            label: `Positions (${liveOpenTrades.length})`,
           },
           {
             id: 'pending',
@@ -4695,7 +4765,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               </div>
             )}
 
-            {openTrades.length === 0 ? (
+            {liveOpenTrades.length === 0 ? (
               <div
                 className="p-8 text-center"
                 style={{ color: '#787b86' }}
@@ -4707,9 +4777,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                 <div className="text-base">No open positions</div>
               </div>
             ) : (
-              openTrades.map((trade) => {
-                // Gross P&L without commission
-                const pnl = Number(trade.profit || 0) + Number(trade.brokerage || 0);
+              liveOpenTrades.map((trade) => {
+                const pnl = Number(trade.live_profit ?? trade.profit ?? 0);
                 const isProfit = pnl >= 0;
                 const isExpanded = expandedTradeId === trade.id;
 

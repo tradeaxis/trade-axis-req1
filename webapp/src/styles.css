@@ -709,8 +709,21 @@ tr:last-child td {
   color: var(--teal);
 }
 
+.positive-blue,
+.price-positive {
+  color: var(--blue);
+}
+
 .negative {
   color: var(--red);
+}
+
+.price-negative {
+  color: var(--red);
+}
+
+.muted-value {
+  color: var(--muted);
 }
 
 .chart-box {
@@ -1256,19 +1269,26 @@ tr:last-child td {
 }
 
 .position-card {
-  background: #202737;
-  color: #e8eef8;
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: #ffffff;
+  color: var(--ink);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px;
+  padding: 0;
   display: grid;
-  gap: 10px;
+  gap: 0;
+  overflow: hidden;
 }
 
 .position-card-main {
+  width: 100%;
+  border: 0;
+  background: transparent;
   display: flex;
   justify-content: space-between;
   gap: 12px;
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
 }
 
 .position-title {
@@ -1279,6 +1299,7 @@ tr:last-child td {
 }
 
 .position-title strong {
+  color: var(--ink);
   font-size: 17px;
 }
 
@@ -1286,18 +1307,19 @@ tr:last-child td {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  color: rgba(232, 238, 248, 0.66);
+  color: var(--muted);
 }
 
 .position-prices strong {
   display: block;
-  color: #e8eef8;
+  color: var(--ink);
 }
 
 .position-card-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  padding: 0 14px 14px;
 }
 
 .compact-empty {
