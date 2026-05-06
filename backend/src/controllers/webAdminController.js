@@ -167,7 +167,7 @@ const attachUserAndAccountInfo = async (rows = []) => {
   if (accountIds.length) {
     const { data: accounts, error } = await supabase
       .from('accounts')
-      .select('id, account_number, is_demo, balance, equity, margin, free_margin, leverage')
+      .select('id, account_number, is_demo, balance, credit, equity, margin, free_margin, leverage')
       .in('id', accountIds);
     if (error) throw error;
     (accounts || []).forEach((account) => accountMap.set(account.id, account));
@@ -184,6 +184,7 @@ const attachUserAndAccountInfo = async (rows = []) => {
       account_number: account.account_number || '',
       is_demo: account.is_demo || false,
       account_balance: account.balance,
+      account_credit: account.credit,
       account_equity: account.equity,
       account_margin: account.margin,
       account_free_margin: account.free_margin,
@@ -198,8 +199,11 @@ exports.summary = async (req, res) => {
     const scoped = Array.isArray(userIds);
 
     const userQuery = supabase.from('users').select('id, role, is_active');
-    const accountQuery = supabase.from('accounts').select('id, user_id, balance, equity, margin, free_margin');
-    const openTradeQuery = supabase.from('trades').select('id, user_id, profit, margin').eq('status', 'open');
+    const accountQuery = supabase.from('accounts').select('id, user_id, balance, credit, equity, margin, free_margin');
+    const openTradeQuery = supabase
+      .from('trades')
+      .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage')
+      .eq('status', 'open');
     const txnQuery = supabase.from('transactions').select('id, user_id, amount, status, type, transaction_type');
 
     if (scoped) {
@@ -212,8 +216,11 @@ exports.summary = async (req, res) => {
             activeUsers: 0,
             equity: 0,
             margin: 0,
+            freeMargin: 0,
+            marginLevel: 0,
             openTrades: 0,
             openPnL: 0,
+            totalDrCr: 0,
             pendingWithdrawals: 0,
             pendingDeposits: 0,
           },
@@ -239,7 +246,11 @@ exports.summary = async (req, res) => {
 
     const users = usersRes.data || [];
     const accounts = accountsRes.data || [];
-    const trades = tradesRes.data || [];
+    const trades = (tradesRes.data || []).map(calculateLiveTradeValues);
+    const liveOpenPnL = trades.reduce((sum, row) => sum + toNumber(row.profit), 0);
+    const liveMargin = trades.reduce((sum, row) => sum + toNumber(row.margin), 0);
+    const balanceAndCredit = accounts.reduce((sum, row) => sum + toNumber(row.balance) + toNumber(row.credit), 0);
+    const liveEquity = balanceAndCredit + liveOpenPnL;
     const txns = txnsRes.data || [];
 
     res.json({
@@ -248,11 +259,13 @@ exports.summary = async (req, res) => {
         users: users.filter((u) => u.role !== 'admin' && u.role !== 'sub_broker').length,
         subBrokers: users.filter((u) => u.role === 'sub_broker').length,
         activeUsers: users.filter((u) => u.is_active !== false).length,
-        equity: accounts.reduce((sum, row) => sum + toNumber(row.equity), 0),
-        margin: accounts.reduce((sum, row) => sum + toNumber(row.margin), 0),
-        freeMargin: accounts.reduce((sum, row) => sum + toNumber(row.free_margin), 0),
+        equity: liveEquity,
+        margin: liveMargin,
+        freeMargin: liveEquity - liveMargin,
+        marginLevel: liveMargin > 0 ? (liveEquity / liveMargin) * 100 : 0,
         openTrades: trades.length,
-        openPnL: trades.reduce((sum, row) => sum + toNumber(row.profit), 0),
+        openPnL: liveOpenPnL,
+        totalDrCr: liveOpenPnL,
         pendingWithdrawals: txns.filter((txn) =>
           String(txn.status).toLowerCase() === 'pending' &&
           [txn.type, txn.transaction_type].includes('withdrawal')
@@ -301,11 +314,55 @@ exports.listUsers = async (req, res) => {
         .in('user_id', userIds);
 
       if (accountsError) throw accountsError;
+
+      let liveTrades = [];
+      const { data: tradeRows, error: tradesError } = await supabase
+        .from('trades')
+        .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage')
+        .in('user_id', userIds)
+        .eq('status', 'open');
+
+      if (tradesError) throw tradesError;
+      liveTrades = (tradeRows || []).map(calculateLiveTradeValues);
+
+      const pnlByAccount = new Map();
+      const marginByAccount = new Map();
+      const pnlByUser = new Map();
+      liveTrades.forEach((trade) => {
+        const pnl = toNumber(trade.profit);
+        const margin = toNumber(trade.margin);
+        pnlByAccount.set(trade.account_id, toNumber(pnlByAccount.get(trade.account_id)) + pnl);
+        marginByAccount.set(trade.account_id, toNumber(marginByAccount.get(trade.account_id)) + margin);
+        pnlByUser.set(trade.user_id, toNumber(pnlByUser.get(trade.user_id)) + pnl);
+      });
+
       accountsByUserId = (accounts || []).reduce((map, account) => {
+        const livePnL = toNumber(pnlByAccount.get(account.id));
+        const liveMargin = marginByAccount.has(account.id)
+          ? toNumber(marginByAccount.get(account.id))
+          : toNumber(account.margin);
+        const balance = toNumber(account.balance);
+        const credit = toNumber(account.credit);
+        const dashboardEquity = balance + credit + livePnL;
+        const dashboardFreeMargin = dashboardEquity - liveMargin;
+        const enrichedAccount = {
+          ...account,
+          total_dr_cr: livePnL,
+          open_pnl: livePnL,
+          dashboard_equity: dashboardEquity,
+          dashboard_margin: liveMargin,
+          dashboard_free_margin: dashboardFreeMargin,
+          dashboard_margin_level: liveMargin > 0 ? (dashboardEquity / liveMargin) * 100 : 0,
+          settlement_balance: dashboardEquity,
+        };
         if (!map.has(account.user_id)) map.set(account.user_id, []);
-        map.get(account.user_id).push(account);
+        map.get(account.user_id).push(enrichedAccount);
         return map;
       }, new Map());
+
+      (users || []).forEach((user) => {
+        user.total_dr_cr = toNumber(pnlByUser.get(user.id));
+      });
     }
 
     res.json({

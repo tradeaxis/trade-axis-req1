@@ -168,9 +168,47 @@ const getPositionPnl = (position, symbols = []) => {
   const currentPrice = getLivePositionPrice(position, symbols);
   const qty = Number(position.quantity || 0);
   const openPrice = Number(position.open_price || 0);
+  const lotSize = Number(position.lot_size || 1) || 1;
+  const brokerage = Number(position.buy_brokerage ?? position.brokerage ?? 0);
   const direction = position.trade_type === 'sell' ? -1 : 1;
   if (!qty || !openPrice || !currentPrice) return Number(position.profit || 0);
-  return (currentPrice - openPrice) * qty * direction;
+  return (currentPrice - openPrice) * qty * lotSize * direction - brokerage;
+};
+
+const getDisplayAccount = (accounts = []) => {
+  const rows = Array.isArray(accounts) ? accounts : [];
+  return (
+    rows.find((account) => account?.is_demo === false && (Number(account.balance || 0) || Number(account.dashboard_margin || account.margin || 0) || Number(account.total_dr_cr || 0))) ||
+    rows.find((account) => account?.is_demo === false) ||
+    rows[0] ||
+    {}
+  );
+};
+
+const getAccountTotalDrCr = (account = {}) => {
+  if (account.total_dr_cr !== undefined && account.total_dr_cr !== null) return Number(account.total_dr_cr || 0);
+  if (account.open_pnl !== undefined && account.open_pnl !== null) return Number(account.open_pnl || 0);
+  return Number(account.equity || 0) - Number(account.balance || 0) - Number(account.credit || 0);
+};
+
+const getAccountMetrics = (account = {}) => {
+  const totalDrCr = getAccountTotalDrCr(account);
+  const balance = Number(account.balance || 0);
+  const credit = Number(account.credit || 0);
+  const margin = Number(account.dashboard_margin ?? account.margin ?? 0);
+  const equity = Number(account.dashboard_equity ?? (balance + credit + totalDrCr));
+  const freeMargin = Number(account.dashboard_free_margin ?? (equity - margin));
+  const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
+  return {
+    balance,
+    credit,
+    totalDrCr,
+    equity,
+    margin,
+    freeMargin,
+    marginLevel,
+    settlementBalance: Number(account.settlement_balance ?? equity),
+  };
 };
 
 const loadTradableSymbols = async (params = {}) => {
@@ -752,10 +790,10 @@ function Overview({ role, selectedAccount }) {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      if (status === 'open' || status === 'all') load();
+      load();
     }, 5000);
     return () => clearInterval(interval);
-  }, [load, status]);
+  }, [load]);
 
   if (!isOperator) {
     return (
@@ -789,6 +827,10 @@ function Overview({ role, selectedAccount }) {
       <div className="stats-grid">
         <Stat label="Total Equity" value={formatMoney(summary?.equity || 0)} />
         <Stat label="Used Margin" value={formatMoney(summary?.margin || 0)} />
+        <Stat label="Margin Level" value={summary?.margin ? `${Number(summary?.marginLevel || 0).toFixed(2)}%` : '-'} />
+        <Stat label="Total Dr/Cr" value={formatMoney(summary?.totalDrCr || 0)} tone={summary?.totalDrCr >= 0 ? 'positive' : 'negative'} />
+      </div>
+      <div className="stats-grid">
         <Stat label="Pending Withdrawals" value={summary?.pendingWithdrawals || 0} />
         <Stat label="Pending QR Deposits" value={summary?.pendingDeposits || 0} />
       </div>
@@ -1802,6 +1844,13 @@ function UsersPanel({ mode, role }) {
     load().catch(() => toast.error('Failed to load users'));
   }, [load]);
 
+  useEffect(() => {
+    const interval = setInterval(() => {
+      load().catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [load]);
+
   return (
     <div className="card pad">
       <div className="toolbar">
@@ -1847,14 +1896,14 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>M2M</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Update</th></tr>
+          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>Total Dr/Cr</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Update</th></tr>
         </thead>
         <tbody>
           {users.map((user) => {
-            const primary = (user.accounts || [])[0] || {};
-            const openPnl = (user.accounts || []).reduce((sum, account) => sum + Number(account.equity || 0) - Number(account.balance || 0) - Number(account.credit || 0), 0);
-            const closedPnl = (user.accounts || []).reduce((sum, account) => sum + Number(account.credit || 0), 0);
-            const marginLevel = Number(primary.margin || 0) > 0 ? (Number(primary.equity || 0) / Number(primary.margin || 0)) * 100 : 0;
+            const primary = getDisplayAccount(user.accounts);
+            const metrics = getAccountMetrics(primary);
+            const openPnl = metrics.totalDrCr;
+            const closedPnl = metrics.credit;
             return (
             <tr key={user.id}>
               <td>
@@ -1866,14 +1915,14 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               </td>
               <td><strong className="mono">{user.login_id}</strong></td>
               <td><strong>{getUserName(user)}</strong><div className="meta">{user.email || user.phone || '-'}</div></td>
-              <td>{Number(primary.balance || 0).toLocaleString('en-IN')}</td>
-              <td>{Number(primary.equity || 0).toLocaleString('en-IN')}</td>
+              <td>{metrics.balance.toLocaleString('en-IN')}</td>
+              <td>{metrics.equity.toLocaleString('en-IN')}</td>
               <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td className={closedPnl >= 0 ? 'positive' : 'negative'}>{closedPnl.toFixed(2)}</td>
               <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
-              <td>{Number(primary.margin || 0).toLocaleString('en-IN')}</td>
-              <td>{marginLevel ? marginLevel.toFixed(2) : '-'}</td>
-              <td>{Number(primary.free_margin || 0).toLocaleString('en-IN')}</td>
+              <td>{metrics.margin.toLocaleString('en-IN')}</td>
+              <td>{metrics.marginLevel ? metrics.marginLevel.toFixed(2) : '-'}</td>
+              <td>{metrics.freeMargin.toLocaleString('en-IN')}</td>
               <td>
                 {showBroker ? (
                   <select className="select" value={user.created_by || ''} onChange={(event) => updateBroker(user.id, event.target.value)}>
@@ -2022,25 +2071,47 @@ function AdminPositionsPanel() {
 
 function UserPositionsModal({ user, onClose }) {
   const [rows, setRows] = useState([]);
+  const [statsRows, setStatsRows] = useState([]);
   const [status, setStatus] = useState('open');
   const [q, setQ] = useState('');
 
   const load = useCallback(async () => {
-    const res = await api.get('/web-admin/positions', { params: { userId: user.id, status, q } });
+    const [res, statsRes] = await Promise.all([
+      api.get('/web-admin/positions', { params: { userId: user.id, status, q } }),
+      api.get('/web-admin/positions', { params: { userId: user.id, status: 'open' } }),
+    ]);
     setRows(res.data?.data || []);
+    setStatsRows(statsRes.data?.data || []);
   }, [user.id, status, q]);
 
   useEffect(() => {
     load().catch(() => toast.error('Failed to load user positions'));
   }, [load]);
 
-  const openPnl = rows.filter((row) => row.status === 'open').reduce((sum, row) => sum + Number(row.profit || 0), 0);
-  const closedPnl = rows.filter((row) => row.status === 'closed').reduce((sum, row) => sum + Number(row.profit || 0), 0);
-  const account = (user.accounts || [])[0] || {};
-  const usedMargin = Number(account.margin || 0);
-  const equity = Number(account.equity || account.balance || 0);
-  const freeMargin = Number(account.free_margin || 0);
+  const fallbackAccount = getDisplayAccount(user.accounts);
+  const accountRow =
+    statsRows.find((row) => row.account_id === fallbackAccount.id) ||
+    statsRows[0] ||
+    rows.find((row) => row.account_id === fallbackAccount.id) ||
+    rows[0] ||
+    {};
+  const account = {
+    ...fallbackAccount,
+    balance: accountRow.account_balance ?? fallbackAccount.balance,
+    credit: accountRow.account_credit ?? fallbackAccount.credit,
+  };
+  const openPnl = statsRows.length
+    ? statsRows.reduce((sum, row) => sum + Number(row.profit || 0), 0)
+    : getAccountTotalDrCr(fallbackAccount);
+  const usedMargin = statsRows.length
+    ? statsRows.reduce((sum, row) => sum + Number(row.margin || 0), 0)
+    : Number(fallbackAccount.dashboard_margin ?? fallbackAccount.margin ?? 0);
+  const balance = Number(account.balance || 0);
+  const credit = Number(account.credit || 0);
+  const equity = balance + credit + openPnl;
+  const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+  const settlementBalance = equity;
 
   return (
     <div className="modal-backdrop">
@@ -2052,14 +2123,15 @@ function UserPositionsModal({ user, onClose }) {
         <div className="modal-body">
           <div className="stats-grid compact-stats">
             <Stat label="User" value={user.login_id} />
-            <Stat label="Balance" value={formatMoney(account.balance || 0)} />
+            <Stat label="Balance" value={formatMoney(balance)} />
             <Stat label="Equity" value={formatMoney(equity)} />
             <Stat label="Floating P&L" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive' : 'negative'} />
             <Stat label="Free Margin" value={formatMoney(freeMargin)} />
-            <Stat label="P&L" value={formatMoney(closedPnl)} tone={closedPnl >= 0 ? 'positive' : 'negative'} />
+            <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
             <Stat label="Used Margin" value={formatMoney(usedMargin)} />
             <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
-            <Stat label="Settlement Balance" value={formatMoney(account.balance || 0)} />
+            <Stat label="Settlement Balance" value={formatMoney(settlementBalance)} />
+            <Stat label="Total Dr/Cr" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive' : 'negative'} />
           </div>
           <div className="toolbar">
             <div className="left">
