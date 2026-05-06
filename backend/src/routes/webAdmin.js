@@ -8,6 +8,8 @@ const { protect, adminOnly, adminOrSubBroker } = require('../middleware/auth');
 const webAdminAuth = [protect, adminOrSubBroker];
 
 router.get('/summary', webAdminAuth, webAdminController.summary);
+router.get('/symbols', webAdminAuth, webAdminController.listSymbols);
+router.get('/action-ledger', webAdminAuth, webAdminController.actionLedger);
 router.get('/users', webAdminAuth, webAdminController.listUsers);
 router.post('/users', webAdminAuth, webAdminController.createUser);
 router.post('/assign-broker', protect, adminOnly, webAdminController.assignBroker);

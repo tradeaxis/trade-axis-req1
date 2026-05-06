@@ -14,6 +14,8 @@ import {
   ClipboardList,
   Eye,
   EyeOff,
+  FileSpreadsheet,
+  FileText,
   History,
   Home,
   Landmark,
@@ -22,6 +24,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  Moon,
   Plus,
   QrCode,
   RefreshCw,
@@ -32,6 +35,7 @@ import {
   SquareStack,
   Send,
   Star,
+  Sun,
   Trash2,
   UserCog,
   Users,
@@ -47,6 +51,7 @@ const authStorageKey = 'trade_axis_web_auth';
 const tokenStorageKey = 'trade_axis_web_token';
 const savedSessionsKey = 'trade_axis_web_saved_sessions';
 const activeTabStorageKey = 'trade_axis_web_active_tab';
+const themeStorageKey = 'trade_axis_web_theme';
 
 const commonTabs = [
   { id: 'quotes', label: 'Quotes', icon: Activity },
@@ -535,6 +540,7 @@ function App() {
   const [selectedAccountId, setSelectedAccountId] = useState(cached?.selectedAccountId || cached?.accounts?.[0]?.id || '');
   const [savedSessions, setSavedSessions] = useState(readSavedSessions());
   const [showAddAccount, setShowAddAccount] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem(themeStorageKey) || 'light');
 
   const user = auth?.user || null;
   const role = String(user?.role || 'user').toLowerCase();
@@ -544,6 +550,14 @@ function App() {
     setActiveState(tabId);
     localStorage.setItem(activeTabStorageKey, tabId);
   }, []);
+
+  useEffect(() => {
+    const nextTheme = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = nextTheme;
+    localStorage.setItem(themeStorageKey, nextTheme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((current) => (current === 'dark' ? 'light' : 'dark'));
 
   const applySession = (session) => {
     const nextAccountId = session?.selectedAccountId || session?.accounts?.[0]?.id || '';
@@ -688,6 +702,10 @@ function App() {
             <p>Trade Axis {getLoginId(user) ? getLoginId(user) : roleLabel(role)}</p>
           </div>
           <div className="topbar-actions">
+            <button className="btn subtle theme-toggle" type="button" onClick={toggleTheme}>
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+              {theme === 'dark' ? 'Light' : 'Dark'}
+            </button>
             <AccountSelect
               accounts={accounts}
               selectedAccount={selectedAccount}
@@ -733,6 +751,8 @@ function App() {
               onAddAccount={() => setShowAddAccount(true)}
               onRefresh={refreshAuth}
               onLogout={logout}
+              theme={theme}
+              onToggleTheme={toggleTheme}
             />
           )}
           {renderedActive === 'users' && <UsersPanel mode="user" role={role} />}
@@ -2098,6 +2118,8 @@ function SettingsPanel({
   onAddAccount,
   onRefresh,
   onLogout,
+  theme,
+  onToggleTheme,
 }) {
   return (
     <div className="grid-2">
@@ -2155,6 +2177,19 @@ function SettingsPanel({
             )}
           </div>
         </div>
+      </div>
+      <div className="card pad">
+        <div className="section-head">
+          <div><h2>Appearance</h2><p>Switch the full dashboard between light and dark mode.</p></div>
+          {theme === 'dark' ? <Moon color="var(--blue)" /> : <Sun color="var(--gold)" />}
+        </div>
+        <label className="row">
+          <span>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</span>
+          <button className="btn subtle" type="button" onClick={onToggleTheme}>
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            Switch to {theme === 'dark' ? 'Light' : 'Dark'}
+          </button>
+        </label>
       </div>
     </div>
   );
@@ -3363,12 +3398,194 @@ function AutoClosePanel() {
   );
 }
 
+const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const safeFilePart = (value) => String(value || 'trade-axis').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+
+const downloadBlob = (content, filename, type) => {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+};
+
+const getLedgerExportRows = (rows = []) =>
+  rows.map((row) => ({
+    date: formatDate(row.date || row.created_at || row.updated_at),
+    userId: row.user_login_id || row.user_id || '-',
+    userName: row.user_name || '-',
+    account: row.account_number || '-',
+    source: row.source || '-',
+    action: row.action || '-',
+    amount: Number(row.amount || 0).toFixed(2),
+    status: row.status || '-',
+    message: row.message || '-',
+  }));
+
+const exportLedgerExcel = (rows, label) => {
+  const exportRows = getLedgerExportRows(rows);
+  const headers = ['Date', 'User ID', 'User Name', 'Account', 'Source', 'Action', 'Amount', 'Status', 'Message'];
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><style>
+    body{font-family:Arial,sans-serif;color:#172033}
+    h2{margin:0 0 12px}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #cdd6e4;padding:8px;text-align:left;font-size:12px}
+    th{background:#10213f;color:#fff}
+  </style></head><body>
+    <h2>Trade Axis Action Ledger</h2>
+    <p>${escapeHtml(label)}</p>
+    <table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+    <tbody>${exportRows.map((row) => `<tr>${[
+      row.date,
+      row.userId,
+      row.userName,
+      row.account,
+      row.source,
+      row.action,
+      row.amount,
+      row.status,
+      row.message,
+    ].map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+  </body></html>`;
+  downloadBlob(html, `trade-axis-action-ledger-${safeFilePart(label)}.xls`, 'application/vnd.ms-excel;charset=utf-8');
+};
+
+const escapePdfText = (value) => String(value ?? '').replace(/[\\()]/g, '\\$&').replace(/[^\x20-\x7E]/g, ' ');
+
+const wrapPdfLine = (line, width = 128) => {
+  const text = String(line || '');
+  if (text.length <= width) return [text];
+  const chunks = [];
+  for (let i = 0; i < text.length; i += width) chunks.push(text.slice(i, i + width));
+  return chunks;
+};
+
+const exportLedgerPdf = (rows, label) => {
+  const exportRows = getLedgerExportRows(rows);
+  const lines = [
+    'Trade Axis Action Ledger',
+    label,
+    `Generated: ${formatDate(new Date())}`,
+    '',
+    'Date | User ID | Name | Account | Source | Action | Amount | Status | Message',
+    '-'.repeat(128),
+  ];
+  exportRows.forEach((row) => {
+    wrapPdfLine(`${row.date} | ${row.userId} | ${row.userName} | ${row.account} | ${row.source} | ${row.action} | ${row.amount} | ${row.status} | ${row.message}`).forEach((line) => lines.push(line));
+  });
+  if (!exportRows.length) lines.push('No ledger rows found for this filter.');
+
+  const pages = [];
+  for (let i = 0; i < lines.length; i += 42) pages.push(lines.slice(i, i + 42));
+  const objects = [];
+  const addObject = (id, body) => objects.push({ id, body });
+  const fontId = 3;
+  const pageIds = pages.map((_, index) => 4 + index);
+  const contentIds = pages.map((_, index) => 4 + pages.length + index);
+
+  addObject(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  addObject(2, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`);
+  addObject(fontId, '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
+
+  pages.forEach((pageLines, index) => {
+    const stream = `BT /F1 8 Tf 28 560 Td 10 TL ${pageLines.map((line) => `(${escapePdfText(line)}) Tj T*`).join(' ')} ET`;
+    addObject(pageIds[index], `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`);
+    addObject(contentIds[index], `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  });
+
+  const ordered = objects.sort((a, b) => a.id - b.id);
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  ordered.forEach((object) => {
+    offsets[object.id] = pdf.length;
+    pdf += `${object.id} 0 obj\n${object.body}\nendobj\n`;
+  });
+  const xrefOffset = pdf.length;
+  const maxId = Math.max(...ordered.map((object) => object.id));
+  pdf += `xref\n0 ${maxId + 1}\n0000000000 65535 f \n`;
+  for (let id = 1; id <= maxId; id += 1) {
+    pdf += `${String(offsets[id] || 0).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  downloadBlob(pdf, `trade-axis-action-ledger-${safeFilePart(label)}.pdf`, 'application/pdf');
+};
+
 function ActionLedgerPanel() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [filters, setFilters] = useState({ from: today, to: today, scope: 'all', userId: '' });
+  const [users, setUsers] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const loadUsers = useCallback(async () => {
+    const res = await api.get('/web-admin/users', { params: { role: 'user', limit: 2000 } });
+    setUsers(res.data?.data || []);
+  }, []);
+
+  const fetchRows = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/web-admin/action-ledger', { params: filters });
+      const nextRows = res.data?.data || [];
+      setRows(nextRows);
+      return nextRows;
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Action ledger failed');
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    loadUsers().catch(() => {});
+  }, [loadUsers]);
+
+  useEffect(() => {
+    fetchRows();
+  }, [fetchRows]);
+
+  const update = (key, value) => setFilters((prev) => ({ ...prev, [key]: value }));
+  const label = `${filters.scope === 'all' ? 'All Users' : filters.scope === 'own' ? 'Own Account' : (users.find((user) => user.id === filters.userId)?.login_id || 'Selected User')} ${filters.from || 'start'} to ${filters.to || 'today'}`;
+  const exportRows = async (format) => {
+    const currentRows = rows.length ? rows : await fetchRows();
+    if (!currentRows.length) return toast.error('No rows available for this filter');
+    if (format === 'pdf') exportLedgerPdf(currentRows, label);
+    else exportLedgerExcel(currentRows, label);
+  };
+
   return (
     <div className="card pad">
       <div className="section-head"><div><h2>Action Logs</h2><p>Admin action ledger with date, user, actor and message.</p></div></div>
-      <div className="toolbar"><input className="input" type="date" /><input className="input" type="date" /><button className="btn primary">Fetch Date</button><button className="btn success">Export Excel</button></div>
-      <div className="table-wrap"><table><thead><tr><th>Date</th><th>User ID</th><th>By</th><th>Message</th></tr></thead><tbody><tr><td colSpan="4">Action log endpoint is not enabled yet.</td></tr></tbody></table></div>
+      <div className="toolbar admin-console-toolbar">
+        <input className="input" type="date" value={filters.from} onChange={(event) => update('from', event.target.value)} />
+        <input className="input" type="date" value={filters.to} onChange={(event) => update('to', event.target.value)} />
+        <select className="select" value={filters.scope} onChange={(event) => update('scope', event.target.value)}>
+          <option value="all">All users ledger</option>
+          <option value="own">Own account ledger</option>
+          <option value="selected">Select users</option>
+        </select>
+        {filters.scope === 'selected' && (
+          <select className="select" value={filters.userId} onChange={(event) => update('userId', event.target.value)}>
+            <option value="">Select user</option>
+            {users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}
+          </select>
+        )}
+        <button className="btn primary" onClick={fetchRows} disabled={loading}><RefreshCw size={16} />Fetch Date</button>
+        <button className="btn subtle" onClick={() => exportRows('pdf')} disabled={loading}><FileText size={16} />Export PDF</button>
+        <button className="btn success" onClick={() => exportRows('excel')} disabled={loading}><FileSpreadsheet size={16} />Export Excel</button>
+      </div>
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>User ID</th><th>User</th><th>Account</th><th>Source</th><th>Action</th><th>Amount</th><th>Status</th><th>Message</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{formatDate(row.date)}</td><td>{row.user_login_id || row.user_id || '-'}</td><td>{row.user_name || '-'}</td><td>{row.account_number || '-'}</td><td>{row.source}</td><td>{row.action}</td><td className={Number(row.amount || 0) >= 0 ? 'positive-blue' : 'negative'}>{Number(row.amount || 0).toFixed(2)}</td><td>{row.status}</td><td>{row.message}</td></tr>)}{!rows.length && <tr><td colSpan="9">{loading ? 'Loading action ledger...' : 'No ledger rows found'}</td></tr>}</tbody></table></div>
     </div>
   );
 }
@@ -3674,8 +3891,8 @@ function ScriptBanPanel() {
   const [tab, setTab] = useState('unbanned');
 
   const load = async () => {
-    const res = await api.get('/market/symbols', { params: { limit: 5000 } });
-    setSymbols(res.data?.symbols || []);
+    const res = await api.get('/web-admin/symbols', { params: { limit: 20000 } });
+    setSymbols(res.data?.symbols || res.data?.data || []);
   };
 
   useEffect(() => {
@@ -3697,8 +3914,12 @@ function ScriptBanPanel() {
 
   const rows = symbols
     .filter((s) => (tab === 'banned' ? s.is_banned : !s.is_banned))
-    .filter((s) => String(s.symbol).toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 400);
+    .filter((s) => {
+      const term = q.toLowerCase();
+      return String(s.symbol || '').toLowerCase().includes(term)
+        || String(s.display_name || '').toLowerCase().includes(term)
+        || String(s.underlying || '').toLowerCase().includes(term);
+    });
 
   return (
     <div className="card pad">
@@ -3719,6 +3940,11 @@ function ScriptBanPanel() {
             <button className={`btn ${symbol.is_banned ? 'success' : 'danger'}`} onClick={() => toggle(symbol)}>{symbol.is_banned ? 'Unban' : 'Ban'}</button>
           </div>
         ))}
+        {!rows.length && (
+          <div className="row">
+            <div><strong>No {tab === 'banned' ? 'banned' : 'unbanned'} scripts found</strong><div className="meta">Refresh after changing a script status.</div></div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3799,10 +4025,10 @@ function TradeOnBehalfPanel() {
   useEffect(() => {
     Promise.all([
       api.get('/web-admin/users'),
-      api.get('/market/symbols', { params: { limit: 1000 } }),
+      api.get('/web-admin/symbols', { params: { limit: 20000, active: 'true', banned: 'false' } }),
     ]).then(([usersRes, symbolsRes]) => {
       const nextUsers = usersRes.data?.data || [];
-      const nextSymbols = symbolsRes.data?.symbols || [];
+      const nextSymbols = filterTradableSymbols(symbolsRes.data?.symbols || symbolsRes.data?.data || []);
       setUsers(nextUsers);
       setSymbols(nextSymbols);
       setForm((prev) => ({ ...prev, userId: nextUsers.find((u) => u.role === 'user')?.id || '', symbol: nextSymbols[0]?.symbol || '' }));
@@ -3811,9 +4037,16 @@ function TradeOnBehalfPanel() {
 
   const selectedUser = users.find((user) => user.id === form.userId);
   const selectedSymbol = symbols.find((symbol) => String(symbol.symbol).toUpperCase() === String(form.symbol).toUpperCase());
-  const visibleSymbols = symbols
-    .filter((symbol) => String(symbol.symbol || '').toLowerCase().includes(symbolSearch.toLowerCase()) || String(symbol.display_name || '').toLowerCase().includes(symbolSearch.toLowerCase()))
-    .slice(0, 120);
+  const visibleSymbols = symbols.filter((symbol) => {
+    const term = symbolSearch.toLowerCase().trim();
+    if (!term) return true;
+    return String(symbol.symbol || '').toLowerCase().includes(term)
+      || String(symbol.display_name || '').toLowerCase().includes(term)
+      || String(symbol.underlying || '').toLowerCase().includes(term);
+  });
+  const dropdownSymbols = selectedSymbol && !visibleSymbols.some((symbol) => symbol.symbol === selectedSymbol.symbol)
+    ? [selectedSymbol, ...visibleSymbols]
+    : visibleSymbols;
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const submit = async () => {
@@ -3834,8 +4067,9 @@ function TradeOnBehalfPanel() {
       </div>
       <div className="card pad">
         <div className="section-head"><div><h2>2. Select Script</h2><p>Pick the market instrument.</p></div></div>
-        <div className="field"><label>Search Script</label><input className="input" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="Search symbol" /></div>
-        <div className="field"><label>Script</label><select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>{visibleSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol}</option>)}</select></div>
+        <div className="field"><label>Search Script</label><input className="input" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="Search symbol, display name or underlying" /></div>
+        <div className="field"><label>Script</label><select className="select script-select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>{dropdownSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol} {symbol.display_name ? `- ${symbol.display_name}` : ''}</option>)}</select></div>
+        <div className="meta">{visibleSymbols.length} matching scripts</div>
         {selectedSymbol && (
           <div className="quote-strip">
             <div><span>Last</span><strong>{getSymbolPrice(selectedSymbol).toFixed(2)}</strong></div>

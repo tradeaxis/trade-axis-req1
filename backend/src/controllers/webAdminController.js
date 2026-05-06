@@ -336,6 +336,150 @@ const attachUserAndAccountInfo = async (rows = []) => {
   });
 };
 
+const getScopedUserIdsForFilter = async (req, scope = 'all', userId = '') => {
+  if (scope === 'own') return [req.user.id].filter(Boolean);
+  if (scope === 'selected') {
+    if (!userId) {
+      const err = new Error('Select a user for this export');
+      err.status = 400;
+      throw err;
+    }
+    await assertManagedUser(req, userId);
+    return [userId];
+  }
+
+  const managedIds = await getManagedUserIds(req);
+  return Array.isArray(managedIds) ? managedIds : null;
+};
+
+exports.listSymbols = async (req, res) => {
+  try {
+    const {
+      q = '',
+      banned = '',
+      active = '',
+      limit = 10000,
+    } = req.query;
+
+    let query = supabase
+      .from('symbols')
+      .select('*')
+      .order('underlying', { ascending: true })
+      .order('expiry_date', { ascending: true })
+      .limit(Math.min(Number(limit) || 10000, 20000));
+
+    if (active === 'true') query = query.eq('is_active', true);
+    if (active === 'false') query = query.eq('is_active', false);
+    if (banned === 'true') query = query.eq('is_banned', true);
+    if (banned === 'false') query = query.or('is_banned.is.false,is_banned.is.null');
+    if (q && q.trim()) {
+      const term = q.trim();
+      query = query.or(`symbol.ilike.%${term}%,display_name.ilike.%${term}%,underlying.ilike.%${term}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    const symbols = (data || []).map((symbol) => {
+      const live = kiteStreamService.getPrice(symbol.symbol);
+      if (!live || !toNumber(live.last)) return symbol;
+      return {
+        ...symbol,
+        last_price: toNumber(live.last, symbol.last_price),
+        bid: toNumber(live.bid, live.last),
+        ask: toNumber(live.ask, live.last),
+        change_value: toNumber(live.change, symbol.change_value),
+        change_percent: toNumber(live.changePct, symbol.change_percent),
+        last_update: live.timestamp ? new Date(Number(live.timestamp)).toISOString() : symbol.last_update,
+      };
+    });
+    res.json({ success: true, data: symbols, symbols });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.actionLedger = async (req, res) => {
+  try {
+    const {
+      from = '',
+      to = '',
+      scope = 'all',
+      userId = '',
+      limit = 2000,
+    } = req.query;
+
+    const scopedUserIds = await getScopedUserIdsForFilter(req, scope, userId);
+    if (Array.isArray(scopedUserIds) && scopedUserIds.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const maxRows = Math.min(Number(limit) || 2000, 5000);
+    const applyDateRange = (query, column = 'created_at') => {
+      let next = query;
+      if (from) next = next.gte(column, `${from}T00:00:00.000Z`);
+      if (to) next = next.lte(column, `${to}T23:59:59.999Z`);
+      return next;
+    };
+    const applyUserScope = (query) => {
+      if (!Array.isArray(scopedUserIds)) return query;
+      return query.in('user_id', scopedUserIds);
+    };
+
+    let transactionQuery = supabase
+      .from('transactions')
+      .select('id, user_id, account_id, type, transaction_type, amount, status, description, note, admin_note, balance_before, balance_after, created_at, updated_at, processed_at')
+      .order('created_at', { ascending: false })
+      .limit(maxRows);
+    transactionQuery = applyDateRange(applyUserScope(transactionQuery), 'created_at');
+
+    let tradeQuery = supabase
+      .from('trades')
+      .select('id, user_id, account_id, symbol, trade_type, quantity, lot_size, open_price, close_price, current_price, profit, status, brokerage, comment, open_time, close_time, created_at, updated_at')
+      .order('created_at', { ascending: false })
+      .limit(maxRows);
+    tradeQuery = applyDateRange(applyUserScope(tradeQuery), 'created_at');
+
+    const [transactionsResult, tradesResult] = await Promise.all([transactionQuery, tradeQuery]);
+    if (transactionsResult.error) throw transactionsResult.error;
+    if (tradesResult.error) throw tradesResult.error;
+
+    const allRows = [
+      ...(transactionsResult.data || []).map((row) => ({
+        id: `txn-${row.id}`,
+        rawId: row.id,
+        user_id: row.user_id,
+        account_id: row.account_id,
+        date: row.processed_at || row.updated_at || row.created_at,
+        source: 'Transaction',
+        action: String(row.type || row.transaction_type || 'ledger').toUpperCase(),
+        amount: toNumber(row.amount),
+        status: row.status || '-',
+        message: firstNonEmptyString(row.description, row.note, row.admin_note, `${row.type || row.transaction_type || 'Ledger'} ${row.status || ''}`),
+        balanceBefore: row.balance_before,
+        balanceAfter: row.balance_after,
+      })),
+      ...(tradesResult.data || []).map((row) => ({
+        id: `trade-${row.id}`,
+        rawId: row.id,
+        user_id: row.user_id,
+        account_id: row.account_id,
+        date: row.close_time || row.open_time || row.updated_at || row.created_at,
+        source: 'Trade',
+        action: `${String(row.trade_type || '').toUpperCase()} ${String(row.status || '').toUpperCase()}`.trim(),
+        amount: toNumber(row.profit),
+        status: row.status || '-',
+        message: `${String(row.trade_type || '').toUpperCase()} ${row.quantity || 0} ${row.symbol || ''} @ ${toNumber(row.open_price).toFixed(2)}${row.comment ? ` - ${row.comment}` : ''}`,
+        brokerage: row.brokerage,
+      })),
+    ].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+    const enrichedRows = await attachUserAndAccountInfo(allRows);
+    res.json({ success: true, data: enrichedRows.slice(0, maxRows) });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.summary = async (req, res) => {
   try {
     const userIds = await getManagedUserIds(req);
