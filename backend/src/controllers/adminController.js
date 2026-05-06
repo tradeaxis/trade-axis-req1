@@ -1664,7 +1664,7 @@ exports.kiteStatus = async (req, res) => {
 // ============ MARKET HOLIDAY TOGGLE ============
 exports.setMarketHoliday = async (req, res) => {
   try {
-    const { isHoliday, message, date } = req.body;
+    const { isHoliday, message, date, segments } = req.body;
     const marketStatus = require('../services/marketStatus');
 
     if (
@@ -1677,7 +1677,7 @@ exports.setMarketHoliday = async (req, res) => {
       });
     }
 
-    marketStatus.setHoliday(!!isHoliday, message || '', date || null);
+    marketStatus.setHoliday(!!isHoliday, message || '', date || null, segments || {});
 
     const status = marketStatus.getHolidayStatus();
     res.json({
@@ -2044,6 +2044,8 @@ exports.adminUpdatePosition = async (req, res) => {
       stopLoss,
       takeProfit,
       comment,
+      openTime,
+      closeTime,
     } = req.body || {};
 
     if (!tradeId) {
@@ -2109,6 +2111,14 @@ exports.adminUpdatePosition = async (req, res) => {
     if (stopLoss !== undefined) updates.stop_loss = Number(stopLoss) || 0;
     if (takeProfit !== undefined) updates.take_profit = Number(takeProfit) || 0;
     if (comment !== undefined) updates.comment = fitTradeComment(comment);
+    if (openTime !== undefined) {
+      const parsedOpen = openTime ? new Date(openTime) : null;
+      if (parsedOpen && !Number.isNaN(parsedOpen.getTime())) updates.open_time = parsedOpen.toISOString();
+    }
+    if (closeTime !== undefined) {
+      const parsedClose = closeTime ? new Date(closeTime) : null;
+      if (parsedClose && !Number.isNaN(parsedClose.getTime())) updates.close_time = parsedClose.toISOString();
+    }
 
     const { data: updatedTrade, error: updateError } = await supabase
       .from('trades')

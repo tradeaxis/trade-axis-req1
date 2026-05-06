@@ -17,6 +17,7 @@ export default function AdminPanel() {
   });
   const [holidayMessage, setHolidayMessage] = useState('');
   const [holidayDate,    setHolidayDate]    = useState('');
+  const [holidaySegments, setHolidaySegments] = useState({ nseBseClosed: true, mcxClosed: true, mcxMorningOnly: false });
   const [holidayLoading, setHolidayLoading] = useState(false);
   const [settlementStatus, setSettlementStatus] = useState({
     lastRun: null, nextScheduled: null, timezone: 'Asia/Kolkata',
@@ -89,6 +90,11 @@ export default function AdminPanel() {
         setHolidayStatus(res.data.data || {});
         setHolidayMessage(res.data.data?.message || '');
         setHolidayDate(res.data.data?.date || '');
+        setHolidaySegments({
+          nseBseClosed: res.data.data?.segments?.nseBseClosed !== false,
+          mcxClosed: res.data.data?.segments?.mcxClosed !== false,
+          mcxMorningOnly: !!res.data.data?.segments?.mcxMorningOnly,
+        });
       }
     } catch (e) { console.error(e); }
   };
@@ -159,7 +165,7 @@ export default function AdminPanel() {
     setHolidayLoading(true);
     try {
       const res = await api.post('/admin/market-holiday', {
-        isHoliday: enable, message: enable ? holidayMessage : '', date: enable ? holidayDate || null : null,
+        isHoliday: enable, message: enable ? holidayMessage : '', date: enable ? holidayDate || null : null, segments: holidaySegments,
       });
       if (res.data?.success) {
         setHolidayStatus({ ...(res.data.data || {}), isHoliday: enable, message: enable ? holidayMessage : '', date: enable ? holidayDate || null : null });
@@ -396,6 +402,18 @@ export default function AdminPanel() {
               <input type="date" value={holidayDate || ''} onChange={e => setHolidayDate(e.target.value)}
                 className="w-full px-4 py-3 rounded-lg text-sm mb-3"
                 style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }} />
+              <div className="grid grid-cols-1 gap-2 mb-3">
+                {[
+                  ['nseBseClosed', 'NSE/BSE Full Close'],
+                  ['mcxClosed', 'MCX Closed'],
+                  ['mcxMorningOnly', 'MCX Morning Only'],
+                ].map(([key, label]) => (
+                  <label key={key} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: '#1e222d', border: '1px solid #363a45', color: '#d1d4dc' }}>
+                    <span>{label}</span>
+                    <input type="checkbox" checked={holidaySegments[key]} onChange={(e) => setHolidaySegments((prev) => ({ ...prev, [key]: e.target.checked }))} />
+                  </label>
+                ))}
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={() => toggleHoliday(true)} disabled={holidayLoading}

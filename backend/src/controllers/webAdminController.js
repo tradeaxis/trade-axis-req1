@@ -453,11 +453,12 @@ exports.listUsers = async (req, res) => {
     if (userIds.length) {
       const { data: accounts, error: accountsError } = await supabase
         .from('accounts')
-        .select('id, user_id, account_number, is_demo, balance, credit, equity, margin, free_margin, leverage')
+        .select('id, user_id, account_number, is_demo, is_active, balance, credit, equity, margin, free_margin, leverage')
         .in('user_id', userIds);
 
       if (accountsError) throw accountsError;
-      const settlementBalances = await getSettlementBalancesByAccount((accounts || []).map((account) => account.id));
+      const activeAccounts = (accounts || []).filter((account) => account.is_active !== false);
+      const settlementBalances = await getSettlementBalancesByAccount(activeAccounts.map((account) => account.id));
 
       let liveTrades = [];
       const { data: tradeRows, error: tradesError } = await supabase
@@ -480,7 +481,7 @@ exports.listUsers = async (req, res) => {
         pnlByUser.set(trade.user_id, toNumber(pnlByUser.get(trade.user_id)) + pnl);
       });
 
-      accountsByUserId = (accounts || []).reduce((map, account) => {
+      accountsByUserId = activeAccounts.reduce((map, account) => {
         const livePnL = toNumber(pnlByAccount.get(account.id));
         const liveMargin = marginByAccount.has(account.id)
           ? toNumber(marginByAccount.get(account.id))
@@ -646,6 +647,76 @@ exports.createUser = async (req, res) => {
       message: `${targetRole === 'sub_broker' ? 'Sub broker' : 'User'} created successfully`,
       data: { user, loginId: cleanLoginId, tempPassword: password || 'TA1234' },
     });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.deleteDemoAccount = async (req, res) => {
+  try {
+    const { accountId } = req.params;
+
+    const { data: account, error } = await supabase
+      .from('accounts')
+      .select('id, user_id, is_demo, account_number')
+      .eq('id', accountId)
+      .single();
+
+    if (error || !account) return res.status(404).json({ success: false, message: 'Account not found' });
+    if (!account.is_demo) return res.status(400).json({ success: false, message: 'Only demo accounts can be deleted here' });
+
+    await assertManagedUser(req, account.user_id);
+
+    const { count, error: openError } = await supabase
+      .from('trades')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', accountId)
+      .eq('status', 'open');
+    if (openError) throw openError;
+    if (count > 0) return res.status(400).json({ success: false, message: 'Close open demo positions before deleting this account' });
+
+    const { error: updateError } = await supabase
+      .from('accounts')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('id', accountId);
+    if (updateError) throw updateError;
+
+    res.json({ success: true, message: 'Demo account deleted' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getAutoCloseSettings = async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'web_auto_close_settings')
+      .maybeSingle();
+    if (error) throw error;
+    const value = typeof data?.value === 'string'
+      ? JSON.parse(data.value)
+      : data?.value || { percent: 90, applyAll: true, userId: '' };
+    res.json({ success: true, data: value });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveAutoCloseSettings = async (req, res) => {
+  try {
+    const payload = {
+      percent: Number(req.body?.percent || 90),
+      applyAll: req.body?.applyAll !== false,
+      userId: req.body?.applyAll === false ? req.body?.userId || '' : '',
+      updatedAt: new Date().toISOString(),
+    };
+    const { error } = await supabase
+      .from('app_settings')
+      .upsert({ key: 'web_auto_close_settings', value: JSON.stringify(payload), updated_at: payload.updatedAt }, { onConflict: 'key' });
+    if (error) throw error;
+    res.json({ success: true, data: payload, message: 'Auto close settings saved' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

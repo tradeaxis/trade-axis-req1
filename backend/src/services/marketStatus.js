@@ -5,6 +5,11 @@ const https = require('https');
 let isMarketHoliday = false;
 let holidayMessage = '';
 let holidayDate = null;
+let holidaySegments = {
+  nseBseClosed: true,
+  mcxClosed: true,
+  mcxMorningOnly: false,
+};
 let holidaysCache = []; // Array of YYYY-MM-DD strings
 let lastHolidayFetch = null;
 
@@ -170,10 +175,17 @@ const isHolidayActiveToday = () => {
 };
 
 // ✅ Manual holiday override (for testing or unexpected holidays)
-const setHoliday = (isHoliday, message = '', date = null) => {
+const normalizeHolidaySegments = (segments = {}) => ({
+  nseBseClosed: segments.nseBseClosed !== false,
+  mcxClosed: segments.mcxClosed !== false,
+  mcxMorningOnly: !!segments.mcxMorningOnly,
+});
+
+const setHoliday = (isHoliday, message = '', date = null, segments = {}) => {
   isMarketHoliday = !!isHoliday;
   holidayMessage = message || '';
   holidayDate = date || null;
+  holidaySegments = normalizeHolidaySegments(segments);
 
   console.log(
     `📅 Manual holiday ${isMarketHoliday ? 'ENABLED' : 'DISABLED'}${
@@ -186,6 +198,7 @@ const getHolidayStatus = () => ({
   isHoliday: isMarketHoliday || isHolidayActiveToday(),
   message: holidayMessage || (isHolidayActiveToday() ? 'Market Holiday (Kite)' : ''),
   date: holidayDate,
+  segments: holidaySegments,
   holidays: holidaysCache,
   fetchedAt: lastHolidayFetch ? new Date(lastHolidayFetch).toISOString() : null,
 });
@@ -203,7 +216,19 @@ const isCommoditySymbol = (symbol, exchange = null) => {
 const isMarketOpen = (symbol = null, exchange = null) => {
   // Check manual override first
   if (isMarketHoliday && (!holidayDate || getISTDateString() === holidayDate)) {
-    return false;
+    const commodity = isCommoditySymbol(symbol, exchange);
+    if (commodity) {
+      if (holidaySegments.mcxClosed) return false;
+      if (holidaySegments.mcxMorningOnly) {
+        const now = new Date();
+        const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+        const ist = new Date(utcMs + 5.5 * 3600000);
+        const minutes = ist.getHours() * 60 + ist.getMinutes();
+        return minutes >= 9 * 60 && minutes < 17 * 60;
+      }
+      return true;
+    }
+    if (holidaySegments.nseBseClosed) return false;
   }
   
   // Check Kite holidays

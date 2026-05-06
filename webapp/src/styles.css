@@ -706,7 +706,7 @@ tr:last-child td {
 }
 
 .positive {
-  color: var(--teal);
+  color: var(--blue);
 }
 
 .positive-blue,
@@ -837,6 +837,7 @@ tr:last-child td {
 
 .ticket-modal {
   width: min(100%, 620px);
+  margin: auto;
 }
 
 .small-modal {
@@ -845,6 +846,65 @@ tr:last-child td {
 
 .wide-modal {
   width: min(100%, 980px);
+}
+
+.full-screen-modal {
+  width: min(96vw, 1480px);
+  max-height: 94vh;
+}
+
+.full-screen-modal .modal-body {
+  max-height: calc(94vh - 58px);
+  overflow: auto;
+}
+
+.action-pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.kite-action-grid,
+.holiday-segment-grid,
+.quote-strip {
+  display: grid;
+  gap: 10px;
+}
+
+.kite-action-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.holiday-segment-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 14px 0;
+}
+
+.quote-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.quote-strip > div {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f7f9fd;
+  padding: 12px;
+}
+
+.quote-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.quote-strip strong {
+  color: var(--text);
+  font-size: 1rem;
 }
 
 .admin-update-modal {
@@ -1471,7 +1531,7 @@ tr:last-child td {
 }
 
 .positive-input {
-  color: var(--teal);
+  color: var(--blue);
   font-weight: 850;
 }
 
@@ -1905,6 +1965,17 @@ tr:last-child td {
 
   .wide-modal {
     width: min(100%, 96vw);
+  }
+
+  .full-screen-modal {
+    width: 96vw;
+    max-height: 94dvh;
+  }
+
+  .kite-action-grid,
+  .holiday-segment-grid,
+  .quote-strip {
+    grid-template-columns: 1fr;
   }
 
   .user-update-shell,

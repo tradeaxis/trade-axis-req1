@@ -11,6 +11,9 @@ router.get('/summary', webAdminAuth, webAdminController.summary);
 router.get('/users', webAdminAuth, webAdminController.listUsers);
 router.post('/users', webAdminAuth, webAdminController.createUser);
 router.post('/assign-broker', protect, adminOnly, webAdminController.assignBroker);
+router.delete('/accounts/:accountId/demo', webAdminAuth, webAdminController.deleteDemoAccount);
+router.get('/auto-close-settings', webAdminAuth, webAdminController.getAutoCloseSettings);
+router.post('/auto-close-settings', webAdminAuth, webAdminController.saveAutoCloseSettings);
 
 router.get('/transactions', webAdminAuth, webAdminController.listTransactions);
 router.post('/transactions/:id/action', webAdminAuth, webAdminController.updateTransaction);
@@ -41,6 +44,7 @@ router.post('/kite/stop-stream', webAdminAuth, adminController.stopKiteStream);
 
 router.get('/support-messages', webAdminAuth, messageController.listSupportMessages);
 router.post('/support-messages', webAdminAuth, messageController.sendSupportReply);
+router.post('/support-messages/broadcast', webAdminAuth, messageController.sendSupportBroadcast);
 router.patch('/support-messages/read', webAdminAuth, messageController.markSupportRead);
 
 module.exports = router;

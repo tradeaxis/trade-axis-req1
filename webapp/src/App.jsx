@@ -91,6 +91,13 @@ const formatMoney = (value) =>
   })}`;
 
 const formatDate = (value) => (value ? new Date(value).toLocaleString('en-IN') : '-');
+const toDateTimeLocal = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+};
 
 const getUserName = (user) => {
   const name = `${user?.first_name || user?.firstName || ''} ${user?.last_name || user?.lastName || ''}`.trim();
@@ -990,7 +997,7 @@ function Quotes({ selectedAccount }) {
 
   useEffect(() => {
     load();
-    const interval = setInterval(() => load({ silent: true }), 5000);
+    const interval = setInterval(() => load({ silent: true }), 1000);
     return () => clearInterval(interval);
   }, [load]);
 
@@ -1178,7 +1185,7 @@ function ChartWorkspace({ selectedAccount }) {
 
   useEffect(() => {
     refreshSymbols(false);
-    const interval = setInterval(() => refreshSymbols(true), 5000);
+    const interval = setInterval(() => refreshSymbols(true), 1000);
     return () => clearInterval(interval);
   }, [refreshSymbols]);
 
@@ -1269,7 +1276,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
     takeProfit: '',
   });
   const [busy, setBusy] = useState(false);
-  const selectedSymbol = symbols.find((row) => row.symbol === form.symbol);
+  const selectedSymbol = symbols.find((row) => String(row.symbol).toUpperCase() === String(form.symbol).toUpperCase());
   const runningPrice = getSymbolPrice(selectedSymbol);
   const sellPrice = getSymbolBid(selectedSymbol) || runningPrice;
   const buyPrice = getSymbolAsk(selectedSymbol) || runningPrice;
@@ -1277,10 +1284,14 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
   useEffect(() => {
     if (initialSymbol) {
       setForm((prev) => ({ ...prev, symbol: initialSymbol }));
-    } else if (!form.symbol && symbols?.[0]?.symbol) {
+    }
+  }, [initialSymbol]);
+
+  useEffect(() => {
+    if (!form.symbol && symbols?.[0]?.symbol) {
       setForm((prev) => ({ ...prev, symbol: symbols[0].symbol }));
     }
-  }, [initialSymbol, symbols, form.symbol]);
+  }, [symbols, form.symbol]);
 
   useEffect(() => {
     if ((form.orderType === 'market' || form.orderType === 'instant') && runningPrice) {
@@ -1324,6 +1335,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
 
   return (
     <div className="ticket-stack">
+      <OrderFields form={form} setForm={setForm} symbols={symbols} />
       <div className="deal-price-strip">
         <button className="deal-price sell" type="button" disabled={busy} onClick={() => place('sell')}>
           <span>Sell by Market</span>
@@ -1334,7 +1346,6 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
           <strong>{buyPrice ? buyPrice.toFixed(2) : '0.00'}</strong>
         </button>
       </div>
-      <OrderFields form={form} setForm={setForm} symbols={symbols} />
     </div>
   );
 }
@@ -1376,7 +1387,7 @@ function Trade({ selectedAccount }) {
         setSymbols(rows);
         setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
       } catch {}
-    }, 5000);
+    }, 1000);
     return () => clearInterval(interval);
   }, [accountId]);
 
@@ -2186,6 +2197,7 @@ function UsersPanel({ mode, role }) {
   const [users, setUsers] = useState([]);
   const [allUsers, setAllUsers] = useState([]);
   const [q, setQ] = useState('');
+  const [userFilter, setUserFilter] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [dialog, setDialog] = useState(null);
 
@@ -2215,6 +2227,10 @@ function UsersPanel({ mode, role }) {
             <Search size={16} style={{ position: 'absolute', left: 12, top: 13, color: 'var(--muted)' }} />
             <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search users" style={{ paddingLeft: 38 }} />
           </div>
+          <select className="select" value={userFilter} onChange={(event) => setUserFilter(event.target.value)}>
+            <option value="">All users</option>
+            {users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}
+          </select>
         </div>
         <div className="right">
           <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
@@ -2222,7 +2238,7 @@ function UsersPanel({ mode, role }) {
         </div>
       </div>
       <UsersTable
-        users={users}
+        users={userFilter ? users.filter((user) => user.id === userFilter) : users}
         brokers={allUsers.filter((user) => user.role === 'sub_broker')}
         showBroker={role === 'admin' && mode !== 'sub_broker'}
         onRefresh={load}
@@ -2248,11 +2264,22 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
     }
   };
 
+  const deleteUser = async (user) => {
+    if (!window.confirm(`Delete ${user.login_id || getUserName(user)}?`)) return;
+    try {
+      await api.delete(`/admin/users/${user.id}`);
+      toast.success('User deleted');
+      onRefresh();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Delete failed');
+    }
+  };
+
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>Total Dr/Cr</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Update</th></tr>
+          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>Total Dr/Cr</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>L</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Actions</th></tr>
         </thead>
         <tbody>
           {users.map((user) => {
@@ -2292,13 +2319,14 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td>{user.role === 'admin' ? 'YES' : 'NO'}</td>
               <td><span className="pill blue">{user.closing_mode ? 'Closing' : 'Exposure'}</span></td>
               <td>{user.leverage || primary.leverage || '-'}</td>
+              <td>{user.auto_close_percent ?? user.stop_loss_percent ?? '-'}</td>
               <td>{(user.accounts || []).some((account) => account.is_demo) ? 'YES' : 'NO'}</td>
               <td>{user.is_active ? 'YES' : 'NO'}</td>
               <td>{formatDate(user.created_at)}</td>
-              <td><button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button></td>
+              <td><div className="action-pair"><button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button><button className="btn danger" onClick={() => deleteUser(user)}>Delete</button></div></td>
             </tr>
           )})}
-          {!users.length && <tr><td colSpan="19">No users found</td></tr>}
+          {!users.length && <tr><td colSpan="20">No users found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -2484,7 +2512,7 @@ function UserPositionsModal({ user, onClose }) {
 
   return (
     <div className="modal-backdrop">
-      <div className="modal wide-modal">
+      <div className="modal full-screen-modal">
         <div className="modal-head">
           <strong>Positions - {getUserName(user)}</strong>
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
@@ -2494,13 +2522,13 @@ function UserPositionsModal({ user, onClose }) {
             <Stat label="User" value={user.login_id} />
             <Stat label="Balance" value={formatMoney(balance)} />
             <Stat label="Equity" value={formatMoney(equity)} />
-            <Stat label="Floating P&L" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive' : 'negative'} />
+            <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
             <Stat label="Free Margin" value={formatMoney(freeMargin)} />
             <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
             <Stat label="Used Margin" value={formatMoney(usedMargin)} />
             <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
             <Stat label="Settlement Balance" value={formatMoney(settlementBalance)} />
-            <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+            <Stat label="Floating P&L" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive-blue' : 'negative'} />
           </div>
           <div className="toolbar">
             <div className="left">
@@ -2598,7 +2626,8 @@ function EditPositionModal({ trade, onClose, onSaved }) {
     currentPrice: trade.current_price || trade.open_price || '',
     stopLoss: trade.stop_loss || '',
     takeProfit: trade.take_profit || '',
-    comment: trade.comment || '',
+    openTime: toDateTimeLocal(trade.open_time),
+    closeTime: toDateTimeLocal(trade.close_time),
   });
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -2630,15 +2659,16 @@ function EditPositionModal({ trade, onClose, onSaved }) {
               ['currentPrice', 'Exit Rate'],
               ['stopLoss', 'Stop Loss'],
               ['takeProfit', 'Take Profit'],
+              ['openTime', 'Entry Time'],
+              ['closeTime', 'Exit Time'],
             ].map(([key, label]) => (
-              <div className="field" key={key}><label>{label}</label><input className="input" value={form[key]} onChange={(event) => update(key, event.target.value)} /></div>
+              <div className="field" key={key}><label>{label}</label><input className="input" type={key.endsWith('Time') ? 'datetime-local' : 'text'} value={form[key]} onChange={(event) => update(key, event.target.value)} /></div>
             ))}
             <div className="field">
               <label>Live P&L</label>
               <input className={`input ${livePnl >= 0 ? 'positive-input' : 'negative-input'}`} readOnly value={livePnl.toFixed(2)} />
             </div>
           </div>
-          <div className="field"><label>Comment</label><textarea className="textarea" value={form.comment} onChange={(event) => update('comment', event.target.value)} /></div>
           <div className="grid-2"><button className="btn primary" onClick={save}>Submit</button><button className="btn subtle" onClick={onClose}>Cancel</button></div>
         </div>
       </div>
@@ -2650,7 +2680,6 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
   const [mode, setMode] = useState('market');
   const [quantity, setQuantity] = useState(trade.quantity || '');
   const [closePrice, setClosePrice] = useState('');
-  const [reason, setReason] = useState('Manual close from web console');
 
   const close = async () => {
     try {
@@ -2658,7 +2687,6 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
         tradeId: trade.id,
         closeQuantity: Number(quantity),
         closePrice: mode === 'manual' ? Number(closePrice) : undefined,
-        reason,
       });
       toast.success('Position closed');
       onSaved();
@@ -2679,7 +2707,6 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
           </div>
           <div className="field"><label>Quantity</label><input className="input" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></div>
           {mode === 'manual' && <div className="field"><label>Close Price</label><input className="input" value={closePrice} onChange={(event) => setClosePrice(event.target.value)} /></div>}
-          <div className="field"><label>Reason</label><input className="input" value={reason} onChange={(event) => setReason(event.target.value)} /></div>
           <button className="btn danger block" onClick={close}>Close Position</button>
         </div>
       </div>
@@ -2706,7 +2733,7 @@ function BrokerageModal({ user, onClose }) {
 
   return (
     <div className="modal-backdrop">
-      <div className="modal wide-modal">
+      <div className="modal full-screen-modal">
         <div className="modal-head"><strong>Brokerage History - {getUserName(user)}</strong><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
         <div className="modal-body">
           <div className="toolbar"><div className="tabs">{['today', 'week', 'month', '3months'].map((item) => <button key={item} className={`tab ${period === item ? 'active' : ''}`} onClick={() => setPeriod(item)}>{item}</button>)}</div><strong>Total Brokerage: {total.toFixed(2)}</strong></div>
@@ -2723,7 +2750,7 @@ function LedgerModal({ user, onClose }) {
 
   return (
     <div className="modal-backdrop">
-      <div className="modal wide-modal">
+      <div className="modal full-screen-modal">
         <div className="modal-head"><strong>Ledger Update</strong><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
         <div className="modal-body">
           <div className="grid-2">
@@ -2848,6 +2875,17 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
     }
   };
 
+  const deleteDemoAccount = async (account) => {
+    if (!window.confirm(`Delete demo account ${account.account_number}?`)) return;
+    try {
+      await api.delete(`/web-admin/accounts/${account.id}/demo`);
+      toast.success('Demo account deleted');
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Demo delete failed');
+    }
+  };
+
   return (
     <div className="update-grid">
       <div className="admin-dark-panel">
@@ -2863,13 +2901,27 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
         <div className="section-head"><div><h2>Trading Controls</h2><p>Leverage, brokerage, saved accounts and closing mode.</p></div></div>
         <div className="grid-2 tight-grid">
           <div className="field"><label>Leverage</label><input className="input" value={form.leverage} onChange={(event) => setForm((prev) => ({ ...prev, leverage: event.target.value }))} /></div>
-          <div className="field"><label>Brokerage Rate</label><input className="input" value={form.brokerageRate} onChange={(event) => setForm((prev) => ({ ...prev, brokerageRate: event.target.value }))} /></div>
+          <div className="field"><label>Brokerage Rate (% of turnover)</label><input className="input" value={form.brokerageRate} onChange={(event) => setForm((prev) => ({ ...prev, brokerageRate: event.target.value }))} /></div>
           <div className="field"><label>Max Saved Accounts</label><input className="input" value={form.maxSavedAccounts} onChange={(event) => setForm((prev) => ({ ...prev, maxSavedAccounts: event.target.value }))} /></div>
           <div className="field"><label>Liquidation Mode</label><select className="select" value={form.liquidationType} onChange={(event) => setForm((prev) => ({ ...prev, liquidationType: event.target.value }))}><option value="liquidate">Liquidate</option><option value="illiquidate">Illiquidate</option></select></div>
           <label className="row"><span>Closing Mode</span><input type="checkbox" checked={form.closingMode} onChange={(event) => setForm((prev) => ({ ...prev, closingMode: event.target.checked }))} /></label>
         </div>
         <button className="btn primary block" onClick={saveTradingSettings}>Save Trading Settings</button>
       </div>
+      {!isBrokerUpdate && (
+        <div className="admin-dark-panel full-span">
+          <div className="section-head"><div><h2>Accounts</h2><p>Manage demo and live account access.</p></div></div>
+          <div className="list">
+            {(user.accounts || []).map((account) => (
+              <div className="row" key={account.id}>
+                <div><strong>{account.account_number}</strong><div className="meta">{account.is_demo ? 'Demo' : 'Live'} - Balance {formatMoney(account.balance)}</div></div>
+                {account.is_demo && <button className="btn danger" onClick={() => deleteDemoAccount(account)}>Delete Demo</button>}
+              </div>
+            ))}
+            {!(user.accounts || []).length && <div className="empty-state compact-empty"><span>No accounts found</span></div>}
+          </div>
+        </div>
+      )}
       {!isBrokerUpdate && (
         <div className="admin-dark-panel full-span">
           <div className="section-head"><div><h2>Link User To Broker</h2><p>Assign this client under a sub broker or keep direct under admin.</p></div></div>
@@ -3255,8 +3307,8 @@ function LeverageMarginPanel() {
           <div className="card pad" key={group}>
             <h2>{group}</h2>
             <div className="grid-3">
-              {['Brokerage', 'Max Lots', 'Order Lots', 'Holding Margin %', 'Intraday Margin %'].map((field) => (
-                <div className="field" key={field}><label>{field}</label><input className="input" defaultValue={field === 'Brokerage' ? 6000 : 30} /></div>
+              {['Brokerage / Cr', 'Max Lots', 'Order Lots', 'Holding Margin %', 'Intraday Margin %'].map((field) => (
+                <div className="field" key={field}><label>{field}</label><input className="input" defaultValue={field.includes('Brokerage') ? 6000 : 30} /></div>
               ))}
             </div>
             <div className="grid-2"><label className="row"><span>Option Buying Allowed</span><input type="checkbox" defaultChecked /></label><label className="row"><span>Option Selling Allowed</span><input type="checkbox" /></label></div>
@@ -3269,12 +3321,42 @@ function LeverageMarginPanel() {
 
 function AutoClosePanel() {
   const [globalClose, setGlobalClose] = useState(90);
+  const [users, setUsers] = useState([]);
+  const [userId, setUserId] = useState('');
+  const [applyAll, setApplyAll] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      api.get('/web-admin/users'),
+      api.get('/web-admin/auto-close-settings'),
+    ]).then(([usersRes, settingsRes]) => {
+      setUsers((usersRes.data?.data || []).filter((user) => user.role === 'user'));
+      const settings = settingsRes.data?.data || {};
+      setGlobalClose(settings.percent ?? 90);
+      setApplyAll(settings.applyAll !== false);
+      setUserId(settings.userId || '');
+    }).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    try {
+      const res = await api.post('/web-admin/auto-close-settings', { percent: Number(globalClose), applyAll, userId });
+      toast.success(res.data?.message || 'Auto close settings saved');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Auto close save failed');
+    }
+  };
+
   return (
     <div className="card pad">
       <div className="section-head"><div><h2>Auto Close Settings</h2><p>Liquidate or illiquidate accounts when ledger loss reaches configured percentage.</p></div></div>
       <div className="card pad">
         <div className="field"><label>Ledger Balance Close (%)</label><input className="input" value={globalClose} onChange={(event) => setGlobalClose(event.target.value)} /></div>
-        <button className="btn primary" onClick={() => toast.error('Auto close settings endpoint is not enabled yet')}>Apply to All Users</button>
+        <div className="grid-2">
+          <label className="row"><span>Apply to all users</span><input type="checkbox" checked={applyAll} onChange={(event) => setApplyAll(event.target.checked)} /></label>
+          <div className="field"><label>User Filter</label><select className="select" value={userId} disabled={applyAll} onChange={(event) => setUserId(event.target.value)}><option value="">Select user</option>{users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}</select></div>
+        </div>
+        <button className="btn primary" onClick={save}>{applyAll ? 'Apply to All Users' : 'Apply to Selected User'}</button>
       </div>
       <div className="table-wrap" style={{ marginTop: 16 }}><table><thead><tr><th>User Email</th><th>Name</th><th>Auto Close %</th><th>Mode</th><th>Action</th></tr></thead><tbody><tr><td colSpan="5">User-specific settings will appear after backend endpoint is enabled.</td></tr></tbody></table></div>
     </div>
@@ -3295,6 +3377,7 @@ function CustomerSupportPanel() {
   const [messages, setMessages] = useState([]);
   const [users, setUsers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState('');
+  const [sendToAll, setSendToAll] = useState(false);
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -3318,11 +3401,15 @@ function CustomerSupportPanel() {
   }, [load]);
 
   const send = async () => {
-    if (!selectedUserId) return toast.error('Select user');
+    if (!sendToAll && !selectedUserId) return toast.error('Select user');
     if (!content.trim()) return toast.error('Enter message');
     setLoading(true);
     try {
-      await api.post('/web-admin/support-messages', { userId: selectedUserId, title: 'Trade Axis Support', content });
+      if (sendToAll) {
+        await api.post('/web-admin/support-messages/broadcast', { title: 'Trade Axis Support', content });
+      } else {
+        await api.post('/web-admin/support-messages', { userId: selectedUserId, title: 'Trade Axis Support', content });
+      }
       setContent('');
       toast.success('Message sent');
       await load();
@@ -3350,9 +3437,10 @@ function CustomerSupportPanel() {
       </div>
       <div className="support-thread">
         <div className="section-head"><div><h2>Send Message</h2><p>Reply to a selected user or send a support update.</p></div></div>
+        <label className="row"><span>Send to all users</span><input type="checkbox" checked={sendToAll} onChange={(event) => setSendToAll(event.target.checked)} /></label>
         <div className="field">
           <label>User</label>
-          <select className="select" value={selectedUserId} onChange={(event) => setSelectedUserId(event.target.value)}>
+          <select className="select" value={selectedUserId} disabled={sendToAll} onChange={(event) => setSelectedUserId(event.target.value)}>
             {users.map((user) => (
               <option key={user.id} value={user.id}>{getUserName(user)} - {user.login_id || user.email}</option>
             ))}
@@ -3465,13 +3553,25 @@ function SettlementPanel() {
 
 function MarketHolidayPanel() {
   const [status, setStatus] = useState(null);
-  const [form, setForm] = useState({ message: '', date: '' });
+  const [form, setForm] = useState({
+    message: '',
+    date: '',
+    segments: { nseBseClosed: true, mcxClosed: true, mcxMorningOnly: false },
+  });
 
   const load = async () => {
     const res = await api.get('/web-admin/market-holiday');
     const data = res.data?.data || {};
     setStatus(data);
-    setForm({ message: data.message || '', date: data.date || '' });
+    setForm({
+      message: data.message || '',
+      date: data.date || '',
+      segments: {
+        nseBseClosed: data.segments?.nseBseClosed !== false,
+        mcxClosed: data.segments?.mcxClosed !== false,
+        mcxMorningOnly: !!data.segments?.mcxMorningOnly,
+      },
+    });
   };
 
   useEffect(() => {
@@ -3497,6 +3597,11 @@ function MarketHolidayPanel() {
       <div className="grid-2">
         <div className="field"><label>Message</label><input className="input" value={form.message} onChange={(event) => setForm((prev) => ({ ...prev, message: event.target.value }))} /></div>
         <div className="field"><label>Date</label><input className="input" type="date" value={form.date || ''} onChange={(event) => setForm((prev) => ({ ...prev, date: event.target.value }))} /></div>
+      </div>
+      <div className="holiday-segment-grid">
+        <label className="row"><span>NSE/BSE Full Close</span><input type="checkbox" checked={form.segments.nseBseClosed} onChange={(event) => setForm((prev) => ({ ...prev, segments: { ...prev.segments, nseBseClosed: event.target.checked } }))} /></label>
+        <label className="row"><span>MCX Closed</span><input type="checkbox" checked={form.segments.mcxClosed} onChange={(event) => setForm((prev) => ({ ...prev, segments: { ...prev.segments, mcxClosed: event.target.checked } }))} /></label>
+        <label className="row"><span>MCX Morning Only</span><input type="checkbox" checked={form.segments.mcxMorningOnly} onChange={(event) => setForm((prev) => ({ ...prev, segments: { ...prev.segments, mcxMorningOnly: event.target.checked } }))} /></label>
       </div>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <button className="btn danger" onClick={() => save(true)}>Enable Holiday</button>
@@ -3566,6 +3671,7 @@ function ScriptBanPanel() {
   const [symbols, setSymbols] = useState([]);
   const [reason, setReason] = useState('');
   const [q, setQ] = useState('');
+  const [tab, setTab] = useState('unbanned');
 
   const load = async () => {
     const res = await api.get('/market/symbols', { params: { limit: 5000 } });
@@ -3589,13 +3695,22 @@ function ScriptBanPanel() {
     }
   };
 
-  const rows = symbols.filter((s) => String(s.symbol).toLowerCase().includes(q.toLowerCase())).slice(0, 400);
+  const rows = symbols
+    .filter((s) => (tab === 'banned' ? s.is_banned : !s.is_banned))
+    .filter((s) => String(s.symbol).toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 400);
 
   return (
     <div className="card pad">
       <div className="toolbar">
-        <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search script" style={{ maxWidth: 320 }} />
-        <input className="input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ban reason" style={{ maxWidth: 420 }} />
+        <div className="left">
+          <div className="tabs">
+            <button className={`tab ${tab === 'unbanned' ? 'active' : ''}`} onClick={() => setTab('unbanned')}>Unbanned Scripts</button>
+            <button className={`tab ${tab === 'banned' ? 'active' : ''}`} onClick={() => setTab('banned')}>Banned Scripts</button>
+          </div>
+          <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search script" style={{ maxWidth: 320 }} />
+        </div>
+        {tab === 'unbanned' && <input className="input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ban reason" style={{ maxWidth: 420 }} />}
       </div>
       <div className="list">
         {rows.map((symbol) => (
@@ -3639,6 +3754,16 @@ function KiteSetupPanel() {
     }
   };
 
+  const runKiteAction = async (path, successMessage) => {
+    try {
+      const res = await api.post(path);
+      toast.success(res.data?.message || successMessage);
+      load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Kite action failed');
+    }
+  };
+
   return (
     <div className="grid-2">
       <div className="card pad">
@@ -3655,6 +3780,11 @@ function KiteSetupPanel() {
         {loginUrl && <textarea className="textarea mono" readOnly value={loginUrl} style={{ marginTop: 12 }} />}
         <div className="field" style={{ marginTop: 12 }}><label>Request Token</label><input className="input" value={requestToken} onChange={(event) => setRequestToken(event.target.value)} /></div>
         <button className="btn success" onClick={setToken}>Set Token</button>
+        <div className="kite-action-grid">
+          <button className="btn primary" onClick={() => runKiteAction('/web-admin/kite/start-stream', 'Stream started')}>Start Stream</button>
+          <button className="btn subtle" onClick={() => runKiteAction('/web-admin/kite/stop-stream', 'Stream stopped')}>Stop Stream</button>
+          <button className="btn success" onClick={() => runKiteAction('/web-admin/kite/sync-symbols', 'Symbols synced')}>Sync Symbols</button>
+        </div>
       </div>
     </div>
   );
@@ -3663,7 +3793,8 @@ function KiteSetupPanel() {
 function TradeOnBehalfPanel() {
   const [users, setUsers] = useState([]);
   const [symbols, setSymbols] = useState([]);
-  const [form, setForm] = useState({ userId: '', accountId: '', symbol: '', side: 'buy', quantity: 1, openPrice: '', currentPrice: '', stopLoss: '', takeProfit: '', entryTime: '', exitPrice: '', exitTime: '', comment: '' });
+  const [symbolSearch, setSymbolSearch] = useState('');
+  const [form, setForm] = useState({ userId: '', accountId: '', symbol: '', side: 'buy', quantity: 1, openPrice: '', stopLoss: '', takeProfit: '', entryTime: '', exitPrice: '', exitTime: '' });
 
   useEffect(() => {
     Promise.all([
@@ -3679,6 +3810,10 @@ function TradeOnBehalfPanel() {
   }, []);
 
   const selectedUser = users.find((user) => user.id === form.userId);
+  const selectedSymbol = symbols.find((symbol) => String(symbol.symbol).toUpperCase() === String(form.symbol).toUpperCase());
+  const visibleSymbols = symbols
+    .filter((symbol) => String(symbol.symbol || '').toLowerCase().includes(symbolSearch.toLowerCase()) || String(symbol.display_name || '').toLowerCase().includes(symbolSearch.toLowerCase()))
+    .slice(0, 120);
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const submit = async () => {
@@ -3699,7 +3834,15 @@ function TradeOnBehalfPanel() {
       </div>
       <div className="card pad">
         <div className="section-head"><div><h2>2. Select Script</h2><p>Pick the market instrument.</p></div></div>
-        <div className="field"><label>Script</label><select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>{symbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol}</option>)}</select></div>
+        <div className="field"><label>Search Script</label><input className="input" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="Search symbol" /></div>
+        <div className="field"><label>Script</label><select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>{visibleSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol}</option>)}</select></div>
+        {selectedSymbol && (
+          <div className="quote-strip">
+            <div><span>Last</span><strong>{getSymbolPrice(selectedSymbol).toFixed(2)}</strong></div>
+            <div><span>Bid</span><strong>{getSymbolBid(selectedSymbol).toFixed(2)}</strong></div>
+            <div><span>Ask</span><strong>{getSymbolAsk(selectedSymbol).toFixed(2)}</strong></div>
+          </div>
+        )}
       </div>
       <div className="card pad">
         <div className="section-head"><div><h2>3. Trade Details</h2><p>Admin enters every execution detail.</p></div></div>
@@ -3710,7 +3853,6 @@ function TradeOnBehalfPanel() {
         {[
           ['quantity', 'Quantity', 'number'],
           ['openPrice', 'Entry Price', 'number'],
-          ['currentPrice', 'Current Price', 'number'],
           ['stopLoss', 'Stop Loss', 'number'],
           ['takeProfit', 'Target Price', 'number'],
           ['entryTime', 'Entry Date & Time', 'datetime-local'],
@@ -3719,7 +3861,6 @@ function TradeOnBehalfPanel() {
         ].map(([key, label, type]) => (
           <div className="field" key={key}><label>{label}</label><input className="input" type={type} value={form[key]} onChange={(event) => update(key, event.target.value)} /></div>
         ))}
-        <div className="field"><label>Comment</label><textarea className="textarea" value={form.comment} onChange={(event) => update('comment', event.target.value)} /></div>
         <button className="btn primary" onClick={submit}>Open Trade On Behalf</button>
       </div>
     </div>

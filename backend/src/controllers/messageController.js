@@ -126,6 +126,49 @@ exports.sendSupportReply = async (req, res) => {
   }
 };
 
+exports.sendSupportBroadcast = async (req, res) => {
+  try {
+    const title = String(req.body.title || 'Trade Axis Support').trim();
+    const content = String(req.body.content || req.body.message || '').trim();
+    if (!content) return res.status(400).json({ success: false, message: 'Message is required' });
+
+    let query = supabase
+      .from('users')
+      .select('id')
+      .eq('role', 'user')
+      .eq('is_active', true);
+
+    if (req.user.role === 'sub_broker') {
+      query = query.eq('created_by', req.user.id);
+    }
+
+    const { data: users, error: userError } = await query;
+    if (userError) throw userError;
+
+    const rows = (users || []).map((user) => ({
+      user_id: user.id,
+      sender_id: req.user.id,
+      sender_role: req.user.role === 'sub_broker' ? 'sub_broker' : 'admin',
+      title,
+      content,
+      status: 'answered',
+      admin_read_at: new Date().toISOString(),
+    }));
+
+    if (!rows.length) return res.json({ success: true, data: [], message: 'No users found' });
+
+    const { data, error } = await supabase
+      .from('support_messages')
+      .insert(rows)
+      .select('*');
+
+    if (error) throw error;
+    res.json({ success: true, data, message: `Message sent to ${rows.length} user(s)` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.markSupportRead = async (req, res) => {
   try {
     const { error } = await supabase
