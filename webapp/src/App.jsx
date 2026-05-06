@@ -555,7 +555,12 @@ function App() {
               onSelectAccount={selectAccount}
               savedSessions={savedSessions}
               onSwitchSavedSession={switchSavedSession}
+              onAddAccount={() => setShowAddAccount(true)}
             />
+            <button className="btn subtle topbar-logout" type="button" onClick={logout}>
+              <LogOut size={16} />
+              Logout
+            </button>
           </div>
         </header>
 
@@ -660,19 +665,17 @@ function AccountSelect({
         ))}
         {!accounts?.length && <option value="">No Account</option>}
       </select>
-      {savedSessions.length > 1 && (
-        <select className="select compact-select" defaultValue="" onChange={(event) => {
-          if (event.target.value !== '') onSwitchSavedSession(event.target.value);
-          event.target.value = '';
-        }}>
-          <option value="">Switch Login</option>
-          {savedSessions.map((session, index) => (
-            <option key={`${getLoginId(session.user) || session.user?.email}-${index}`} value={index}>
-              {getLoginId(session.user) || session.user?.email || 'Saved account'}
-            </option>
-          ))}
-        </select>
-      )}
+      <select className="select compact-select" defaultValue="" onChange={(event) => {
+        if (event.target.value !== '') onSwitchSavedSession(event.target.value);
+        event.target.value = '';
+      }}>
+        <option value="">Switch Login</option>
+        {savedSessions.map((session, index) => (
+          <option key={`${getLoginId(session.user) || session.user?.email}-${index}`} value={index}>
+            {getLoginId(session.user) || session.user?.email || 'Saved account'}
+          </option>
+        ))}
+      </select>
       {onAddAccount && (
         <button className="btn subtle" type="button" onClick={onAddAccount}>
           <Plus size={16} />

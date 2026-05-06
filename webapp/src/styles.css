@@ -377,6 +377,7 @@ button:disabled {
   position: sticky;
   top: 0;
   z-index: 20;
+  flex: 0 0 auto;
 }
 
 .topbar-title h1 {
@@ -395,6 +396,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .account-switcher {
@@ -402,6 +404,10 @@ button:disabled {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.topbar-logout {
+  flex: 0 0 auto;
 }
 
 .compact-select {
@@ -427,6 +433,7 @@ button:disabled {
   min-width: 0;
   display: grid;
   gap: 20px;
+  flex: 0 0 auto;
 }
 
 .card {
@@ -922,26 +929,30 @@ tr:last-child td {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 52px;
   padding: 8px 18px;
   background: var(--navy);
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
   position: sticky;
   top: 68px;
   z-index: 19;
+  flex: 0 0 auto;
 }
 
 .operator-top-nav .nav-item {
   width: auto;
   flex: 0 0 auto;
-  min-height: 34px;
+  min-height: 36px;
   padding: 7px 10px;
   border-radius: 6px;
   color: rgba(255, 255, 255, 0.76);
   font-size: 12px;
   white-space: nowrap;
+  line-height: 1.2;
 }
 
 .operator-top-nav .nav-item svg {
@@ -1316,7 +1327,8 @@ tr:last-child td {
   }
 
   .operator-top-nav {
-    top: 92px;
+    position: static;
+    top: auto;
     padding: 8px 10px;
   }
 
@@ -1414,7 +1426,7 @@ tr:last-child td {
     min-width: 0;
     max-width: 100%;
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     align-items: stretch;
     overflow: visible;
@@ -1425,12 +1437,12 @@ tr:last-child td {
     min-width: 0;
     max-width: 100%;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
     gap: 8px;
   }
 
   .account-switcher.has-account-action {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   }
 
   .compact-select {
@@ -1442,6 +1454,12 @@ tr:last-child td {
   .account-switcher .btn {
     min-width: 42px;
     padding-inline: 11px;
+    white-space: nowrap;
+  }
+
+  .topbar-logout {
+    min-width: 44px;
+    padding-inline: 10px;
     white-space: nowrap;
   }
 
@@ -1577,7 +1595,7 @@ tr:last-child td {
   }
 
   .operator-top-nav {
-    top: 108px;
+    top: auto;
   }
 
   .trade-metric-grid .stat {
