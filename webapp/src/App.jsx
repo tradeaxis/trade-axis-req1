@@ -2830,7 +2830,7 @@ function BrokerageModal({ user, onClose }) {
 }
 
 function LedgerModal({ user, onClose, onSaved }) {
-  const [form, setForm] = useState({ crdr: 0, remarks: 'Adjustment' });
+  const [form, setForm] = useState({ crdr: 0, remarks: 'Select Type' });
   const account = getDisplayAccount(user.accounts);
   const [saving, setSaving] = useState(false);
 
@@ -2858,7 +2858,7 @@ function LedgerModal({ user, onClose, onSaved }) {
 
   return (
     <div className="modal-backdrop">
-      <div className="modal full-screen-modal">
+      <div className="modal full-screen-modal positions-full-modal">
         <div className="modal-head"><strong>Ledger Update</strong><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
         <div className="modal-body">
           <div className="grid-2">
@@ -3486,6 +3486,8 @@ function AutoClosePanel() {
   const [globalClose, setGlobalClose] = useState(90);
   const [users, setUsers] = useState([]);
   const [userId, setUserId] = useState('');
+  const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [userPercents, setUserPercents] = useState({});
   const [applyAll, setApplyAll] = useState(true);
 
   useEffect(() => {
@@ -3497,17 +3499,57 @@ function AutoClosePanel() {
       const settings = settingsRes.data?.data || {};
       setGlobalClose(settings.percent ?? 90);
       setApplyAll(settings.applyAll !== false);
-      setUserId(settings.userId || '');
+      const savedIds = Array.isArray(settings.userIds)
+        ? settings.userIds
+        : Array.isArray(settings.selectedUserIds)
+          ? settings.selectedUserIds
+          : settings.userId
+            ? [settings.userId]
+            : [];
+      setSelectedUserIds(savedIds);
+      setUserId(savedIds[0] || settings.userId || '');
+      const savedPercents = {};
+      (settings.userSettings || []).forEach((item) => {
+        if (item.userId) savedPercents[item.userId] = item.percent ?? settings.percent ?? 90;
+      });
+      savedIds.forEach((id) => {
+        if (savedPercents[id] === undefined) savedPercents[id] = settings.percent ?? 90;
+      });
+      setUserPercents(savedPercents);
     }).catch(() => {});
   }, []);
 
   const save = async () => {
     try {
-      const res = await api.post('/web-admin/auto-close-settings', { percent: Number(globalClose), applyAll, userId });
+      const ids = applyAll ? [] : selectedUserIds;
+      if (!applyAll && !ids.length) return toast.error('Select at least one user');
+      const userSettings = ids.map((id) => ({ userId: id, percent: Number(userPercents[id] || globalClose) }));
+      const res = await api.post('/web-admin/auto-close-settings', {
+        percent: Number(globalClose),
+        applyAll,
+        userId: ids[0] || '',
+        userIds: ids,
+        selectedUserIds: ids,
+        userSettings,
+      });
       toast.success(res.data?.message || 'Auto close settings saved');
     } catch (error) {
       toast.error(error.response?.data?.message || 'Auto close save failed');
     }
+  };
+
+  const selectedUsers = users.filter((user) => selectedUserIds.includes(user.id));
+  const selectUsers = (event) => {
+    const ids = Array.from(event.target.selectedOptions).map((option) => option.value);
+    setSelectedUserIds(ids);
+    setUserId(ids[0] || '');
+    setUserPercents((prev) => {
+      const next = {};
+      ids.forEach((id) => {
+        next[id] = prev[id] ?? globalClose;
+      });
+      return next;
+    });
   };
 
   return (
@@ -3517,11 +3559,33 @@ function AutoClosePanel() {
         <div className="field"><label>Ledger Balance Close (%)</label><input className="input" value={globalClose} onChange={(event) => setGlobalClose(event.target.value)} /></div>
         <div className="grid-2">
           <label className="row"><span>Apply to all users</span><input type="checkbox" checked={applyAll} onChange={(event) => setApplyAll(event.target.checked)} /></label>
-          <div className="field"><label>User Filter</label><select className="select" value={userId} disabled={applyAll} onChange={(event) => setUserId(event.target.value)}><option value="">Select user</option>{users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}</select></div>
+          <div className="field">
+            <label>Select Multiple Users</label>
+            <select className="select multi-select" multiple value={selectedUserIds} disabled={applyAll} onChange={selectUsers}>
+              {users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}
+            </select>
+          </div>
         </div>
-        <button className="btn primary" onClick={save}>{applyAll ? 'Apply to All Users' : 'Apply to Selected User'}</button>
+        <button className="btn primary" onClick={save}>{applyAll ? 'Apply to All Users' : 'Apply to Selected Users'}</button>
       </div>
-      <div className="table-wrap" style={{ marginTop: 16 }}><table><thead><tr><th>User Email</th><th>Name</th><th>Auto Close %</th><th>Mode</th><th>Action</th></tr></thead><tbody><tr><td colSpan="5">User-specific settings will appear after backend endpoint is enabled.</td></tr></tbody></table></div>
+      <div className="table-wrap" style={{ marginTop: 16 }}>
+        <table>
+          <thead><tr><th>User ID</th><th>Name</th><th>Auto Close %</th><th>Mode</th><th>Action</th></tr></thead>
+          <tbody>
+            {applyAll && <tr><td colSpan="5">All users will use {Number(globalClose || 0)}% auto close.</td></tr>}
+            {!applyAll && selectedUsers.map((user) => (
+              <tr key={user.id}>
+                <td><strong className="mono">{user.login_id}</strong></td>
+                <td>{getUserName(user)}</td>
+                <td><input className="input compact-number" value={userPercents[user.id] ?? globalClose} onChange={(event) => setUserPercents((prev) => ({ ...prev, [user.id]: event.target.value }))} /></td>
+                <td>Selected User</td>
+                <td><button className="btn subtle" onClick={() => setSelectedUserIds((prev) => prev.filter((id) => id !== user.id))}>Remove</button></td>
+              </tr>
+            ))}
+            {!applyAll && !selectedUsers.length && <tr><td colSpan="5">Select one or more users above.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -4113,7 +4177,6 @@ function ScriptBanPanel() {
 
   const toggle = async (symbol) => {
     const next = !symbol.is_banned;
-    if (next && !reason.trim()) return toast.error('Enter ban reason');
     try {
       await api.post('/web-admin/symbol-ban', { symbol: symbol.symbol, isBanned: next, reason });
       toast.success(next ? 'Script banned' : 'Script unbanned');
@@ -4143,7 +4206,7 @@ function ScriptBanPanel() {
           </div>
           <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search script" style={{ maxWidth: 320 }} />
         </div>
-        {tab === 'unbanned' && <input className="input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ban reason" style={{ maxWidth: 420 }} />}
+        {tab === 'unbanned' && <input className="input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ban reason optional" style={{ maxWidth: 420 }} />}
       </div>
       <div className="list">
         {rows.map((symbol) => (
@@ -4256,9 +4319,6 @@ function TradeOnBehalfPanel() {
       || String(symbol.display_name || '').toLowerCase().includes(term)
       || String(symbol.underlying || '').toLowerCase().includes(term);
   });
-  const dropdownSymbols = selectedSymbol && !visibleSymbols.some((symbol) => symbol.symbol === selectedSymbol.symbol)
-    ? [selectedSymbol, ...visibleSymbols]
-    : visibleSymbols;
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const submit = async () => {
@@ -4279,8 +4339,22 @@ function TradeOnBehalfPanel() {
       </div>
       <div className="card pad">
         <div className="section-head"><div><h2>2. Select Script</h2><p>Pick the market instrument.</p></div></div>
-        <div className="field"><label>Search Script</label><input className="input" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="Search symbol, display name or underlying" /></div>
-        <div className="field"><label>Script</label><select className="select script-select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>{dropdownSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol} {symbol.display_name ? `- ${symbol.display_name}` : ''}</option>)}</select></div>
+        <div className="field">
+          <label>Script</label>
+          <input
+            className="input script-select"
+            list="trade-on-behalf-symbols"
+            value={form.symbol}
+            onChange={(event) => {
+              update('symbol', event.target.value.toUpperCase());
+              setSymbolSearch(event.target.value);
+            }}
+            placeholder="Search or select script"
+          />
+          <datalist id="trade-on-behalf-symbols">
+            {visibleSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.display_name || symbol.underlying || symbol.exchange || ''}</option>)}
+          </datalist>
+        </div>
         <div className="meta">{visibleSymbols.length} matching scripts</div>
         {selectedSymbol && (
           <div className="quote-strip">

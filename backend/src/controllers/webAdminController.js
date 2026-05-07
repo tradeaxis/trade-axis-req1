@@ -855,7 +855,7 @@ exports.getAutoCloseSettings = async (req, res) => {
     if (error) throw error;
     const value = typeof data?.value === 'string'
       ? JSON.parse(data.value)
-      : data?.value || { percent: 90, applyAll: true, userId: '' };
+      : data?.value || { percent: 90, applyAll: true, userId: '', userIds: [], userSettings: [] };
     res.json({ success: true, data: value });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -864,10 +864,25 @@ exports.getAutoCloseSettings = async (req, res) => {
 
 exports.saveAutoCloseSettings = async (req, res) => {
   try {
+    const userIds = Array.isArray(req.body?.userIds)
+      ? req.body.userIds.filter(Boolean)
+      : Array.isArray(req.body?.selectedUserIds)
+        ? req.body.selectedUserIds.filter(Boolean)
+        : req.body?.userId
+          ? [req.body.userId]
+          : [];
+    const userSettings = Array.isArray(req.body?.userSettings)
+      ? req.body.userSettings
+          .filter((item) => item?.userId)
+          .map((item) => ({ userId: item.userId, percent: Number(item.percent || req.body?.percent || 90) }))
+      : userIds.map((userId) => ({ userId, percent: Number(req.body?.percent || 90) }));
     const payload = {
       percent: Number(req.body?.percent || 90),
       applyAll: req.body?.applyAll !== false,
-      userId: req.body?.applyAll === false ? req.body?.userId || '' : '',
+      userId: req.body?.applyAll === false ? userIds[0] || '' : '',
+      userIds: req.body?.applyAll === false ? userIds : [],
+      selectedUserIds: req.body?.applyAll === false ? userIds : [],
+      userSettings: req.body?.applyAll === false ? userSettings : [],
       updatedAt: new Date().toISOString(),
     };
     const { error } = await supabase
