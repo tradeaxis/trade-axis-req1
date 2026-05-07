@@ -1381,6 +1381,7 @@ function Trade({ selectedAccount }) {
   const [orderSymbol, setOrderSymbol] = useState('');
   const [expandedPositionId, setExpandedPositionId] = useState('');
   const [closeTarget, setCloseTarget] = useState(null);
+  const [tradeView, setTradeView] = useState('positions');
 
   const accountId = selectedAccount?.id;
 
@@ -1419,10 +1420,25 @@ function Trade({ selectedAccount }) {
     if (!closeQty || closeQty <= 0) return toast.error('Enter quantity to close');
     try {
       const totalQty = Number(trade.quantity || 0);
-      const res = closeQty < totalQty
-        ? await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: closeQty })
-        : await api.post(`/trading/close/${trade.id}`, { accountId });
-      toast.success(res.data?.message || (closeQty < totalQty ? 'Position partially closed' : 'Position closed'));
+      const childTrades = Array.isArray(trade.childTrades) && trade.childTrades.length ? trade.childTrades : [trade];
+      if (childTrades.length > 1) {
+        let remainingQty = closeQty;
+        for (const child of childTrades) {
+          if (remainingQty <= 0) break;
+          const childQty = Number(child.quantity || 0);
+          const qtyForChild = Math.min(remainingQty, childQty);
+          if (qtyForChild <= 0) continue;
+          if (qtyForChild < childQty) await api.post(`/trading/partial-close/${child.id}`, { accountId, volume: qtyForChild });
+          else await api.post(`/trading/close/${child.id}`, { accountId });
+          remainingQty -= qtyForChild;
+        }
+        toast.success(closeQty < totalQty ? 'Position partially closed' : 'Position closed');
+      } else {
+        const res = closeQty < totalQty
+          ? await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: closeQty })
+          : await api.post(`/trading/close/${trade.id}`, { accountId });
+        toast.success(res.data?.message || (closeQty < totalQty ? 'Position partially closed' : 'Position closed'));
+      }
       setCloseTarget(null);
       await load();
     } catch (error) {
@@ -1465,13 +1481,45 @@ function Trade({ selectedAccount }) {
     }
   };
 
-  const enrichedPositions = positions.map((position) => ({
+  const openPositionRows = positions.filter((position) => {
+    const status = String(position.status || 'open').toLowerCase();
+    return status === 'open' || status === 'active';
+  });
+  const enrichedPositions = openPositionRows.map((position) => ({
     ...position,
     livePrice: getLivePositionPrice(position, symbols),
     livePnl: getPositionPnl(position, symbols),
   }));
-  const floatingPnl = enrichedPositions.reduce((sum, row) => sum + Number(row.livePnl || 0), 0);
-  const usedMargin = Number(selectedAccount?.margin || enrichedPositions.reduce((sum, row) => sum + Number(row.margin || 0), 0));
+  const groupedPositions = Array.from(enrichedPositions.reduce((map, position) => {
+    const key = `${String(position.symbol || '').toUpperCase()}-${String(position.trade_type || '').toLowerCase()}`;
+    const qty = Number(position.quantity || 0);
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        ...position,
+        id: key,
+        childTrades: [position],
+        quantity: qty,
+        openValue: Number(position.open_price || 0) * qty,
+        margin: Number(position.margin || 0),
+        livePnl: Number(position.livePnl || 0),
+        brokerage: Number(position.brokerage || 0),
+      });
+      return map;
+    }
+    const nextQty = Number(existing.quantity || 0) + qty;
+    existing.childTrades.push(position);
+    existing.quantity = nextQty;
+    existing.openValue += Number(position.open_price || 0) * qty;
+    existing.open_price = nextQty ? existing.openValue / nextQty : existing.open_price;
+    existing.livePrice = position.livePrice || existing.livePrice;
+    existing.livePnl = Number(existing.livePnl || 0) + Number(position.livePnl || 0);
+    existing.margin = Number(existing.margin || 0) + Number(position.margin || 0);
+    existing.brokerage = Number(existing.brokerage || 0) + Number(position.brokerage || 0);
+    return map;
+  }, new Map()).values());
+  const floatingPnl = groupedPositions.reduce((sum, row) => sum + Number(row.livePnl || 0), 0);
+  const usedMargin = Number(selectedAccount?.margin || groupedPositions.reduce((sum, row) => sum + Number(row.margin || 0), 0));
   const balance = Number(selectedAccount?.balance || 0);
   const credit = Number(selectedAccount?.credit || 0);
   const equity = balance + credit + floatingPnl;
@@ -1499,12 +1547,13 @@ function Trade({ selectedAccount }) {
       </div>
 
       <div className="trade-position-tabs">
-        <button className="tab active">Positions ({enrichedPositions.length})</button>
-        <button className="tab">Pending ({orders.length})</button>
+        <button className={`tab ${tradeView === 'positions' ? 'active' : ''}`} onClick={() => setTradeView('positions')}>Positions ({groupedPositions.length})</button>
+        <button className={`tab ${tradeView === 'pending' ? 'active' : ''}`} onClick={() => setTradeView('pending')}>Pending ({orders.length})</button>
       </div>
 
-      <div className="position-card-list">
-        {enrichedPositions.map((position) => {
+      {tradeView === 'positions' && (
+        <div className="position-card-list">
+        {groupedPositions.map((position) => {
           const isExpanded = expandedPositionId === position.id;
           return (
           <div className={`position-card ${isExpanded ? 'expanded' : ''}`} key={position.id}>
@@ -1534,23 +1583,30 @@ function Trade({ selectedAccount }) {
           </div>
           );
         })}
-        {!enrichedPositions.length && <div className="empty-state compact-empty"><span>No open positions</span></div>}
-      </div>
+        {!groupedPositions.length && <div className="empty-state compact-empty"><span>No open positions</span></div>}
+        </div>
+      )}
 
-      {orders.length > 0 && (
-        <div className="card pad">
-          <div className="section-head"><div><h2>Pending Orders</h2><p>Limit and stop orders waiting for execution.</p></div></div>
-          <div className="list">
-            {orders.map((order) => (
-              <div className="row" key={order.id}>
-                <div><strong>{order.symbol}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
-                <div className="action-row">
-                  <span className="pill gold">{order.status}</span>
-                  <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
+      {tradeView === 'pending' && (
+        <div className="position-card-list">
+          {orders.map((order) => (
+            <div className="position-card" key={order.id}>
+              <div className="position-card-main">
+                <div>
+                  <div className="position-title">
+                    <strong>{order.symbol}</strong>
+                    <span className="pill gold">{order.status || 'pending'}</span>
+                  </div>
+                  <div className="position-prices">
+                    <span>{String(order.order_type || '-').replace('_', ' ')} at {Number(order.price || 0).toFixed(2)}</span>
+                    <span>Qty: {order.quantity || '-'}</span>
+                  </div>
                 </div>
+                <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
+          {!orders.length && <div className="empty-state compact-empty"><span>No pending orders</span></div>}
         </div>
       )}
 
