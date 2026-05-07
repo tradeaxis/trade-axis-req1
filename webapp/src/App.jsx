@@ -1795,8 +1795,14 @@ function TradeHistory({ selectedAccount }) {
         created_at: trade.open_time || trade.created_at,
         updated_at: trade.close_time || trade.updated_at,
       }));
+      const cutoff = getPeriodCutoff(period);
+      const isInPeriod = (row) => {
+        const value = row.updated_at || row.created_at || row.executed_at || row.open_time || row.close_time;
+        return value ? new Date(value) >= cutoff : true;
+      };
       const orderMap = new Map();
       [...pendingRows, ...pendingHistoryRows, ...executedRows].forEach((row) => {
+        if (!isInPeriod(row)) return;
         orderMap.set(`${row.id}-${row.status || row.order_status || ''}`, row);
       });
       setRows(historyRows);
@@ -1819,8 +1825,13 @@ function TradeHistory({ selectedAccount }) {
       <div className="toolbar">
         <div className="left">
           <div className="tabs">
-            {['today', 'week', 'month', '3months'].map((item) => (
-              <button key={item} className={`tab ${period === item ? 'active' : ''}`} onClick={() => setPeriod(item)}>{item}</button>
+            {[
+              ['today', 'Day'],
+              ['week', 'Week'],
+              ['month', 'Month'],
+              ['3months', '3 Months'],
+            ].map(([item, label]) => (
+              <button key={item} className={`tab ${period === item ? 'active' : ''}`} onClick={() => setPeriod(item)}>{label}</button>
             ))}
           </div>
           <div className="tabs">
@@ -1902,32 +1913,38 @@ function TradeHistory({ selectedAccount }) {
 
       {view === 'deals' && (
         <>
-          <div className="stats-grid compact-stats history-summary">
-            <Stat label="Profit" value={formatMoney(dealsSummary?.totalProfit || 0)} tone="positive" />
-            <Stat label="Loss" value={formatMoney(dealsSummary?.totalLoss || 0)} tone="negative" />
-            <Stat label="Commission" value={formatMoney(dealsSummary?.totalCommission || 0)} />
-            <Stat label="Balance Settled" value={formatMoney(dealsSummary?.balanceSettled || 0)} tone={Number(dealsSummary?.balanceSettled || 0) >= 0 ? 'positive' : 'negative'} />
+          <div className="deals-summary-strip">
+            <div><span>Profit:</span><strong className="positive-blue">{formatMoney(dealsSummary?.totalProfit || 0)}</strong></div>
+            <div><span>Loss:</span><strong className="negative">{formatMoney(dealsSummary?.totalLoss || 0)}</strong></div>
+            <div><span>Deposits:</span><strong className="positive-blue">{formatMoney(dealsSummary?.totalDeposits || 0)}</strong></div>
+            <div><span>Withdrawals:</span><strong className="negative">{formatMoney(dealsSummary?.totalWithdrawals || 0)}</strong></div>
+            <div><span>Commission:</span><strong>{formatMoney(dealsSummary?.totalCommission || 0)}</strong></div>
+            <div><span>Balance Settled:</span><strong className={Number(dealsSummary?.balanceSettled || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(dealsSummary?.balanceSettled || 0)}</strong></div>
+            <div><span>Balance:</span><strong>{formatMoney(dealsSummary?.balance || selectedAccount?.balance || 0)}</strong></div>
           </div>
-          <div className="deal-card-list">
+          <div className="deal-ledger-list">
             {deals.map((deal) => {
               const amount = Number(deal.amount || deal.profit || 0);
               const side = deal.side || deal.trade_type || deal.type || '-';
+              const qty = Number(deal.quantity || 0);
+              const price = Number(deal.price || 0);
               return (
-                <div className="deal-card" key={deal.id}>
-                  <div className="deal-card-main">
+                <div className="deal-ledger-row" key={deal.id}>
+                  <div className="deal-ledger-main">
                     <div>
                       <strong>{deal.symbol || deal.dealLabel || deal.description || '-'}</strong>
-                      <div className="meta">{formatDate(deal.time || deal.created_at)} - {deal.description || deal.remarks || side}</div>
+                      <div className="meta">{formatDate(deal.time || deal.created_at)}</div>
+                      <div className="deal-detail-line">
+                        {qty ? <span>Qty {qty}</span> : null}
+                        {price ? <span>Price {price.toFixed(2)}</span> : null}
+                        {Number(deal.commission || deal.brokerage || 0) ? <span>Commission {Number(deal.commission || deal.brokerage || 0).toFixed(2)}</span> : null}
+                      </div>
+                      <div className="meta">{deal.description || deal.remarks || side}</div>
                     </div>
-                    <span className={`pill ${side === 'entry' || side === 'buy' ? 'teal' : side === 'settlement' ? 'gold' : 'red'}`}>{String(side).toUpperCase()}</span>
-                  </div>
-                  <div className="deal-card-grid">
-                    <div><span>Qty</span><strong>{deal.quantity || '-'}</strong></div>
-                    <div><span>Price</span><strong>{deal.price ? Number(deal.price).toFixed(2) : '-'}</strong></div>
-                    <div><span>Commission</span><strong>{formatMoney(deal.commission || deal.brokerage || 0)}</strong></div>
-                    <div><span>Amount</span><strong className={amount >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(amount)}</strong></div>
-                    <div><span>Before</span><strong>{deal.balance_before !== undefined && deal.balance_before !== null ? formatMoney(deal.balance_before) : '-'}</strong></div>
-                    <div><span>After</span><strong>{deal.balance_after !== undefined && deal.balance_after !== null ? formatMoney(deal.balance_after) : '-'}</strong></div>
+                    <div className="deal-ledger-amount">
+                      <strong className={amount >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(amount)}</strong>
+                      <span>{String(side).replace('_', ' ')}</span>
+                    </div>
                   </div>
                 </div>
               );
@@ -2296,7 +2313,7 @@ function UsersPanel({ mode, role }) {
       {showCreate && <CreateUserModal mode={mode} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
       {dialog?.type === 'positions' && <UserPositionsModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'brokerage' && <BrokerageModal user={dialog.user} onClose={() => setDialog(null)} />}
-      {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} />}
+      {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} onSaved={load} />}
       {dialog?.type === 'update' && <UserUpdateModal mode={mode} user={dialog.user} users={allUsers} brokers={allUsers.filter((user) => user.role === 'sub_broker')} onClose={() => setDialog(null)} onSaved={load} />}
     </div>
   );
@@ -2321,6 +2338,19 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
       onRefresh();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Delete failed');
+    }
+  };
+
+  const deleteDemoAccount = async (user) => {
+    const demoAccount = (user.accounts || []).find((account) => account.is_demo);
+    if (!demoAccount) return toast.error('No demo account found');
+    if (!window.confirm(`Delete demo account ${demoAccount.account_number}?`)) return;
+    try {
+      await api.delete(`/web-admin/accounts/${demoAccount.id}/demo`);
+      toast.success('Demo account deleted');
+      onRefresh();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Demo delete failed');
     }
   };
 
@@ -2372,7 +2402,13 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td>{(user.accounts || []).some((account) => account.is_demo) ? 'YES' : 'NO'}</td>
               <td>{user.is_active ? 'YES' : 'NO'}</td>
               <td>{formatDate(user.created_at)}</td>
-              <td><div className="action-pair"><button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button><button className="btn danger" onClick={() => deleteUser(user)}>Delete</button></div></td>
+              <td>
+                <div className="action-pair">
+                  <button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button>
+                  {(user.accounts || []).some((account) => account.is_demo) && <button className="btn subtle" onClick={() => deleteDemoAccount(user)}>Delete Demo</button>}
+                  <button className="btn danger" onClick={() => deleteUser(user)}>Delete</button>
+                </div>
+              </td>
             </tr>
           )})}
           {!users.length && <tr><td colSpan="20">No users found</td></tr>}
@@ -2392,7 +2428,7 @@ function CreateUserModal({ mode, onClose, onCreated }) {
     leverage: 30,
     brokerageRate: 0.0006,
     demoBalance: 100000,
-    createDemo: true,
+    createDemo: false,
     createLive: true,
     liquidationType: 'liquidate',
   });
@@ -2793,9 +2829,32 @@ function BrokerageModal({ user, onClose }) {
   );
 }
 
-function LedgerModal({ user, onClose }) {
+function LedgerModal({ user, onClose, onSaved }) {
   const [form, setForm] = useState({ crdr: 0, remarks: 'Adjustment' });
-  const account = (user.accounts || [])[0] || {};
+  const account = getDisplayAccount(user.accounts);
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const amount = Number(form.crdr || 0);
+    if (!amount) return toast.error('Enter CRDR amount');
+    if (!form.remarks || form.remarks === 'Select Type') return toast.error('Select remarks type');
+    setSaving(true);
+    try {
+      await api.post(`/admin/users/${user.id}/add-balance`, {
+        accountId: account.id,
+        amount,
+        note: form.remarks,
+        remarks: form.remarks,
+      });
+      toast.success('Ledger updated');
+      onSaved?.();
+      onClose();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Ledger update failed');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="modal-backdrop">
@@ -2808,9 +2867,9 @@ function LedgerModal({ user, onClose }) {
             <div className="field"><label>Deposit Balance</label><input className="input" readOnly value={account.balance || 0} /></div>
             <div className="field"><label>Margin Available</label><input className="input" readOnly value={account.free_margin || 0} /></div>
             <div className="field"><label>Ledger Balance</label><input className="input" readOnly value={account.balance || 0} /></div>
-            <div className="field"><label>Remarks</label><select className="select" value={form.remarks} onChange={(event) => setForm((prev) => ({ ...prev, remarks: event.target.value }))}>{['Register Balance', 'Deposit', 'Withdraw', 'Settlement', 'Adjustment'].map((item) => <option key={item}>{item}</option>)}</select></div>
+            <div className="field"><label>Remarks</label><select className="select" value={form.remarks} onChange={(event) => setForm((prev) => ({ ...prev, remarks: event.target.value }))}>{['Select Type', 'Register Balance', 'Deposit', 'Withdraw', 'Settlement', 'Adjustment'].map((item) => <option key={item}>{item}</option>)}</select></div>
           </div>
-          <button className="btn primary block" onClick={() => toast.error('Ledger write endpoint is not enabled yet')}>Submit</button>
+          <button className="btn primary block" onClick={submit} disabled={saving}>{saving ? 'Submitting...' : 'Submit'}</button>
         </div>
       </div>
     </div>

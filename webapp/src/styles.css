@@ -2291,6 +2291,176 @@ tr:last-child td {
   min-width: 680px;
 }
 
+/* Global density pass: keep all panels clear without allowing headers and cards to consume the viewport. */
+.topbar {
+  height: 58px;
+  padding-inline: 20px;
+}
+
+.topbar-title h1 {
+  font-size: 20px;
+}
+
+.content {
+  padding: 16px;
+  gap: 14px;
+}
+
+.card.pad,
+.modal-body {
+  padding: 14px;
+}
+
+.section-head {
+  margin-bottom: 10px;
+}
+
+.section-head h2 {
+  font-size: 18px;
+}
+
+.section-head p {
+  margin-top: 2px;
+}
+
+.toolbar {
+  margin-bottom: 10px;
+  gap: 8px;
+}
+
+.btn,
+.select,
+.input {
+  min-height: 38px;
+}
+
+.btn {
+  padding: 8px 12px;
+}
+
+th,
+td {
+  padding: 9px 10px;
+}
+
+.stats-grid {
+  gap: 10px;
+}
+
+.stat {
+  min-height: 70px;
+  padding: 11px 12px;
+}
+
+.stat strong {
+  font-size: 20px;
+}
+
+.compact-stats .stat {
+  min-height: 58px;
+  padding: 8px 10px;
+}
+
+.compact-stats .stat strong {
+  font-size: 16px;
+}
+
+[data-theme="dark"] .nav-item.active,
+[data-theme="dark"] .operator-top-nav .nav-item.active,
+[data-theme="dark"] .bottom-nav .nav-item.active,
+[data-theme="dark"] .tab.active {
+  color: #f6b90b;
+  background: rgba(246, 185, 11, 0.13);
+}
+
+[data-theme="dark"] .operator-top-nav .nav-item.active svg,
+[data-theme="dark"] .nav-item.active svg {
+  color: #f6b90b;
+}
+
+.deals-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 18px;
+  padding: 6px 2px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.deals-summary-strip div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.deals-summary-strip span {
+  color: var(--muted);
+}
+
+.deal-ledger-list {
+  display: grid;
+}
+
+.deal-ledger-row {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.deal-ledger-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deal-ledger-main strong {
+  font-size: 14px;
+}
+
+.deal-ledger-amount {
+  display: grid;
+  justify-items: end;
+  align-content: start;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.deal-ledger-amount strong {
+  font-size: 14px;
+}
+
+.deal-ledger-amount span,
+.deal-detail-line {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.deal-detail-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.full-screen-modal .modal-body {
+  max-height: calc(100dvh - 66px);
+}
+
+.full-screen-modal .toolbar {
+  margin-bottom: 8px;
+}
+
+.full-screen-modal .table-wrap table {
+  font-size: 13px;
+}
+
+.quick-actions,
+.action-pair {
+  gap: 6px;
+}
+
 @media (max-width: 760px) {
   .user-shell .topbar,
   .operator-shell .topbar {
