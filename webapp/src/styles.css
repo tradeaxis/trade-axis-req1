@@ -2216,3 +2216,168 @@ tr:last-child td {
     padding: 14px;
   }
 }
+
+.compact-workspace-panel {
+  padding: 14px;
+}
+
+.quotes-panel .toolbar,
+.history-panel .toolbar {
+  margin-bottom: 10px;
+}
+
+.locked-script-field {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: 0 12px;
+  font-weight: 850;
+}
+
+.deal-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.deal-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.deal-card-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.deal-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.deal-card-grid div {
+  background: var(--surface-2);
+  border-radius: 7px;
+  padding: 8px;
+  min-width: 0;
+}
+
+.deal-card-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.deal-card-grid strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.history-panel table {
+  min-width: 680px;
+}
+
+@media (max-width: 760px) {
+  .user-shell .topbar,
+  .operator-shell .topbar {
+    min-height: 54px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "title";
+    padding: 7px 10px;
+    gap: 4px;
+  }
+
+  .topbar-title h1,
+  .user-shell .topbar-title h1 {
+    font-size: 17px;
+  }
+
+  .topbar-title p {
+    font-size: 11px;
+    margin-top: 0;
+  }
+
+  .content {
+    padding: 8px;
+  }
+
+  .quotes-panel,
+  .history-panel {
+    padding: 9px;
+  }
+
+  .quotes-panel .toolbar,
+  .history-panel .toolbar,
+  .watchlist-bar {
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .quotes-panel .input,
+  .watchlist-create .input {
+    min-height: 36px;
+  }
+
+  .quotes-panel .btn,
+  .watchlist-create .btn,
+  .history-panel .btn {
+    min-height: 36px;
+    padding: 7px 10px;
+  }
+
+  .tab {
+    min-height: 30px;
+    padding: 5px 9px;
+  }
+
+  .trade-app-view {
+    gap: 8px;
+  }
+
+  .trade-account-line {
+    padding: 7px 9px;
+  }
+
+  .trade-metric-grid .stat {
+    min-height: 54px;
+    padding: 6px 5px;
+  }
+
+  .trade-metric-grid .stat strong {
+    font-size: 14px;
+  }
+
+  .trade-metric-grid .stat span {
+    font-size: 9px;
+  }
+
+  .position-card-list {
+    gap: 7px;
+  }
+
+  .deal-card {
+    padding: 10px;
+  }
+
+  .deal-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ticket-modal {
+    width: min(100%, 420px);
+  }
+}

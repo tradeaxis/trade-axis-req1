@@ -1081,13 +1081,15 @@ function Quotes({ selectedAccount }) {
 
   const visible = symbols
     .filter((symbol) => {
+      const term = query.toLowerCase().trim();
+      const matchesSearch = !term ||
+        String(symbol.symbol || '').toLowerCase().includes(term) ||
+        String(symbol.display_name || '').toLowerCase().includes(term) ||
+        String(symbol.underlying || '').toLowerCase().includes(term);
+      if (!matchesSearch) return false;
       if (activeWatchlistId === 'all') return true;
+      if (term) return true;
       return watchlistSymbols.includes(String(symbol.symbol || '').toUpperCase());
-    })
-    .filter((symbol) => {
-      const term = query.toLowerCase();
-      return String(symbol.symbol || '').toLowerCase().includes(term) ||
-        String(symbol.display_name || '').toLowerCase().includes(term);
     })
     .slice(0, 120);
   const getQuotePriceTone = (symbol) => {
@@ -1170,7 +1172,7 @@ function Quotes({ selectedAccount }) {
               );
             })}
             {!visible.length && (
-              <tr><td colSpan="7">No scripts found</td></tr>
+              <tr><td colSpan="7">{activeWatchlistId === 'all' || query.trim() ? 'No scripts found' : 'Search scripts above and use the star to add them to this watchlist'}</td></tr>
             )}
           </tbody>
         </table>
@@ -1286,7 +1288,7 @@ function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, 
   );
 }
 
-function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
+function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol = Boolean(initialSymbol) }) {
   const [form, setForm] = useState({
     symbol: initialSymbol || symbols?.[0]?.symbol || '',
     orderType: 'market',
@@ -1355,7 +1357,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone }) {
 
   return (
     <div className="ticket-stack">
-      <OrderFields form={form} setForm={setForm} symbols={symbols} />
+      <OrderFields form={form} setForm={setForm} symbols={symbols} lockedSymbol={lockedSymbol} />
       <div className="deal-price-strip">
         <button className="deal-price sell" type="button" disabled={busy} onClick={() => place('sell')}>
           <span>Sell by Market</span>
@@ -1376,6 +1378,7 @@ function Trade({ selectedAccount }) {
   const [orders, setOrders] = useState([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [showOrder, setShowOrder] = useState(false);
+  const [orderSymbol, setOrderSymbol] = useState('');
   const [expandedPositionId, setExpandedPositionId] = useState('');
   const [closeTarget, setCloseTarget] = useState(null);
 
@@ -1481,7 +1484,6 @@ function Trade({ selectedAccount }) {
       <div className="trade-summary-card">
         <div className="trade-account-line">
           <span>Trade Axis</span>
-          <strong>{selectedAccount?.account_number || 'Account'}</strong>
           <span className={`pill ${selectedAccount?.is_demo ? 'gold' : 'teal'}`}>{selectedAccount?.is_demo ? 'Demo' : 'Live'}</span>
         </div>
         <div className="trade-metric-grid">
@@ -1525,7 +1527,7 @@ function Trade({ selectedAccount }) {
             </button>
             {isExpanded && (
               <div className="position-card-actions">
-                <button className="btn primary" onClick={() => setShowOrder(true)}>New Order</button>
+                <button className="btn primary" onClick={() => { setOrderSymbol(position.symbol); setShowOrder(true); }}>New Order</button>
                 <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
               </div>
             )}
@@ -1556,11 +1558,11 @@ function Trade({ selectedAccount }) {
         <TradeTicketModal
           accountId={accountId}
           symbols={symbols}
-          initialSymbol={selectedSymbol}
+          initialSymbol={orderSymbol || selectedSymbol}
           title="New Order"
           subtitle="Trade Axis order ticket"
-          onClose={() => setShowOrder(false)}
-          onDone={() => { setShowOrder(false); load(); }}
+          onClose={() => { setShowOrder(false); setOrderSymbol(''); }}
+          onDone={() => { setShowOrder(false); setOrderSymbol(''); load(); }}
         />
       )}
       {closeTarget && (
@@ -1670,16 +1672,20 @@ function Trade({ selectedAccount }) {
   );
 }
 
-function OrderFields({ form, setForm, symbols }) {
+function OrderFields({ form, setForm, symbols, lockedSymbol = false }) {
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
   const isMarket = form.orderType === 'market' || form.orderType === 'instant';
   return (
     <>
       <div className="field">
         <label>Script</label>
-        <select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>
-          {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
-        </select>
+        {lockedSymbol ? (
+          <div className="locked-script-field">{form.symbol || '-'}</div>
+        ) : (
+          <select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>
+            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
+          </select>
+        )}
       </div>
       <div className="grid-2">
         <div className="field">
@@ -1771,13 +1777,30 @@ function TradeHistory({ selectedAccount }) {
     if (!selectedAccount?.id) return;
     setLoading(true);
     try {
-      const [historyRes, orderRes, dealsRes] = await Promise.all([
+      const [historyRes, orderRes, pendingRes, dealsRes] = await Promise.all([
         api.get('/trading/history', { params: { accountId: selectedAccount.id, period } }),
         api.get(`/trading/pending-order-history/${selectedAccount.id}`),
+        api.get(`/trading/pending-orders/${selectedAccount.id}`),
         api.get('/transactions/deals', { params: { accountId: selectedAccount.id, period, limit: 500 } }),
       ]);
-      setRows(historyRes.data?.data || []);
-      setOrderRows(orderRes.data?.data || []);
+      const historyRows = historyRes.data?.data || [];
+      const pendingHistoryRows = orderRes.data?.data || [];
+      const pendingRows = pendingRes.data?.data || [];
+      const executedRows = historyRows.map((trade) => ({
+        ...trade,
+        order_type: 'market',
+        status: 'executed',
+        trade_type: trade.trade_type,
+        price: trade.open_price,
+        created_at: trade.open_time || trade.created_at,
+        updated_at: trade.close_time || trade.updated_at,
+      }));
+      const orderMap = new Map();
+      [...pendingRows, ...pendingHistoryRows, ...executedRows].forEach((row) => {
+        orderMap.set(`${row.id}-${row.status || row.order_status || ''}`, row);
+      });
+      setRows(historyRows);
+      setOrderRows([...orderMap.values()].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)));
       setDeals(dealsRes.data?.data?.deals || []);
       setDealsSummary(dealsRes.data?.data?.summary || null);
     } catch {
@@ -1792,7 +1815,7 @@ function TradeHistory({ selectedAccount }) {
   }, [load]);
 
   return (
-    <div className="card pad">
+    <div className="card pad history-panel compact-workspace-panel">
       <div className="toolbar">
         <div className="left">
           <div className="tabs">
@@ -1818,15 +1841,14 @@ function TradeHistory({ selectedAccount }) {
           <table>
             <thead>
               <tr>
-                <th>Order ID</th><th>Script</th><th>Side</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th>
-                <th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Stop Loss</th><th>Take Profit</th>
-                <th>Brokerage</th><th>P&L</th><th>Comment</th>
+                <th>Script</th><th>Side</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th>
+                <th>Entry Price</th><th>Exit Price</th><th>Stop Loss</th><th>Take Profit</th>
+                <th>Brokerage</th><th>P&L</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((trade) => (
                 <tr key={trade.id}>
-                  <td className="mono">{trade.id}</td>
                   <td><strong>{trade.symbol}</strong><div className="meta">{trade.exchange || trade.category || '-'}</div></td>
                   <td><span className={`pill ${trade.trade_type === 'buy' ? 'teal' : 'red'}`}>{trade.trade_type}</span></td>
                   <td>{trade.quantity}</td>
@@ -1834,15 +1856,13 @@ function TradeHistory({ selectedAccount }) {
                   <td>{formatDate(trade.close_time || trade.updated_at)}</td>
                   <td>{Number(trade.open_price || 0).toFixed(2)}</td>
                   <td>{Number(trade.close_price || 0).toFixed(2)}</td>
-                  <td>{Number(trade.current_price || trade.close_price || 0).toFixed(2)}</td>
                   <td>{Number(trade.stop_loss || 0) > 0 ? Number(trade.stop_loss).toFixed(2) : '-'}</td>
                   <td>{Number(trade.take_profit || 0) > 0 ? Number(trade.take_profit).toFixed(2) : '-'}</td>
                   <td>{formatMoney(trade.brokerage)}</td>
                   <td className={Number(trade.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(trade.profit)}</td>
-                  <td>{trade.comment || '-'}</td>
                 </tr>
               ))}
-              {!rows.length && <tr><td colSpan="14">No closed positions found</td></tr>}
+              {!rows.length && <tr><td colSpan="11">No closed positions found</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1882,43 +1902,37 @@ function TradeHistory({ selectedAccount }) {
 
       {view === 'deals' && (
         <>
-          <div className="stats-grid compact-stats">
+          <div className="stats-grid compact-stats history-summary">
             <Stat label="Profit" value={formatMoney(dealsSummary?.totalProfit || 0)} tone="positive" />
             <Stat label="Loss" value={formatMoney(dealsSummary?.totalLoss || 0)} tone="negative" />
             <Stat label="Commission" value={formatMoney(dealsSummary?.totalCommission || 0)} />
             <Stat label="Balance Settled" value={formatMoney(dealsSummary?.balanceSettled || 0)} tone={Number(dealsSummary?.balanceSettled || 0) >= 0 ? 'positive' : 'negative'} />
           </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date & Time</th><th>Deal ID</th><th>Type</th><th>Description</th><th>Script</th><th>Side</th>
-                  <th>Qty</th><th>Price</th><th>Commission</th><th>Amount</th><th>Balance Before</th><th>Balance After</th>
-                </tr>
-              </thead>
-              <tbody>
-                {deals.map((deal) => {
-                  const amount = Number(deal.amount || deal.profit || 0);
-                  return (
-                    <tr key={deal.id}>
-                      <td>{formatDate(deal.time || deal.created_at)}</td>
-                      <td className="mono">{deal.id}</td>
-                      <td>{deal.type || deal.side || '-'}</td>
-                      <td>{deal.description || deal.remarks || '-'}</td>
-                      <td><strong>{deal.symbol || deal.dealLabel || '-'}</strong></td>
-                      <td><span className={`pill ${deal.side === 'entry' || deal.trade_type === 'buy' ? 'teal' : deal.side === 'settlement' ? 'gold' : 'red'}`}>{deal.side || deal.trade_type || deal.type || '-'}</span></td>
-                      <td>{deal.quantity || '-'}</td>
-                      <td>{deal.price ? Number(deal.price).toFixed(2) : '-'}</td>
-                      <td>{formatMoney(deal.commission || deal.brokerage || 0)}</td>
-                      <td className={amount >= 0 ? 'positive' : 'negative'}>{formatMoney(amount)}</td>
-                      <td>{deal.balance_before !== undefined && deal.balance_before !== null ? formatMoney(deal.balance_before) : '-'}</td>
-                      <td>{deal.balance_after !== undefined && deal.balance_after !== null ? formatMoney(deal.balance_after) : '-'}</td>
-                    </tr>
-                  );
-                })}
-                {!deals.length && <tr><td colSpan="12">No deals found</td></tr>}
-              </tbody>
-            </table>
+          <div className="deal-card-list">
+            {deals.map((deal) => {
+              const amount = Number(deal.amount || deal.profit || 0);
+              const side = deal.side || deal.trade_type || deal.type || '-';
+              return (
+                <div className="deal-card" key={deal.id}>
+                  <div className="deal-card-main">
+                    <div>
+                      <strong>{deal.symbol || deal.dealLabel || deal.description || '-'}</strong>
+                      <div className="meta">{formatDate(deal.time || deal.created_at)} - {deal.description || deal.remarks || side}</div>
+                    </div>
+                    <span className={`pill ${side === 'entry' || side === 'buy' ? 'teal' : side === 'settlement' ? 'gold' : 'red'}`}>{String(side).toUpperCase()}</span>
+                  </div>
+                  <div className="deal-card-grid">
+                    <div><span>Qty</span><strong>{deal.quantity || '-'}</strong></div>
+                    <div><span>Price</span><strong>{deal.price ? Number(deal.price).toFixed(2) : '-'}</strong></div>
+                    <div><span>Commission</span><strong>{formatMoney(deal.commission || deal.brokerage || 0)}</strong></div>
+                    <div><span>Amount</span><strong className={amount >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(amount)}</strong></div>
+                    <div><span>Before</span><strong>{deal.balance_before !== undefined && deal.balance_before !== null ? formatMoney(deal.balance_before) : '-'}</strong></div>
+                    <div><span>After</span><strong>{deal.balance_after !== undefined && deal.balance_after !== null ? formatMoney(deal.balance_after) : '-'}</strong></div>
+                  </div>
+                </div>
+              );
+            })}
+            {!deals.length && <div className="empty-state compact-empty"><span>No deals found</span></div>}
           </div>
         </>
       )}
