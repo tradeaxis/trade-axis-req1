@@ -11,6 +11,19 @@ const {
 const isAdmin = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
 const isSubBroker = (req) => String(req.user?.role || '').toLowerCase() === 'sub_broker';
 
+const rememberPlainPassword = async (userId, plainPassword) => {
+  if (!userId || !plainPassword) return;
+
+  const { error } = await supabase
+    .from('users')
+    .update({ plain_password: String(plainPassword) })
+    .eq('id', userId);
+
+  if (error && !/plain_password|schema cache|column/i.test(`${error.message || ''} ${error.details || ''}`)) {
+    console.warn('plain password mirror update skipped:', error.message);
+  }
+};
+
 const calculateLiveTradeValues = (row) => {
   if (!row || row.status !== 'open') return row;
 
@@ -573,11 +586,7 @@ exports.listUsers = async (req, res) => {
     const { q = '', role = 'all', limit = 500 } = req.query;
     let query = supabase
       .from('users')
-      .select(`
-        id, login_id, email, first_name, last_name, phone, role, is_active,
-        leverage, brokerage_rate, max_saved_accounts, closing_mode,
-        liquidation_type, created_by, created_at
-      `)
+      .select('*')
       .order('created_at', { ascending: false })
       .limit(Number(limit) || 500);
 
@@ -656,10 +665,14 @@ exports.listUsers = async (req, res) => {
 
     res.json({
       success: true,
-      data: (users || []).map((user) => ({
-        ...user,
-        accounts: accountsByUserId.get(user.id) || [],
-      })),
+      data: (users || []).map((user) => {
+        const { password_hash, plain_password, ...safeUser } = user;
+        return {
+          ...safeUser,
+          current_password: plain_password || '',
+          accounts: accountsByUserId.get(user.id) || [],
+        };
+      }),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -747,6 +760,7 @@ exports.createUser = async (req, res) => {
       .single();
 
     if (error) throw error;
+    await rememberPlainPassword(user.id, String(password || 'TA1234'));
 
     const accountsToCreate = [];
     if (createDemo) {

@@ -5,6 +5,19 @@ const { hashPassword, comparePassword, generateToken, generateAccountNumber, gen
 
 const DB_QUERY_TIMEOUT_MS = Number(process.env.DB_QUERY_TIMEOUT_MS || 25000);
 
+const rememberPlainPassword = async (userId, plainPassword) => {
+  if (!userId || !plainPassword) return;
+
+  const { error } = await supabase
+    .from('users')
+    .update({ plain_password: String(plainPassword) })
+    .eq('id', userId);
+
+  if (error && !/plain_password|schema cache|column/i.test(`${error.message || ''} ${error.details || ''}`)) {
+    console.warn('plain password mirror update skipped:', error.message);
+  }
+};
+
 const withDbTimeout = async (operationPromise, label = 'Database request') => {
   let timeoutId;
 
@@ -487,6 +500,7 @@ const changePassword = async (req, res) => {
       .eq('id', userId);
 
     if (updateError) throw updateError;
+    await rememberPlainPassword(userId, newPassword);
 
     res.json({ success: true, message: 'Password changed successfully' });
   } catch (error) {

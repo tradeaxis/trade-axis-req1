@@ -18,6 +18,19 @@ const generateTempPassword = () => {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
 };
 
+const rememberPlainPassword = async (userId, plainPassword) => {
+  if (!userId || !plainPassword) return;
+
+  const { error } = await supabase
+    .from('users')
+    .update({ plain_password: String(plainPassword) })
+    .eq('id', userId);
+
+  if (error && !/plain_password|schema cache|column/i.test(`${error.message || ''} ${error.details || ''}`)) {
+    console.warn('plain password mirror update skipped:', error.message);
+  }
+};
+
 const buildAdminTradeComment = (prefix, note) => (
   fitTradeComment(`${prefix}: ${note || 'Manual admin action'}`)
 );
@@ -561,6 +574,8 @@ exports.createUser = async (req, res) => {
       });
     }
 
+    await rememberPlainPassword(user.id, userPassword);
+
     // Update optional fields separately (in case columns don't exist yet)
     try {
       await supabase
@@ -673,6 +688,7 @@ exports.resetPassword = async (req, res) => {
       .eq('id', id);
 
     if (error) throw error;
+    await rememberPlainPassword(id, tempPassword);
 
     res.json({ 
       success: true, 
@@ -858,7 +874,7 @@ exports.updateMaxSavedAccounts = async (req, res) => {
 exports.toggleClosingMode = async (req, res) => {
   try {
     const { id } = req.params;
-    const { closingMode } = req.body;
+    const closingMode = toBoolean(req.body?.closingMode ?? req.body?.closing_mode, false);
 
     const { error } = await supabase
       .from('users')
@@ -894,14 +910,20 @@ exports.updateLiquidationMode = async (req, res) => {
 exports.addBalanceToAccount = async (req, res) => {
   try {
     const { id } = req.params;
-    const { accountId, amount, accountType = 'live', note = 'Admin deposit' } = req.body;
+    const { accountId, accountType = 'live' } = req.body;
+    const amount = Number(req.body.amount);
+    const note = firstNonEmptyString(req.body.note, req.body.remarks, 'Adjustment');
+    const remarkKey = String(note || '').trim().toLowerCase();
+    const balanceRemarks = new Set(['register balance', 'deposit', 'withdraw']);
+    const equityOnlyRemarks = new Set(['settlement', 'adjustment']);
 
-    if (!amount || amount === 0) {
+    if (!Number.isFinite(amount) || amount === 0) {
       return res.status(400).json({ success: false, message: 'Invalid amount' });
     }
 
-    const isReduction = amount < 0;
-    const absAmount = Math.abs(amount);
+    if (!balanceRemarks.has(remarkKey) && !equityOnlyRemarks.has(remarkKey)) {
+      return res.status(400).json({ success: false, message: 'Select a valid ledger remark' });
+    }
 
     let account;
 
@@ -931,6 +953,11 @@ exports.addBalanceToAccount = async (req, res) => {
     }
 
     const currentBalance = parseFloat(account.balance || 0);
+    const currentCredit = parseFloat(account.credit || 0);
+    const isBalanceChange = balanceRemarks.has(remarkKey);
+    const effectiveAmount = remarkKey === 'withdraw' && amount > 0 ? -amount : amount;
+    const isReduction = isBalanceChange && effectiveAmount < 0;
+    const absAmount = Math.abs(effectiveAmount);
 
     // For reductions, validate sufficient balance
     if (isReduction && absAmount > currentBalance) {
@@ -940,26 +967,23 @@ exports.addBalanceToAccount = async (req, res) => {
       });
     }
 
-    const currentCredit = parseFloat(account.credit || 0);
-    const currentProfit = parseFloat(account.profit || 0);
-    const newBalance = currentBalance + parseFloat(amount); // admin-controlled only
-    const newEquity = newBalance + currentCredit + currentProfit;
-    const newFreeMargin = newEquity - parseFloat(account.margin || 0);
+    const newBalance = isBalanceChange ? currentBalance + effectiveAmount : currentBalance;
+    const newCredit = isBalanceChange ? currentCredit : currentCredit + effectiveAmount;
     const processedAt = new Date().toISOString();
-    const transactionType = isReduction ? 'withdrawal' : 'deposit';
-    const description = note || (isReduction ? 'Admin reduction' : 'Admin deposit');
+    const transactionType = effectiveAmount < 0 ? 'withdrawal' : (remarkKey === 'settlement' ? 'settlement' : 'deposit');
+    const description = `[${note}] Admin ledger ${effectiveAmount >= 0 ? 'credit' : 'debit'} ${absAmount.toFixed(2)}`;
 
     const { error: updateError } = await supabase
       .from('accounts')
       .update({
         balance: newBalance,
-        equity: newEquity,
-        free_margin: newFreeMargin,
+        credit: newCredit,
         updated_at: processedAt,
       })
       .eq('id', account.id);
 
     if (updateError) throw updateError;
+    const snapshot = await recalculateAccountSnapshot(account.id, processedAt);
 
     await supabase.from('transactions').insert({
       user_id: id,
@@ -978,10 +1002,11 @@ exports.addBalanceToAccount = async (req, res) => {
 
     res.json({
       success: true,
-      message: isReduction
-        ? `₹${absAmount} reduced from account. New balance: ₹${newBalance.toFixed(2)}`
-        : `₹${absAmount} added to account. New balance: ₹${newBalance.toFixed(2)}`,
+      message: isBalanceChange
+        ? `Balance updated. New balance: ${newBalance.toFixed(2)}`
+        : `Equity adjustment updated. New equity: ${snapshot.equity.toFixed(2)}`,
       newBalance,
+      data: snapshot,
     });
   } catch (error) {
     console.error('addBalanceToAccount error:', error);
@@ -1184,11 +1209,13 @@ exports.approveWithdrawal = async (req, res) => {
       .eq('id', id);
 
     if (updateError) throw updateError;
+    const snapshot = await recalculateAccountSnapshot(txn.account_id, processedAt);
 
     res.json({
       success: true,
       message: `Withdrawal approved. New balance: INR ${newBalance.toFixed(2)}`,
       newBalance,
+      data: snapshot,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

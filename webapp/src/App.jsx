@@ -2929,6 +2929,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
         <div className="field"><label>Login ID</label><input className="input" readOnly value={user.login_id || ''} /></div>
         <label className="row"><span>Activation</span><input type="checkbox" checked={form.active} onChange={(event) => setForm((prev) => ({ ...prev, active: event.target.checked }))} /></label>
         <div className="action-row left-actions"><button className="btn primary" onClick={saveActive}>Save Activation</button></div>
+        <div className="field"><label>Current Password</label><input className="input" readOnly value={user.current_password || 'Not stored yet'} /></div>
         <div className="field"><label>New Password</label><input className="input" type="password" placeholder="Enter password or leave blank for temp password" value={form.password} onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))} /></div>
         <button className="btn success block" onClick={resetPassword}>Reset Password</button>
       </div>
@@ -2981,17 +2982,41 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
 function LedgerUpdateEditor({ user, onSaved }) {
   const account = (user.accounts || [])[0] || {};
   const [form, setForm] = useState({ crdr: 0, remarks: 'Adjustment' });
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
   const amount = Number(form.crdr || 0);
+
+  const loadRows = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/web-admin/action-ledger', {
+        params: { scope: 'selected', userId: user.id, limit: 5000 },
+      });
+      setRows((res.data?.data || []).filter((row) => row.source === 'Transaction'));
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Ledger history failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [user.id]);
+
+  useEffect(() => {
+    loadRows();
+  }, [loadRows]);
 
   const submit = async () => {
     if (!amount) return toast.error('Enter CRDR amount');
+    if (!form.remarks || form.remarks === 'Select Type') return toast.error('Select remarks type');
     try {
       await api.post(`/admin/users/${user.id}/add-balance`, {
         accountId: account.id,
         amount,
         note: form.remarks,
+        remarks: form.remarks,
       });
       toast.success('Ledger updated');
+      setForm((prev) => ({ ...prev, crdr: 0 }));
+      await loadRows();
       onSaved?.();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Ledger update failed');
@@ -3014,9 +3039,24 @@ function LedgerUpdateEditor({ user, onSaved }) {
       <button className="btn primary block" onClick={submit}>Submit</button>
       <div className="table-wrap update-table">
         <table>
-          <thead><tr><th>Date</th><th>CR/DR</th><th>Amount</th><th>Balance</th><th>Remarks</th><th>Delete</th></tr></thead>
+          <thead><tr><th>Date</th><th>CR/DR</th><th>Amount</th><th>Balance</th><th>Remarks</th><th>Status</th></tr></thead>
           <tbody>
-            <tr><td>{formatDate(new Date())}</td><td className={amount >= 0 ? 'positive' : 'negative'}>{amount >= 0 ? 'CR' : 'DR'}</td><td>{amount.toFixed(2)}</td><td>{Number(account.balance || 0).toFixed(2)}</td><td>{form.remarks}</td><td><button className="mini-action red" disabled>Delete</button></td></tr>
+            {loading && <tr><td colSpan="6">Loading ledger...</td></tr>}
+            {!loading && rows.map((row) => {
+              const isDebit = String(row.action || '').includes('WITHDRAW') || Number(row.balanceAfter) < Number(row.balanceBefore);
+              const signedAmount = isDebit ? -Math.abs(Number(row.amount || 0)) : Math.abs(Number(row.amount || 0));
+              return (
+                <tr key={row.id}>
+                  <td>{formatDate(row.date)}</td>
+                  <td className={isDebit ? 'negative' : 'positive'}>{isDebit ? 'DR' : 'CR'}</td>
+                  <td>{signedAmount.toFixed(2)}</td>
+                  <td>{row.balanceAfter === null || row.balanceAfter === undefined ? '-' : Number(row.balanceAfter).toFixed(2)}</td>
+                  <td>{row.message || row.action}</td>
+                  <td>{row.status || '-'}</td>
+                </tr>
+              );
+            })}
+            {!loading && !rows.length && <tr><td colSpan="6">No ledger records found</td></tr>}
           </tbody>
         </table>
       </div>
@@ -3143,6 +3183,21 @@ function MultipleSettingsEditor({ users, isBrokerUpdate }) {
 
 function NotificationEditor({ user, users = [], brokers = [] }) {
   const [form, setForm] = useState({ title: '', content: '' });
+  const send = async () => {
+    if (!form.content.trim()) return toast.error('Enter message content');
+    try {
+      await api.post('/web-admin/support-messages', {
+        userId: user.id,
+        title: form.title || 'Trade Axis Support',
+        content: form.content,
+      });
+      toast.success('Message sent');
+      setForm({ title: '', content: '' });
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Message send failed');
+    }
+  };
+
   return (
     <div className="admin-dark-panel">
       <div className="section-head"><div><h2>Send Notification</h2><p>Custom message to selected user.</p></div></div>
@@ -3153,7 +3208,7 @@ function NotificationEditor({ user, users = [], brokers = [] }) {
         <Stat label="Clients" value={users.filter((row) => row.role === 'user').length} />
         <Stat label="Brokers" value={brokers.length} />
       </div>
-      <button className="btn primary" onClick={() => toast.error('Notification endpoint is not enabled yet')}>Send Message</button>
+      <button className="btn primary" onClick={send}>Send Message</button>
     </div>
   );
 }
