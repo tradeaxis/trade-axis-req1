@@ -873,7 +873,7 @@ exports.addQuantity = async (req, res) => {
 exports.modifyPendingOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { price, stopLoss, takeProfit } = req.body;
+    const { price, quantity, stopLoss, takeProfit } = req.body;
     const userId = req.user.id;
 
     if (!orderId)
@@ -932,6 +932,13 @@ exports.modifyPendingOrder = async (req, res) => {
 
     const updates = { updated_at: new Date().toISOString() };
     if (price !== undefined && price !== null) updates.price = parseFloat(price);
+    if (quantity !== undefined && quantity !== null) {
+      const parsedQty = Number(quantity);
+      if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
+        return res.status(400).json({ success: false, message: 'Invalid quantity' });
+      }
+      updates.quantity = parsedQty;
+    }
     if (stopLoss !== undefined) updates.stop_loss = parseFloat(stopLoss) || 0;
     if (takeProfit !== undefined) updates.take_profit = parseFloat(takeProfit) || 0;
 

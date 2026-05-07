@@ -1382,6 +1382,7 @@ function Trade({ selectedAccount }) {
   const [expandedPositionId, setExpandedPositionId] = useState('');
   const [closeTarget, setCloseTarget] = useState(null);
   const [tradeView, setTradeView] = useState('positions');
+  const [modifyOrder, setModifyOrder] = useState(null);
 
   const accountId = selectedAccount?.id;
 
@@ -1481,6 +1482,17 @@ function Trade({ selectedAccount }) {
     }
   };
 
+  const modifyPendingOrder = async (order, values) => {
+    try {
+      const res = await api.put(`/trading/pending-order/${order.id}`, values);
+      toast.success(res.data?.message || 'Pending order modified');
+      setModifyOrder(null);
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Modify failed');
+    }
+  };
+
   const openPositionRows = positions.filter((position) => {
     const status = String(position.status || 'open').toLowerCase();
     return status === 'open' || status === 'active';
@@ -1516,6 +1528,8 @@ function Trade({ selectedAccount }) {
     existing.livePnl = Number(existing.livePnl || 0) + Number(position.livePnl || 0);
     existing.margin = Number(existing.margin || 0) + Number(position.margin || 0);
     existing.brokerage = Number(existing.brokerage || 0) + Number(position.brokerage || 0);
+    if (!Number(existing.stop_loss || 0) && Number(position.stop_loss || 0)) existing.stop_loss = position.stop_loss;
+    if (!Number(existing.take_profit || 0) && Number(position.take_profit || 0)) existing.take_profit = position.take_profit;
     return map;
   }, new Map()).values());
   const floatingPnl = groupedPositions.reduce((sum, row) => sum + Number(row.livePnl || 0), 0);
@@ -1555,6 +1569,8 @@ function Trade({ selectedAccount }) {
         <div className="position-card-list">
         {groupedPositions.map((position) => {
           const isExpanded = expandedPositionId === position.id;
+          const stopLoss = Number(position.stop_loss || 0);
+          const takeProfit = Number(position.take_profit || 0);
           return (
           <div className={`position-card ${isExpanded ? 'expanded' : ''}`} key={position.id}>
             <button
@@ -1575,10 +1591,18 @@ function Trade({ selectedAccount }) {
               <strong className={Number(position.livePnl || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.livePnl)}</strong>
             </button>
             {isExpanded && (
-              <div className="position-card-actions">
-                <button className="btn primary" onClick={() => { setOrderSymbol(position.symbol); setShowOrder(true); }}>New Order</button>
-                <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
-              </div>
+              <>
+                {(stopLoss > 0 || takeProfit > 0) && (
+                  <div className="position-protection-row">
+                    {stopLoss > 0 && <span>SL: {stopLoss.toFixed(2)}</span>}
+                    {takeProfit > 0 && <span>TP: {takeProfit.toFixed(2)}</span>}
+                  </div>
+                )}
+                <div className="position-card-actions">
+                  <button className="btn primary" onClick={() => { setOrderSymbol(position.symbol); setShowOrder(true); }}>New Order</button>
+                  <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
+                </div>
+              </>
             )}
           </div>
           );
@@ -1602,7 +1626,10 @@ function Trade({ selectedAccount }) {
                     <span>Qty: {order.quantity || '-'}</span>
                   </div>
                 </div>
-                <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
+                <div className="action-row">
+                  <button className="btn primary" onClick={() => setModifyOrder(order)}>Modify</button>
+                  <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
+                </div>
               </div>
             </div>
           ))}
@@ -1619,6 +1646,13 @@ function Trade({ selectedAccount }) {
           subtitle="Trade Axis order ticket"
           onClose={() => { setShowOrder(false); setOrderSymbol(''); }}
           onDone={() => { setShowOrder(false); setOrderSymbol(''); load(); }}
+        />
+      )}
+      {modifyOrder && (
+        <ModifyPendingOrderModal
+          order={modifyOrder}
+          onClose={() => setModifyOrder(null)}
+          onSubmit={(values) => modifyPendingOrder(modifyOrder, values)}
         />
       )}
       {closeTarget && (
@@ -1813,6 +1847,68 @@ function ClosePositionModal({ trade, onClose, onSubmit }) {
             <button className="btn danger" disabled={!qty || qty > totalQty} onClick={() => onSubmit(qty)}>
               {isPartial ? 'Partial Close' : 'Close Position'}
             </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ModifyPendingOrderModal({ order, onClose, onSubmit }) {
+  const [form, setForm] = useState({
+    quantity: String(order?.quantity || 1),
+    price: Number(order?.price || 0) ? Number(order.price).toFixed(2) : '',
+    stopLoss: Number(order?.stop_loss || 0) ? String(order.stop_loss) : '',
+    takeProfit: Number(order?.take_profit || 0) ? String(order.take_profit) : '',
+  });
+
+  const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const qty = Number(form.quantity || 0);
+  const price = Number(form.price || 0);
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal close-modal">
+        <div className="modal-head">
+          <div>
+            <strong>Modify Pending Order</strong>
+            <div className="meta">{order?.symbol} - {String(order?.order_type || '').replace('_', ' ')}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="close-preview">
+            <div><span>Side</span><strong className={order?.trade_type === 'buy' ? 'positive-blue' : 'negative'}>{String(order?.trade_type || '').toUpperCase()}</strong></div>
+            <div><span>Status</span><strong>{order?.status || 'pending'}</strong></div>
+            <div><span>Current Qty</span><strong>{order?.quantity || '-'}</strong></div>
+            <div><span>Order Price</span><strong>{Number(order?.price || 0).toFixed(2)}</strong></div>
+          </div>
+          <div className="grid-2">
+            <div className="field">
+              <label>Quantity</label>
+              <input className="input" type="number" min="1" value={form.quantity} onChange={(event) => update('quantity', event.target.value)} />
+            </div>
+            <div className="field">
+              <label>Price</label>
+              <input className="input" type="number" value={form.price} onChange={(event) => update('price', event.target.value)} />
+            </div>
+            <div className="field">
+              <label>Stop Loss</label>
+              <input className="input" type="number" value={form.stopLoss} onChange={(event) => update('stopLoss', event.target.value)} placeholder="0.00" />
+            </div>
+            <div className="field">
+              <label>Take Profit</label>
+              <input className="input" type="number" value={form.takeProfit} onChange={(event) => update('takeProfit', event.target.value)} placeholder="0.00" />
+            </div>
+          </div>
+          <div className="grid-2">
+            <button className="btn subtle" onClick={onClose}>Cancel</button>
+            <button className="btn primary" disabled={!qty || !price} onClick={() => onSubmit({
+              quantity: qty,
+              price,
+              stopLoss: Number(form.stopLoss || 0),
+              takeProfit: Number(form.takeProfit || 0),
+            })}>Modify Order</button>
           </div>
         </div>
       </div>

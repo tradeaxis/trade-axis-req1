@@ -1519,6 +1519,23 @@ tr:last-child td {
   padding: 0 14px 14px;
 }
 
+.position-protection-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.position-protection-row span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  font-weight: 750;
+}
+
 .compact-empty {
   min-height: 120px;
   border: 1px dashed var(--strong-border);
