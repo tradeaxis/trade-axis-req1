@@ -10,6 +10,65 @@ const {
 
 const isAdmin = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
 const isSubBroker = (req) => String(req.user?.role || '').toLowerCase() === 'sub_broker';
+const SUB_BROKER_PERMISSIONS_KEY = 'sub_broker_feature_permissions';
+const SUB_BROKER_FEATURES = [
+  'workspace',
+  'adminPositions',
+  'adminOrders',
+  'users',
+  'leverageMargin',
+  'autoClose',
+  'withdrawals',
+  'qrDeposits',
+  'settlement',
+  'marketHoliday',
+  'manualClose',
+  'scriptBan',
+  'kiteSetup',
+  'tradeOnBehalf',
+  'actionLedger',
+  'customerSupport',
+];
+
+const defaultSubBrokerPermissions = () => SUB_BROKER_FEATURES.reduce((acc, key) => {
+  acc[key] = true;
+  return acc;
+}, {});
+
+const normalizeSubBrokerPermissions = (value = {}) => {
+  const defaults = defaultSubBrokerPermissions();
+  return Object.keys(defaults).reduce((acc, key) => {
+    acc[key] = value?.[key] !== false;
+    return acc;
+  }, {});
+};
+
+const readJsonSetting = async (key, fallback = {}) => {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data?.value) return fallback;
+  if (typeof data.value === 'string') {
+    try {
+      return JSON.parse(data.value);
+    } catch {
+      return fallback;
+    }
+  }
+  return data.value;
+};
+
+const writeJsonSetting = async (key, value) => {
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert({ key, value: JSON.stringify(value), updated_at: updatedAt }, { onConflict: 'key' });
+  if (error) throw error;
+};
 
 const rememberPlainPassword = async (userId, plainPassword) => {
   if (!userId || !plainPassword) return;
@@ -731,7 +790,17 @@ exports.createUser = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Login ID already exists' });
     }
 
-    const ownerId = isSubBroker(req) ? req.user.id : (createdBy || null);
+    let ownerId = isSubBroker(req) ? req.user.id : (createdBy || null);
+    if (ownerId && isAdmin(req)) {
+      const { data: broker, error: brokerError } = await supabase
+        .from('users')
+        .select('id, role')
+        .eq('id', ownerId)
+        .eq('role', 'sub_broker')
+        .maybeSingle();
+      if (brokerError) throw brokerError;
+      if (!broker) return res.status(400).json({ success: false, message: 'Selected owner must be a sub broker' });
+    }
     const userEmail = email ? String(email).toLowerCase().trim() : `${cleanLoginId.toLowerCase()}@tradeaxis.local`;
     const hashedPassword = await bcrypt.hash(String(password || 'TA1234'), 12);
 
@@ -890,6 +959,46 @@ exports.saveAutoCloseSettings = async (req, res) => {
       .upsert({ key: 'web_auto_close_settings', value: JSON.stringify(payload), updated_at: payload.updatedAt }, { onConflict: 'key' });
     if (error) throw error;
     res.json({ success: true, data: payload, message: 'Auto close settings saved' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getSubBrokerFeaturePermissions = async (req, res) => {
+  try {
+    const brokerId = isAdmin(req) ? (req.query?.brokerId || req.user.id) : req.user.id;
+    const settings = await readJsonSetting(SUB_BROKER_PERMISSIONS_KEY, {});
+    const permissions = normalizeSubBrokerPermissions(settings?.[brokerId] || {});
+    res.json({ success: true, data: { brokerId, permissions, features: SUB_BROKER_FEATURES } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveSubBrokerFeaturePermissions = async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Only admin can update sub broker permissions' });
+    }
+
+    const { brokerId, permissions = {} } = req.body || {};
+    if (!brokerId) return res.status(400).json({ success: false, message: 'Sub broker is required' });
+
+    const { data: broker, error: brokerError } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('id', brokerId)
+      .eq('role', 'sub_broker')
+      .maybeSingle();
+
+    if (brokerError) throw brokerError;
+    if (!broker) return res.status(404).json({ success: false, message: 'Sub broker not found' });
+
+    const settings = await readJsonSetting(SUB_BROKER_PERMISSIONS_KEY, {});
+    settings[brokerId] = normalizeSubBrokerPermissions(permissions);
+    await writeJsonSetting(SUB_BROKER_PERMISSIONS_KEY, settings);
+
+    res.json({ success: true, data: { brokerId, permissions: settings[brokerId] }, message: 'Sub broker permissions saved' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

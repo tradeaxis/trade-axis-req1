@@ -83,6 +83,19 @@ const adminTabs = [
   { id: 'subBrokers', label: 'Sub Broker Management', icon: UserCog, adminOnly: true },
 ];
 
+const subBrokerFeatureTabs = adminTabs.filter((tab) => !tab.adminOnly);
+const defaultSubBrokerPermissions = subBrokerFeatureTabs.reduce((acc, tab) => {
+  acc[tab.id] = true;
+  return acc;
+}, {});
+
+const normalizeSubBrokerPermissions = (permissions = {}) => (
+  subBrokerFeatureTabs.reduce((acc, tab) => {
+    acc[tab.id] = permissions?.[tab.id] !== false;
+    return acc;
+  }, {})
+);
+
 const roleLabel = (role) => {
   if (role === 'admin') return 'Admin';
   if (role === 'sub_broker') return 'Sub Broker';
@@ -541,6 +554,7 @@ function App() {
   const [savedSessions, setSavedSessions] = useState(readSavedSessions());
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem(themeStorageKey) || 'light');
+  const [subBrokerPermissions, setSubBrokerPermissions] = useState(defaultSubBrokerPermissions);
 
   const user = auth?.user || null;
   const role = String(user?.role || 'user').toLowerCase();
@@ -558,6 +572,26 @@ function App() {
   }, [theme]);
 
   const toggleTheme = () => setTheme((current) => (current === 'dark' ? 'light' : 'dark'));
+
+  useEffect(() => {
+    if (role !== 'sub_broker') {
+      setSubBrokerPermissions(defaultSubBrokerPermissions);
+      return;
+    }
+
+    let mounted = true;
+    api.get('/web-admin/sub-broker-permissions')
+      .then((res) => {
+        if (mounted) setSubBrokerPermissions(normalizeSubBrokerPermissions(res.data?.data?.permissions));
+      })
+      .catch(() => {
+        if (mounted) setSubBrokerPermissions(defaultSubBrokerPermissions);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [role, user?.id]);
 
   const applySession = (session) => {
     const nextAccountId = session?.selectedAccountId || session?.accounts?.[0]?.id || '';
@@ -646,10 +680,15 @@ function App() {
   if (!auth) return <Login onLogin={handleLogin} />;
 
   const isOperator = role === 'admin' || role === 'sub_broker';
+  const operatorTabs = adminTabs.filter((tab) => {
+    if (tab.adminOnly && role !== 'admin') return false;
+    if (role !== 'sub_broker') return true;
+    return subBrokerPermissions?.[tab.id] !== false;
+  });
   const navTabs = isOperator
-    ? [...adminTabs.filter((tab) => !tab.adminOnly || role === 'admin'), ...commonTabs]
+    ? [...operatorTabs, ...commonTabs]
     : commonTabs;
-  const fallbackTab = isOperator ? 'adminPositions' : 'trade';
+  const fallbackTab = isOperator ? operatorTabs[0]?.id || 'trade' : 'trade';
   const safeActive = navTabs.some((tab) => tab.id === active) ? active : fallbackTab;
   const renderedActive = safeActive === 'workspace' ? 'trade' : safeActive;
   const activeTab = navTabs.find((tab) => tab.id === safeActive) || navTabs[0];
@@ -671,8 +710,7 @@ function App() {
           {(role === 'admin' || role === 'sub_broker') && (
             <>
               <div className="nav-section-title">Operations</div>
-              {adminTabs
-                .filter((tab) => !tab.adminOnly || role === 'admin')
+              {operatorTabs
                 .map((tab) => (
                   <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => { setActive(tab.id); setSidebarOpen(false); }} />
                 ))}
@@ -724,8 +762,7 @@ function App() {
 
         {isOperator && (
           <nav className="operator-top-nav">
-            {adminTabs
-              .filter((tab) => !tab.adminOnly || role === 'admin')
+            {operatorTabs
               .map((tab) => (
                 <NavButton key={tab.id} tab={tab} active={safeActive === tab.id} onClick={() => setActive(tab.id)} />
               ))}
@@ -755,12 +792,12 @@ function App() {
               onToggleTheme={toggleTheme}
             />
           )}
-          {renderedActive === 'users' && <UsersPanel mode="user" role={role} />}
+          {renderedActive === 'users' && <UsersPanel mode="user" role={role} currentUser={user} />}
           {renderedActive === 'adminPositions' && <AdminPositionsPanel />}
           {renderedActive === 'adminOrders' && <AdminOrdersPanel />}
           {renderedActive === 'leverageMargin' && <LeverageMarginPanel />}
           {renderedActive === 'autoClose' && <AutoClosePanel />}
-          {renderedActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} />}
+          {renderedActive === 'subBrokers' && <UsersPanel mode="sub_broker" role={role} currentUser={user} />}
           {renderedActive === 'withdrawals' && <TransactionsPanel type="withdrawal" />}
           {renderedActive === 'qrDeposits' && <QrDepositsPanel />}
           {renderedActive === 'settlement' && <SettlementPanel />}
@@ -2411,7 +2448,7 @@ function ChangePasswordForm() {
   );
 }
 
-function UsersPanel({ mode, role }) {
+function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
   const [users, setUsers] = useState([]);
   const [allUsers, setAllUsers] = useState([]);
   const [q, setQ] = useState('');
@@ -2423,8 +2460,13 @@ function UsersPanel({ mode, role }) {
     const res = await api.get('/web-admin/users', { params: { q, role: 'all' } });
     const data = res.data?.data || [];
     setAllUsers(data);
-    setUsers(data.filter((user) => mode === 'sub_broker' ? user.role === 'sub_broker' : user.role !== 'sub_broker' && user.role !== 'admin'));
-  }, [q, mode]);
+    setUsers(data.filter((user) => {
+      if (mode === 'sub_broker') return user.role === 'sub_broker';
+      if (brokerScope?.id) return user.role === 'user' && user.created_by === brokerScope.id;
+      if (role === 'admin') return user.role === 'user' && !user.created_by;
+      return user.role === 'user';
+    }));
+  }, [q, mode, role, brokerScope?.id]);
 
   useEffect(() => {
     load().catch(() => toast.error('Failed to load users'));
@@ -2455,6 +2497,12 @@ function UsersPanel({ mode, role }) {
           <button className="btn primary" onClick={() => setShowCreate(true)}><Plus size={16} />Create {mode === 'sub_broker' ? 'Sub Broker' : 'User'}</button>
         </div>
       </div>
+      {brokerScope && (
+        <div className="scope-banner">
+          Managing clients under <strong>{getUserName(brokerScope)}</strong>
+          <span>{brokerScope.login_id || brokerScope.email}</span>
+        </div>
+      )}
       <UsersTable
         users={userFilter ? users.filter((user) => user.id === userFilter) : users}
         brokers={allUsers.filter((user) => user.role === 'sub_broker')}
@@ -2462,11 +2510,99 @@ function UsersPanel({ mode, role }) {
         onRefresh={load}
         onOpenDialog={setDialog}
       />
-      {showCreate && <CreateUserModal mode={mode} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
+      {showCreate && <CreateUserModal mode={mode} brokerScope={brokerScope} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
       {dialog?.type === 'positions' && <UserPositionsModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'brokerage' && <BrokerageModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} onSaved={load} />}
       {dialog?.type === 'update' && <UserUpdateModal mode={mode} user={dialog.user} users={allUsers} brokers={allUsers.filter((user) => user.role === 'sub_broker')} onClose={() => setDialog(null)} onSaved={load} />}
+      {dialog?.type === 'brokerUsers' && <SubBrokerUsersModal broker={dialog.user} role={role} currentUser={currentUser} onClose={() => setDialog(null)} />}
+      {dialog?.type === 'permissions' && <SubBrokerPermissionsModal broker={dialog.user} onClose={() => setDialog(null)} />}
+    </div>
+  );
+}
+
+function SubBrokerUsersModal({ broker, role, currentUser, onClose }) {
+  return (
+    <div className="modal-backdrop">
+      <div className="modal full-screen-modal">
+        <div className="modal-head">
+          <div>
+            <strong>User Management - {getUserName(broker)}</strong>
+            <p>{broker.login_id || broker.email} sub broker clients</p>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <UsersPanel mode="user" role={role} currentUser={currentUser} brokerScope={broker} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SubBrokerPermissionsModal({ broker, onClose }) {
+  const [permissions, setPermissions] = useState(defaultSubBrokerPermissions);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    api.get('/web-admin/sub-broker-permissions', { params: { brokerId: broker.id } })
+      .then((res) => {
+        if (mounted) setPermissions(normalizeSubBrokerPermissions(res.data?.data?.permissions));
+      })
+      .catch(() => toast.error('Failed to load permissions'))
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [broker.id]);
+
+  const updatePermission = (key, checked) => {
+    setPermissions((prev) => ({ ...prev, [key]: checked }));
+  };
+
+  const save = async () => {
+    try {
+      const res = await api.post('/web-admin/sub-broker-permissions', { brokerId: broker.id, permissions });
+      toast.success(res.data?.message || 'Permissions saved');
+      onClose();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Save failed');
+    }
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal modal-wide">
+        <div className="modal-head">
+          <div>
+            <strong>Feature Access - {getUserName(broker)}</strong>
+            <p>{broker.login_id || broker.email}</p>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="permission-grid">
+            {subBrokerFeatureTabs.map((tab) => (
+              <label className="permission-card" key={tab.id}>
+                <span>
+                  <strong>{tab.label}</strong>
+                  <small>{permissions[tab.id] === false ? 'Disabled for this sub broker' : 'Enabled for this sub broker'}</small>
+                </span>
+                <input type="checkbox" checked={permissions[tab.id] !== false} onChange={(event) => updatePermission(tab.id, event.target.checked)} />
+              </label>
+            ))}
+          </div>
+          <div className="modal-actions">
+            <button className="btn subtle" onClick={onClose}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={loading}>Save Permissions</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2556,6 +2692,12 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
               <td>{formatDate(user.created_at)}</td>
               <td>
                 <div className="action-pair">
+                  {user.role === 'sub_broker' && (
+                    <>
+                      <button className="btn subtle" onClick={() => onOpenDialog({ type: 'brokerUsers', user })}>User Management</button>
+                      <button className="btn subtle" onClick={() => onOpenDialog({ type: 'permissions', user })}>Permissions</button>
+                    </>
+                  )}
                   <button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button>
                   {(user.accounts || []).some((account) => account.is_demo) && <button className="btn subtle" onClick={() => deleteDemoAccount(user)}>Delete Demo</button>}
                   <button className="btn danger" onClick={() => deleteUser(user)}>Delete</button>
@@ -2570,7 +2712,7 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
   );
 }
 
-function CreateUserModal({ mode, onClose, onCreated }) {
+function CreateUserModal({ mode, brokerScope = null, onClose, onCreated }) {
   const [form, setForm] = useState({
     loginId: '',
     password: 'TA1234',
@@ -2589,7 +2731,7 @@ function CreateUserModal({ mode, onClose, onCreated }) {
 
   const create = async () => {
     try {
-      const res = await api.post('/web-admin/users', form);
+      const res = await api.post('/web-admin/users', brokerScope?.id ? { ...form, createdBy: brokerScope.id } : form);
       toast.success(res.data?.message || 'Created');
       onCreated();
     } catch (error) {

@@ -1615,6 +1615,53 @@ tr:last-child td {
   box-shadow: var(--shadow);
 }
 
+.modal.modal-wide {
+  width: min(960px, calc(100vw - 24px));
+}
+
+.scope-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.scope-banner span {
+  color: var(--muted);
+}
+
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.permission-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.permission-card span {
+  display: grid;
+  gap: 3px;
+}
+
+.permission-card small {
+  color: var(--muted);
+}
+
 .modal-head {
   height: 58px;
   border-bottom: 1px solid var(--border);
