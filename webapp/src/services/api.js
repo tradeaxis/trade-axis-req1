@@ -15,11 +15,6 @@ api.interceptors.request.use((config) => {
   }
   if (String(config.method || 'get').toLowerCase() === 'get') {
     config.params = { ...(config.params || {}), _ts: Date.now() };
-    config.headers = {
-      ...(config.headers || {}),
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-    };
   }
   return config;
 });
