@@ -87,13 +87,16 @@ const subBrokerFeatureTabs = adminTabs.filter((tab) => !tab.adminOnly);
 const defaultSubBrokerPermissions = subBrokerFeatureTabs.reduce((acc, tab) => {
   acc[tab.id] = true;
   return acc;
-}, {});
+}, { usersUpdate: true, usersDelete: true });
 
 const normalizeSubBrokerPermissions = (permissions = {}) => (
   subBrokerFeatureTabs.reduce((acc, tab) => {
     acc[tab.id] = permissions?.[tab.id] !== false;
     return acc;
-  }, {})
+  }, {
+    usersUpdate: permissions?.usersUpdate !== false,
+    usersDelete: permissions?.usersDelete !== false,
+  })
 );
 
 const roleLabel = (role) => {
@@ -792,7 +795,7 @@ function App() {
               onToggleTheme={toggleTheme}
             />
           )}
-          {renderedActive === 'users' && <UsersPanel mode="user" role={role} currentUser={user} />}
+          {renderedActive === 'users' && <UsersPanel mode="user" role={role} currentUser={user} permissions={subBrokerPermissions} />}
           {renderedActive === 'adminPositions' && <AdminPositionsPanel />}
           {renderedActive === 'adminOrders' && <AdminOrdersPanel />}
           {renderedActive === 'leverageMargin' && <LeverageMarginPanel />}
@@ -1997,6 +2000,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
       const historyRows = historyRes.data?.data || [];
       const pendingHistoryRows = orderRes.data?.data || [];
       const pendingRows = pendingRes.data?.data || [];
+      const rawDeals = dealsRes.data?.data?.deals || [];
       const executedRows = historyRows.map((trade) => ({
         ...trade,
         order_type: 'market',
@@ -2008,18 +2012,20 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
       }));
       const cutoff = getPeriodCutoff(period);
       const isInPeriod = (row) => {
-        const value = row.updated_at || row.created_at || row.executed_at || row.open_time || row.close_time;
+        const value = row.close_time || row.closed_at || row.exit_time || row.executed_at || row.time || row.updated_at || row.created_at || row.open_time || row.date;
         return value ? new Date(value) >= cutoff : true;
       };
+      const filteredHistoryRows = historyRows.filter(isInPeriod);
+      const filteredDeals = rawDeals.filter(isInPeriod);
       const orderMap = new Map();
       [...pendingRows, ...pendingHistoryRows, ...executedRows].forEach((row) => {
         if (!isInPeriod(row)) return;
         orderMap.set(`${row.id}-${row.status || row.order_status || ''}`, row);
       });
-      setRows(historyRows);
+      setRows(filteredHistoryRows);
       setOrderRows([...orderMap.values()].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)));
-      setDeals(dealsRes.data?.data?.deals || []);
-      setDealsSummary(dealsRes.data?.data?.summary || null);
+      setDeals(filteredDeals);
+      setDealsSummary(buildFilteredDealsSummary(filteredDeals, dealsRes.data?.data?.summary, selectedAccount));
     } catch {
       toast.error('Failed to load history');
     } finally {
@@ -2105,7 +2111,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
                   <div>
                     <span>Net</span>
                     <strong>{Number(trade.net_quantity || 0)}</strong>
-                    <em>Comm {brokerage.toFixed(2)}</em>
+                    <em className="commission-muted">Commission {brokerage.toFixed(2)}</em>
                   </div>
                   <div className="history-position-side">
                     <span>{isBuy ? 'Long' : 'Short'}</span>
@@ -2511,7 +2517,7 @@ function ChangePasswordForm() {
   );
 }
 
-function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
+function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions = defaultSubBrokerPermissions }) {
   const [users, setUsers] = useState([]);
   const [allUsers, setAllUsers] = useState([]);
   const [q, setQ] = useState('');
@@ -2593,6 +2599,8 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
         users={displayedUsers}
         brokers={allUsers.filter((user) => user.role === 'sub_broker')}
         showBroker={role === 'admin' && mode !== 'sub_broker'}
+        canUpdate={role !== 'sub_broker' || permissions.usersUpdate !== false}
+        canDelete={role !== 'sub_broker' || permissions.usersDelete !== false}
         onRefresh={load}
         onOpenDialog={setDialog}
       />
@@ -2658,6 +2666,7 @@ function SubBrokerUsersModal({ broker, role, currentUser, onClose }) {
 
 function SubBrokerPermissionsModal({ broker, onClose }) {
   const [permissions, setPermissions] = useState(defaultSubBrokerPermissions);
+  const [expandedPermission, setExpandedPermission] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -2703,15 +2712,48 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
         </div>
         <div className="modal-body">
           <div className="permission-grid">
-            {subBrokerFeatureTabs.map((tab) => (
-              <label className="permission-card" key={tab.id}>
-                <span>
-                  <strong>{tab.label}</strong>
-                  <small>{permissions[tab.id] === false ? 'Disabled for this sub broker' : 'Enabled for this sub broker'}</small>
-                </span>
-                <input type="checkbox" checked={permissions[tab.id] !== false} onChange={(event) => updatePermission(tab.id, event.target.checked)} />
-              </label>
-            ))}
+            {subBrokerFeatureTabs.map((tab) => {
+              if (tab.id === 'users') {
+                const expanded = expandedPermission === 'users';
+                return (
+                  <div className={`permission-card permission-card-expand ${expanded ? 'expanded' : ''}`} key={tab.id}>
+                    <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'users')}>
+                      <span>
+                        <strong>{tab.label}</strong>
+                        <small>Expand to control the tab, Update button, and Delete button.</small>
+                      </span>
+                      <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
+                    </button>
+                    {expanded && (
+                      <div className="permission-sub-options">
+                        <label>
+                          <span>Complete User Management</span>
+                          <input type="checkbox" checked={permissions.users !== false} onChange={(event) => updatePermission('users', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Update Button</span>
+                          <input type="checkbox" checked={permissions.usersUpdate !== false} onChange={(event) => updatePermission('usersUpdate', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Delete Button</span>
+                          <input type="checkbox" checked={permissions.usersDelete !== false} onChange={(event) => updatePermission('usersDelete', event.target.checked)} />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              return (
+                <label className="permission-card" key={tab.id}>
+                  <span>
+                    <strong>{tab.label}</strong>
+                    <small>{permissions[tab.id] === false ? 'Disabled for this sub broker' : 'Enabled for this sub broker'}</small>
+                  </span>
+                  <input type="checkbox" checked={permissions[tab.id] !== false} onChange={(event) => updatePermission(tab.id, event.target.checked)} />
+                </label>
+              );
+            })}
           </div>
           <div className="modal-actions">
             <button className="btn subtle" onClick={onClose}>Cancel</button>
@@ -2723,7 +2765,7 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
   );
 }
 
-function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }) {
+function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
   const updateBroker = async (userId, brokerId) => {
     try {
       await api.post('/web-admin/assign-broker', { userId, brokerId: brokerId || null });
@@ -2814,9 +2856,9 @@ function UsersTable({ users, brokers = [], showBroker, onRefresh, onOpenDialog }
                       <button className="btn subtle" onClick={() => onOpenDialog({ type: 'permissions', user })}>Permissions</button>
                     </>
                   )}
-                  <button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button>
-                  {(user.accounts || []).some((account) => account.is_demo) && <button className="btn subtle" onClick={() => deleteDemoAccount(user)}>Delete Demo</button>}
-                  <button className="btn danger" onClick={() => deleteUser(user)}>Delete</button>
+                  {canUpdate && <button className="btn primary" onClick={() => onOpenDialog({ type: 'update', user })}>Update</button>}
+                  {canDelete && (user.accounts || []).some((account) => account.is_demo) && <button className="btn subtle" onClick={() => deleteDemoAccount(user)}>Delete Demo</button>}
+                  {canDelete && <button className="btn danger" onClick={() => deleteUser(user)}>Delete</button>}
                 </div>
               </td>
             </tr>
@@ -3736,6 +3778,32 @@ function getPeriodCutoff(period) {
   else if (period === '3months') date.setMonth(date.getMonth() - 3);
   else date.setMonth(date.getMonth() - 1);
   return date;
+}
+
+function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = {}) {
+  return deals.reduce((summary, deal) => {
+    const type = String(deal.type || deal.transaction_type || deal.side || deal.trade_type || '').toLowerCase();
+    const description = String(deal.description || deal.remarks || '').toLowerCase();
+    const amount = Number(deal.amount ?? deal.profit ?? 0);
+    const commission = Number(deal.commission ?? deal.brokerage ?? 0);
+
+    if (type.includes('deposit') || description.includes('deposit')) summary.totalDeposits += Math.abs(amount);
+    else if (type.includes('withdraw') || description.includes('withdraw')) summary.totalWithdrawals += Math.abs(amount);
+    else if (amount >= 0) summary.totalProfit += amount;
+    else summary.totalLoss += Math.abs(amount);
+
+    summary.totalCommission += commission;
+    if (description.includes('settlement') || type.includes('settlement')) summary.balanceSettled += amount;
+    return summary;
+  }, {
+    totalProfit: 0,
+    totalLoss: 0,
+    totalDeposits: 0,
+    totalWithdrawals: 0,
+    totalCommission: 0,
+    balanceSettled: Number(fallback?.balanceSettled || 0),
+    balance: Number(selectedAccount?.balance ?? fallback?.balance ?? 0),
+  });
 }
 
 function TransactionsPanel({ type }) {

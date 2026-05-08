@@ -16,6 +16,8 @@ const SUB_BROKER_FEATURES = [
   'adminPositions',
   'adminOrders',
   'users',
+  'usersUpdate',
+  'usersDelete',
   'leverageMargin',
   'autoClose',
   'withdrawals',
