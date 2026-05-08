@@ -1636,6 +1636,38 @@ tr:last-child td {
   color: var(--muted);
 }
 
+.management-totals-strip {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.management-totals-strip div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.management-totals-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.management-totals-strip strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .permission-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -2171,6 +2203,11 @@ tr:last-child td {
     font-size: 15px;
   }
 
+  .management-totals-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
   .deal-price strong {
     font-size: 19px;
   }
@@ -2353,6 +2390,130 @@ tr:last-child td {
 
 .history-panel table {
   min-width: 680px;
+}
+
+.history-position-list {
+  display: grid;
+}
+
+.history-position-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  background: var(--surface-2);
+}
+
+.history-position-summary div {
+  min-width: 0;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.history-position-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-position-summary strong {
+  font-size: 13px;
+}
+
+.history-position-row {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0 6px;
+}
+
+.history-position-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.history-position-head > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-position-head strong {
+  color: var(--ink);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.history-position-head span {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.history-position-head > div:last-child {
+  font-size: 18px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.history-position-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 3px;
+  padding: 5px 6px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.history-position-grid span {
+  display: block;
+  color: #d9a728;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.history-position-grid strong,
+.history-position-grid em {
+  display: block;
+  color: var(--ink);
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.history-position-grid em {
+  color: #d9a728;
+}
+
+.history-position-side {
+  display: grid;
+  justify-items: end;
+  align-content: start;
+}
+
+.history-position-side span {
+  color: var(--muted);
+}
+
+.history-position-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-position-foot button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  font: inherit;
 }
 
 /* Global density pass: keep all panels clear without allowing headers and cards to consume the viewport. */

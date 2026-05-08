@@ -2037,34 +2037,57 @@ function TradeHistory({ selectedAccount }) {
       </div>
 
       {view === 'positions' && (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Script</th><th>Side</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th>
-                <th>Entry Price</th><th>Exit Price</th><th>Stop Loss</th><th>Take Profit</th>
-                <th>Brokerage</th><th>P&L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((trade) => (
-                <tr key={trade.id}>
-                  <td><strong>{trade.symbol}</strong><div className="meta">{trade.exchange || trade.category || '-'}</div></td>
-                  <td><span className={`pill ${trade.trade_type === 'buy' ? 'teal' : 'red'}`}>{trade.trade_type}</span></td>
-                  <td>{trade.quantity}</td>
-                  <td>{formatDate(trade.open_time || trade.created_at)}</td>
-                  <td>{formatDate(trade.close_time || trade.updated_at)}</td>
-                  <td>{Number(trade.open_price || 0).toFixed(2)}</td>
-                  <td>{Number(trade.close_price || 0).toFixed(2)}</td>
-                  <td>{Number(trade.stop_loss || 0) > 0 ? Number(trade.stop_loss).toFixed(2) : '-'}</td>
-                  <td>{Number(trade.take_profit || 0) > 0 ? Number(trade.take_profit).toFixed(2) : '-'}</td>
-                  <td>{formatMoney(trade.brokerage)}</td>
-                  <td className={Number(trade.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(trade.profit)}</td>
-                </tr>
-              ))}
-              {!rows.length && <tr><td colSpan="11">No closed positions found</td></tr>}
-            </tbody>
-          </table>
+        <div className="history-position-list">
+          <div className="history-position-summary">
+            <div><span>Trades</span><strong>{rows.length}</strong></div>
+            <div><span>Total Buy</span><strong className="positive-blue">{rows.filter((trade) => trade.trade_type === 'buy').reduce((sum, trade) => sum + Number(trade.quantity || 0), 0)}</strong></div>
+            <div><span>Total Sell</span><strong className="negative">{rows.filter((trade) => trade.trade_type === 'sell').reduce((sum, trade) => sum + Number(trade.quantity || 0), 0)}</strong></div>
+            <div><span>Net P&L</span><strong className={rows.reduce((sum, trade) => sum + Number(trade.profit || 0), 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(rows.reduce((sum, trade) => sum + Number(trade.profit || 0), 0))}</strong></div>
+          </div>
+          {rows.map((trade) => {
+            const pnl = Number(trade.profit || 0);
+            const qty = Number(trade.quantity || 0);
+            const openPrice = Number(trade.open_price || 0);
+            const closePrice = Number(trade.close_price || 0);
+            const brokerage = Number(trade.brokerage || trade.buy_brokerage || 0);
+            const isBuy = trade.trade_type === 'buy';
+            return (
+              <div className="history-position-row" key={trade.id}>
+                <div className="history-position-head">
+                  <div>
+                    <strong>{trade.symbol}</strong>
+                    <span>{trade.close_count || 1} close</span>
+                  </div>
+                  <div className={pnl >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(pnl)}</div>
+                </div>
+                <div className="history-position-grid">
+                  <div>
+                    <span>Buy</span>
+                    <strong>{isBuy ? qty : qty}</strong>
+                    <em>@ {(isBuy ? openPrice : closePrice).toFixed(2)}</em>
+                  </div>
+                  <div>
+                    <span>Sell</span>
+                    <strong>{isBuy ? qty : qty}</strong>
+                    <em>@ {(isBuy ? closePrice : openPrice).toFixed(2)}</em>
+                  </div>
+                  <div>
+                    <span>Net</span>
+                    <strong>{Number(trade.net_quantity || 0)}</strong>
+                    <em>Comm {brokerage.toFixed(2)}</em>
+                  </div>
+                  <div className="history-position-side">
+                    <span>{isBuy ? 'Long' : 'Short'}</span>
+                  </div>
+                </div>
+                <div className="history-position-foot">
+                  <span>{formatDate(trade.close_time || trade.updated_at || trade.open_time || trade.created_at)}</span>
+                  <button type="button">Show breakdown</button>
+                </div>
+              </div>
+            );
+          })}
+          {!rows.length && <div className="empty-state compact-empty"><span>No closed positions found</span></div>}
         </div>
       )}
 
@@ -2479,6 +2502,28 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
     return () => clearInterval(interval);
   }, [load]);
 
+  const displayedUsers = userFilter ? users.filter((user) => user.id === userFilter) : users;
+  const totals = displayedUsers.reduce((acc, user) => {
+    const metrics = getAccountMetrics(getDisplayAccount(user.accounts));
+    acc.balance += metrics.balance;
+    acc.equity += metrics.equity;
+    acc.openPnl += metrics.totalDrCr;
+    acc.closedPnl += metrics.credit;
+    acc.totalDrCr += metrics.totalDrCr;
+    acc.margin += metrics.margin;
+    acc.freeMargin += metrics.freeMargin;
+    return acc;
+  }, {
+    balance: 0,
+    equity: 0,
+    openPnl: 0,
+    closedPnl: 0,
+    totalDrCr: 0,
+    margin: 0,
+    freeMargin: 0,
+  });
+  totals.marginLevel = totals.margin > 0 ? (totals.equity / totals.margin) * 100 : 0;
+
   return (
     <div className="card pad">
       <div className="toolbar">
@@ -2503,8 +2548,9 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
           <span>{brokerScope.login_id || brokerScope.email}</span>
         </div>
       )}
+      <UserManagementTotals totals={totals} />
       <UsersTable
-        users={userFilter ? users.filter((user) => user.id === userFilter) : users}
+        users={displayedUsers}
         brokers={allUsers.filter((user) => user.role === 'sub_broker')}
         showBroker={role === 'admin' && mode !== 'sub_broker'}
         onRefresh={load}
@@ -2517,6 +2563,36 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
       {dialog?.type === 'update' && <UserUpdateModal mode={mode} user={dialog.user} users={allUsers} brokers={allUsers.filter((user) => user.role === 'sub_broker')} onClose={() => setDialog(null)} onSaved={load} />}
       {dialog?.type === 'brokerUsers' && <SubBrokerUsersModal broker={dialog.user} role={role} currentUser={currentUser} onClose={() => setDialog(null)} />}
       {dialog?.type === 'permissions' && <SubBrokerPermissionsModal broker={dialog.user} onClose={() => setDialog(null)} />}
+    </div>
+  );
+}
+
+function UserManagementTotals({ totals }) {
+  const items = [
+    ['Ledger Balance', totals.balance],
+    ['Equity', totals.equity],
+    ['Open P&L', totals.openPnl, true],
+    ['Closed P&L', totals.closedPnl, true],
+    ['Total Dr/Cr', totals.totalDrCr, true],
+    ['Margin Used', totals.margin],
+    ['Margin Lvl %', totals.marginLevel, true, '%'],
+    ['Margin Available', totals.freeMargin],
+  ];
+
+  return (
+    <div className="management-totals-strip">
+      {items.map(([label, value, signed, suffix]) => {
+        const numeric = Number(value || 0);
+        const text = suffix === '%'
+          ? `${numeric.toFixed(2)}%`
+          : numeric.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+        return (
+          <div key={label}>
+            <span>{label}</span>
+            <strong className={signed ? (numeric >= 0 ? 'positive-blue' : 'negative') : ''}>{text}</strong>
+          </div>
+        );
+      })}
     </div>
   );
 }
