@@ -1456,6 +1456,12 @@ tr:last-child td {
   gap: 8px;
 }
 
+.trade-refresh-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
 .trade-action-bar {
   grid-template-columns: minmax(0, 1fr) auto auto;
 }

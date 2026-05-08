@@ -770,10 +770,10 @@ function App() {
         )}
 
         <section className="content">
-          {renderedActive === 'quotes' && <Quotes selectedAccount={selectedAccount} />}
+          {renderedActive === 'quotes' && <Quotes selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
           {renderedActive === 'chart' && <ChartWorkspace selectedAccount={selectedAccount} />}
-          {renderedActive === 'trade' && <Trade selectedAccount={selectedAccount} />}
-          {renderedActive === 'history' && <TradeHistory selectedAccount={selectedAccount} />}
+          {renderedActive === 'trade' && <Trade selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
+          {renderedActive === 'history' && <TradeHistory selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
           {renderedActive === 'messages' && <Messages user={user} />}
           {renderedActive === 'wallet' && <WalletPanel selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
           {renderedActive === 'settings' && (
@@ -1004,7 +1004,7 @@ function Stat({ label, value, tone = '' }) {
   );
 }
 
-function Quotes({ selectedAccount }) {
+function Quotes({ selectedAccount, refreshAuth }) {
   const [symbols, setSymbols] = useState([]);
   const [watchlists, setWatchlists] = useState([]);
   const [watchlistSymbols, setWatchlistSymbols] = useState([]);
@@ -1070,6 +1070,16 @@ function Quotes({ selectedAccount }) {
     const interval = setInterval(() => setStaleTick((value) => value + 1), 3000);
     return () => clearInterval(interval);
   }, []);
+
+  const refreshQuotes = async () => {
+    await Promise.all([
+      load(),
+      loadWatchlists(),
+      loadWatchlistSymbols(),
+      refreshAuth?.(),
+    ]);
+    toast.success('Quotes refreshed');
+  };
 
   const createWatchlist = async () => {
     const name = newWatchlistName.trim();
@@ -1148,7 +1158,7 @@ function Quotes({ selectedAccount }) {
             </div>
           </div>
         </div>
-        <button className="btn subtle" onClick={load} disabled={loading}>
+        <button type="button" className="btn subtle" onClick={refreshQuotes} disabled={loading}>
           <RefreshCw size={16} />
           Refresh
         </button>
@@ -1409,7 +1419,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol =
   );
 }
 
-function Trade({ selectedAccount }) {
+function Trade({ selectedAccount, refreshAuth }) {
   const [symbols, setSymbols] = useState([]);
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -1508,6 +1518,15 @@ function Trade({ selectedAccount }) {
     }
   };
 
+  const refreshTrade = async () => {
+    try {
+      await Promise.all([load(), refreshAuth?.()]);
+      toast.success('Trade refreshed');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Refresh failed');
+    }
+  };
+
   const cancelOrder = async (orderId) => {
     if (!window.confirm('Cancel this pending order?')) return;
     try {
@@ -1598,8 +1617,11 @@ function Trade({ selectedAccount }) {
       </div>
 
       <div className="trade-position-tabs">
-        <button className={`tab ${tradeView === 'positions' ? 'active' : ''}`} onClick={() => setTradeView('positions')}>Positions ({groupedPositions.length})</button>
-        <button className={`tab ${tradeView === 'pending' ? 'active' : ''}`} onClick={() => setTradeView('pending')}>Pending ({orders.length})</button>
+        <button type="button" className={`tab ${tradeView === 'positions' ? 'active' : ''}`} onClick={() => setTradeView('positions')}>Positions ({groupedPositions.length})</button>
+        <button type="button" className={`tab ${tradeView === 'pending' ? 'active' : ''}`} onClick={() => setTradeView('pending')}>Pending ({orders.length})</button>
+      </div>
+      <div className="trade-refresh-row">
+        <button type="button" className="btn subtle" onClick={refreshTrade}><RefreshCw size={16} />Refresh</button>
       </div>
 
       {tradeView === 'positions' && (
@@ -1735,7 +1757,7 @@ function Trade({ selectedAccount }) {
             <p>Monitor and close active trades.</p>
           </div>
           <div className="right">
-            <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+            <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
             <button className="btn danger" onClick={closeAll} disabled={!positions.length}>Close All</button>
           </div>
         </div>
@@ -1953,7 +1975,7 @@ function ModifyPendingOrderModal({ order, onClose, onSubmit }) {
   );
 }
 
-function TradeHistory({ selectedAccount }) {
+function TradeHistory({ selectedAccount, refreshAuth }) {
   const [rows, setRows] = useState([]);
   const [orderRows, setOrderRows] = useState([]);
   const [deals, setDeals] = useState([]);
@@ -2009,6 +2031,15 @@ function TradeHistory({ selectedAccount }) {
     load();
   }, [load]);
 
+  const refreshHistory = async () => {
+    try {
+      await Promise.all([load(), refreshAuth?.()]);
+      toast.success('History refreshed');
+    } catch {
+      toast.error('Failed to refresh history');
+    }
+  };
+
   return (
     <div className="card pad history-panel compact-workspace-panel">
       <div className="toolbar">
@@ -2033,7 +2064,7 @@ function TradeHistory({ selectedAccount }) {
             ))}
           </div>
         </div>
-        <button className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
+        <button type="button" className="btn subtle" onClick={refreshHistory} disabled={loading}><RefreshCw size={16} />Refresh</button>
       </div>
 
       {view === 'positions' && (
@@ -2261,6 +2292,15 @@ function WalletPanel({ selectedAccount, refreshAuth }) {
     load().catch(() => {});
   }, [load]);
 
+  const refreshWallet = async () => {
+    try {
+      await Promise.all([load(), refreshAuth?.()]);
+      toast.success('Wallet refreshed');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Refresh failed');
+    }
+  };
+
   const submitQr = async () => {
     try {
       await api.post('/transactions/qr-deposit-request', {
@@ -2304,7 +2344,7 @@ function WalletPanel({ selectedAccount, refreshAuth }) {
             <button key={item} className={`tab ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>{item}</button>
           ))}
         </div>
-        <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+        <button type="button" className="btn subtle" onClick={refreshWallet}><RefreshCw size={16} />Refresh</button>
       </div>
 
       {tab === 'deposit' && (
@@ -2538,7 +2578,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null }) {
           </select>
         </div>
         <div className="right">
-          <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+          <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
           <button className="btn primary" onClick={() => setShowCreate(true)}><Plus size={16} />Create {mode === 'sub_broker' ? 'Sub Broker' : 'User'}</button>
         </div>
       </div>
@@ -2908,7 +2948,7 @@ function AdminPositionsPanel() {
         </div>
         <div className="right">
           <span className={`pill ${totalPnl >= 0 ? 'teal' : 'red'}`}>Overall P&L {totalPnl.toFixed(2)}</span>
-          <button className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
+          <button type="button" className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
         </div>
       </div>
       <AdminPositionTable rows={rows} status={status} onReload={load} />
@@ -3731,7 +3771,7 @@ function TransactionsPanel({ type }) {
             <button key={item} className={`tab ${status === item ? 'active' : ''}`} onClick={() => setStatus(item)}>{item}</button>
           ))}
         </div>
-        <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+        <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
       </div>
       <TransactionTable rows={rows} onAction={action} />
     </div>
@@ -3815,7 +3855,7 @@ function AdminOrdersPanel() {
           </div>
           <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search" />
         </div>
-        <button className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+        <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
       </div>
       <div className="table-wrap">
         <table>
@@ -4227,7 +4267,7 @@ function ActionLedgerPanel() {
             {users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}
           </select>
         )}
-        <button className="btn primary" onClick={fetchRows} disabled={loading}><RefreshCw size={16} />Fetch Date</button>
+        <button type="button" className="btn primary" onClick={fetchRows} disabled={loading}><RefreshCw size={16} />Fetch Date</button>
         <button className="btn subtle" onClick={() => exportRows('pdf')} disabled={loading}><FileText size={16} />Export PDF</button>
         <button className="btn success" onClick={() => exportRows('excel')} disabled={loading}><FileSpreadsheet size={16} />Export Excel</button>
       </div>
