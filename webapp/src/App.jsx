@@ -87,15 +87,26 @@ const subBrokerFeatureTabs = adminTabs.filter((tab) => !tab.adminOnly);
 const defaultSubBrokerPermissions = subBrokerFeatureTabs.reduce((acc, tab) => {
   acc[tab.id] = true;
   return acc;
-}, { usersUpdate: true, usersDelete: true });
+}, {
+  usersPositions: true,
+  usersUpdate: true,
+  usersDelete: true,
+  adminPositionsEdit: true,
+  adminPositionsExit: true,
+  adminPositionsDelete: true,
+});
 
 const normalizeSubBrokerPermissions = (permissions = {}) => (
   subBrokerFeatureTabs.reduce((acc, tab) => {
     acc[tab.id] = permissions?.[tab.id] !== false;
     return acc;
   }, {
+    usersPositions: permissions?.usersPositions !== false,
     usersUpdate: permissions?.usersUpdate !== false,
     usersDelete: permissions?.usersDelete !== false,
+    adminPositionsEdit: permissions?.adminPositionsEdit !== false,
+    adminPositionsExit: permissions?.adminPositionsExit !== false,
+    adminPositionsDelete: permissions?.adminPositionsDelete !== false,
   })
 );
 
@@ -110,6 +121,12 @@ const formatMoney = (value) =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+
+const formatPlainMoney = (value) =>
+  Number(value || 0).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
 const formatDate = (value) => (value ? new Date(value).toLocaleString('en-IN') : '-');
 const toDateTimeLocal = (value) => {
@@ -796,7 +813,7 @@ function App() {
             />
           )}
           {renderedActive === 'users' && <UsersPanel mode="user" role={role} currentUser={user} permissions={subBrokerPermissions} />}
-          {renderedActive === 'adminPositions' && <AdminPositionsPanel />}
+          {renderedActive === 'adminPositions' && <AdminPositionsPanel role={role} permissions={subBrokerPermissions} />}
           {renderedActive === 'adminOrders' && <AdminOrdersPanel />}
           {renderedActive === 'leverageMargin' && <LeverageMarginPanel />}
           {renderedActive === 'autoClose' && <AutoClosePanel />}
@@ -2524,10 +2541,15 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
   const [userFilter, setUserFilter] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [dialog, setDialog] = useState(null);
+  const [autoCloseSettings, setAutoCloseSettings] = useState({ percent: 90, applyAll: true, userIds: [], userSettings: [] });
 
   const load = useCallback(async () => {
-    const res = await api.get('/web-admin/users', { params: { q, role: 'all' } });
+    const [res, autoCloseRes] = await Promise.all([
+      api.get('/web-admin/users', { params: { q, role: 'all' } }),
+      api.get('/web-admin/auto-close-settings').catch(() => ({ data: { data: null } })),
+    ]);
     const data = res.data?.data || [];
+    if (autoCloseRes.data?.data) setAutoCloseSettings(autoCloseRes.data.data);
     setAllUsers(data);
     setUsers(data.filter((user) => {
       if (mode === 'sub_broker') return user.role === 'sub_broker';
@@ -2599,12 +2621,14 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         users={displayedUsers}
         brokers={allUsers.filter((user) => user.role === 'sub_broker')}
         showBroker={role === 'admin' && mode !== 'sub_broker'}
+        autoCloseSettings={autoCloseSettings}
+        canPositions={role !== 'sub_broker' || permissions.usersPositions !== false}
         canUpdate={role !== 'sub_broker' || permissions.usersUpdate !== false}
         canDelete={role !== 'sub_broker' || permissions.usersDelete !== false}
         onRefresh={load}
         onOpenDialog={setDialog}
       />
-      {showCreate && <CreateUserModal mode={mode} brokerScope={brokerScope} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
+      {showCreate && <CreateUserModal mode={mode} role={role} brokerScope={brokerScope} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
       {dialog?.type === 'positions' && <UserPositionsModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'brokerage' && <BrokerageModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} onSaved={load} />}
@@ -2720,7 +2744,7 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                     <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'users')}>
                       <span>
                         <strong>{tab.label}</strong>
-                        <small>Expand to control the tab, Update button, and Delete button.</small>
+                        <small>Expand to control the tab, P button, Update button, and Delete button.</small>
                       </span>
                       <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
                     </button>
@@ -2731,12 +2755,51 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                           <input type="checkbox" checked={permissions.users !== false} onChange={(event) => updatePermission('users', event.target.checked)} />
                         </label>
                         <label>
+                          <span>P Button</span>
+                          <input type="checkbox" checked={permissions.usersPositions !== false} onChange={(event) => updatePermission('usersPositions', event.target.checked)} />
+                        </label>
+                        <label>
                           <span>Update Button</span>
                           <input type="checkbox" checked={permissions.usersUpdate !== false} onChange={(event) => updatePermission('usersUpdate', event.target.checked)} />
                         </label>
                         <label>
                           <span>Delete Button</span>
                           <input type="checkbox" checked={permissions.usersDelete !== false} onChange={(event) => updatePermission('usersDelete', event.target.checked)} />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              if (tab.id === 'adminPositions') {
+                const expanded = expandedPermission === 'adminPositions';
+                return (
+                  <div className={`permission-card permission-card-expand ${expanded ? 'expanded' : ''}`} key={tab.id}>
+                    <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'adminPositions')}>
+                      <span>
+                        <strong>{tab.label}</strong>
+                        <small>Expand to control the tab and Edit, Exit, Delete actions.</small>
+                      </span>
+                      <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
+                    </button>
+                    {expanded && (
+                      <div className="permission-sub-options">
+                        <label>
+                          <span>Complete Positions</span>
+                          <input type="checkbox" checked={permissions.adminPositions !== false} onChange={(event) => updatePermission('adminPositions', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Edit Button</span>
+                          <input type="checkbox" checked={permissions.adminPositionsEdit !== false} onChange={(event) => updatePermission('adminPositionsEdit', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Exit Button</span>
+                          <input type="checkbox" checked={permissions.adminPositionsExit !== false} onChange={(event) => updatePermission('adminPositionsExit', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Delete Button</span>
+                          <input type="checkbox" checked={permissions.adminPositionsDelete !== false} onChange={(event) => updatePermission('adminPositionsDelete', event.target.checked)} />
                         </label>
                       </div>
                     )}
@@ -2765,7 +2828,19 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
   );
 }
 
-function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
+function getAutoClosePercentForUser(user, settings = {}) {
+  if (!settings || settings.applyAll !== false) {
+    return settings?.percent ?? user.auto_close_percent ?? user.stop_loss_percent ?? '-';
+  }
+  const userSettings = Array.isArray(settings.userSettings) ? settings.userSettings : [];
+  const row = userSettings.find((item) => item.userId === user.id);
+  if (row?.percent !== undefined && row?.percent !== null) return row.percent;
+  const selectedIds = settings.userIds || settings.selectedUserIds || [];
+  if (Array.isArray(selectedIds) && selectedIds.includes(user.id)) return settings.percent ?? '-';
+  return user.auto_close_percent ?? user.stop_loss_percent ?? '-';
+}
+
+function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPositions = true, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
   const updateBroker = async (userId, brokerId) => {
     try {
       await api.post('/web-admin/assign-broker', { userId, brokerId: brokerId || null });
@@ -2779,7 +2854,7 @@ function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDele
   const deleteUser = async (user) => {
     if (!window.confirm(`Delete ${user.login_id || getUserName(user)}?`)) return;
     try {
-      await api.delete(`/admin/users/${user.id}`);
+      await api.delete(`/web-admin/users/${user.id}`);
       toast.success('User deleted');
       onRefresh();
     } catch (error) {
@@ -2816,7 +2891,7 @@ function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDele
             <tr key={user.id}>
               <td>
                 <div className="quick-actions">
-                  <button className="mini-action purple" onClick={() => onOpenDialog({ type: 'positions', user })}>P</button>
+                  {canPositions && <button className="mini-action purple" onClick={() => onOpenDialog({ type: 'positions', user })}>P</button>}
                   <button className="mini-action orange" onClick={() => onOpenDialog({ type: 'brokerage', user })}>B</button>
                   <button className="mini-action blue" onClick={() => onOpenDialog({ type: 'ledger', user })}>L</button>
                 </div>
@@ -2844,7 +2919,7 @@ function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDele
               <td>{user.role === 'admin' ? 'YES' : 'NO'}</td>
               <td><span className="pill blue">{user.closing_mode ? 'Closing' : 'Exposure'}</span></td>
               <td>{user.leverage || primary.leverage || '-'}</td>
-              <td>{user.auto_close_percent ?? user.stop_loss_percent ?? '-'}</td>
+              <td>{getAutoClosePercentForUser(user, autoCloseSettings)}</td>
               <td>{(user.accounts || []).some((account) => account.is_demo) ? 'YES' : 'NO'}</td>
               <td>{user.is_active ? 'YES' : 'NO'}</td>
               <td>{formatDate(user.created_at)}</td>
@@ -2870,7 +2945,7 @@ function UsersTable({ users, brokers = [], showBroker, canUpdate = true, canDele
   );
 }
 
-function CreateUserModal({ mode, brokerScope = null, onClose, onCreated }) {
+function CreateUserModal({ mode, role, brokerScope = null, onClose, onCreated }) {
   const [form, setForm] = useState({
     loginId: '',
     password: 'TA1234',
@@ -2921,6 +2996,15 @@ function CreateUserModal({ mode, brokerScope = null, onClose, onCreated }) {
               </div>
             ))}
           </div>
+          {mode !== 'sub_broker' && role === 'admin' && !brokerScope && (
+            <div className="field">
+              <label>Role</label>
+              <select className="select" value={form.role} onChange={(event) => update('role', event.target.value)}>
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+          )}
           {mode !== 'sub_broker' && (
             <div className="grid-2">
               <label className="row"><span>Create Demo</span><input type="checkbox" checked={form.createDemo} onChange={(event) => update('createDemo', event.target.checked)} /></label>
@@ -2941,7 +3025,7 @@ function CreateUserModal({ mode, brokerScope = null, onClose, onCreated }) {
   );
 }
 
-function AdminPositionsPanel() {
+function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPermissions }) {
   const [users, setUsers] = useState([]);
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState('open');
@@ -2993,7 +3077,14 @@ function AdminPositionsPanel() {
           <button type="button" className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
         </div>
       </div>
-      <AdminPositionTable rows={rows} status={status} onReload={load} />
+      <AdminPositionTable
+        rows={rows}
+        status={status}
+        onReload={load}
+        canEdit={role !== 'sub_broker' || permissions.adminPositionsEdit !== false}
+        canExit={role !== 'sub_broker' || permissions.adminPositionsExit !== false}
+        canDelete={role !== 'sub_broker' || permissions.adminPositionsDelete !== false}
+      />
     </div>
   );
 }
@@ -3015,6 +3106,13 @@ function UserPositionsModal({ user, onClose }) {
 
   useEffect(() => {
     load().catch(() => toast.error('Failed to load user positions'));
+  }, [load]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      load().catch(() => {});
+    }, 1500);
+    return () => clearInterval(interval);
   }, [load]);
 
   const fallbackAccount = getDisplayAccount(user.accounts);
@@ -3055,17 +3153,17 @@ function UserPositionsModal({ user, onClose }) {
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="modal-body">
-          <div className="stats-grid compact-stats">
+          <div className="stats-grid compact-stats p-dashboard-grid">
             <Stat label="User" value={user.login_id} />
-            <Stat label="Balance" value={formatMoney(balance)} />
-            <Stat label="Equity" value={formatMoney(equity)} />
-            <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
-            <Stat label="Free Margin" value={formatMoney(freeMargin)} />
-            <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
-            <Stat label="Used Margin" value={formatMoney(usedMargin)} />
+            <Stat label="Balance" value={formatPlainMoney(balance)} />
+            <Stat label="Equity" value={formatPlainMoney(equity)} />
+            <Stat label="Total Dr/Cr" value={formatPlainMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+            <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} />
+            <Stat label="P&L" value={formatPlainMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
+            <Stat label="Used Margin" value={formatPlainMoney(usedMargin)} />
             <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
-            <Stat label="Settlement Balance" value={formatMoney(settlementBalance)} />
-            <Stat label="Floating P&L" value={formatMoney(openPnl)} tone={openPnl >= 0 ? 'positive-blue' : 'negative'} />
+            <Stat label="Settlement Balance" value={formatPlainMoney(settlementBalance)} />
+            <Stat label="Floating P&L" value={formatPlainMoney(openPnl)} tone={openPnl >= 0 ? 'positive-blue' : 'negative'} />
           </div>
           <div className="toolbar">
             <div className="left">
@@ -3076,6 +3174,9 @@ function UserPositionsModal({ user, onClose }) {
               </div>
               <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search" />
             </div>
+            <div className="right">
+              <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+            </div>
           </div>
           <AdminPositionTable rows={rows} status={status} onReload={load} />
         </div>
@@ -3084,7 +3185,7 @@ function UserPositionsModal({ user, onClose }) {
   );
 }
 
-function AdminPositionTable({ rows, status, onReload }) {
+function AdminPositionTable({ rows, status, onReload, canEdit = true, canExit = true, canDelete = true }) {
   const [editTrade, setEditTrade] = useState(null);
   const [exitTrade, setExitTrade] = useState(null);
 
@@ -3135,13 +3236,15 @@ function AdminPositionTable({ rows, status, onReload }) {
                 <td>{Number(row.brokerage || 0).toFixed(2)}</td>
                 <td>
                   <div className="quick-actions">
-                    <button className="mini-action blue" onClick={() => setEditTrade(row)}>Edit</button>
+                    {canEdit && <button className="mini-action blue" onClick={() => setEditTrade(row)}>Edit</button>}
                     {row.status === 'closed' ? (
                       <button className="mini-action orange" onClick={() => reopenTrade(row)}>Reopen</button>
-                    ) : (
+                    ) : canExit ? (
                       <button className="mini-action orange" onClick={() => setExitTrade(row)}>Exit</button>
+                    ) : (
+                      null
                     )}
-                    <button className="mini-action red" onClick={() => deleteTrade(row)}>Delete</button>
+                    {canDelete && <button className="mini-action red" onClick={() => deleteTrade(row)}>Delete</button>}
                   </div>
                 </td>
               </tr>
@@ -3292,7 +3395,7 @@ function LedgerModal({ user, onClose, onSaved }) {
     if (!form.remarks || form.remarks === 'Select Type') return toast.error('Select remarks type');
     setSaving(true);
     try {
-      await api.post(`/admin/users/${user.id}/add-balance`, {
+      await api.post(`/web-admin/users/${user.id}/add-balance`, {
         accountId: account.id,
         amount,
         note: form.remarks,
@@ -3389,7 +3492,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
 
   const saveActive = async () => {
     try {
-      await api.patch(`/admin/users/${user.id}/active`, { isActive: form.active });
+      await api.patch(`/web-admin/users/${user.id}/active`, { isActive: form.active });
       toast.success('User activation updated');
       onSaved?.();
     } catch (error) {
@@ -3410,7 +3513,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
   const resetPassword = async () => {
     if (form.password && String(form.password).length < 4) return toast.error('Password must be at least 4 characters');
     try {
-      const res = await api.post(`/admin/users/${user.id}/reset-password`, form.password ? { newPassword: form.password } : {});
+      const res = await api.post(`/web-admin/users/${user.id}/reset-password`, form.password ? { newPassword: form.password } : {});
       toast.success(`Password updated${res.data?.data?.tempPassword ? `: ${res.data.data.tempPassword}` : ''}`);
       setForm((prev) => ({ ...prev, password: '' }));
       onSaved?.();
@@ -3422,11 +3525,11 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
   const saveTradingSettings = async () => {
     try {
       await Promise.all([
-        api.patch(`/admin/users/${user.id}/leverage`, { leverage: Number(form.leverage) }),
-        api.patch(`/admin/users/${user.id}/brokerage`, { brokerageRate: Number(form.brokerageRate) }),
-        api.patch(`/admin/users/${user.id}/max-saved-accounts`, { maxSavedAccounts: Number(form.maxSavedAccounts) }),
-        api.patch(`/admin/users/${user.id}/closing-mode`, { closingMode: Boolean(form.closingMode) }),
-        api.patch(`/admin/users/${user.id}/liquidation-mode`, { liquidationType: form.liquidationType }),
+        api.patch(`/web-admin/users/${user.id}/leverage`, { leverage: Number(form.leverage) }),
+        api.patch(`/web-admin/users/${user.id}/brokerage`, { brokerageRate: Number(form.brokerageRate) }),
+        api.patch(`/web-admin/users/${user.id}/max-saved-accounts`, { maxSavedAccounts: Number(form.maxSavedAccounts) }),
+        api.patch(`/web-admin/users/${user.id}/closing-mode`, { closingMode: Boolean(form.closingMode) }),
+        api.patch(`/web-admin/users/${user.id}/liquidation-mode`, { liquidationType: form.liquidationType }),
       ]);
       toast.success('Trading settings updated');
       onSaved?.();
@@ -3533,7 +3636,7 @@ function LedgerUpdateEditor({ user, onSaved }) {
     if (!amount) return toast.error('Enter CRDR amount');
     if (!form.remarks || form.remarks === 'Select Type') return toast.error('Select remarks type');
     try {
-      await api.post(`/admin/users/${user.id}/add-balance`, {
+      await api.post(`/web-admin/users/${user.id}/add-balance`, {
         accountId: account.id,
         amount,
         note: form.remarks,
@@ -3746,7 +3849,7 @@ function DeleteUserEditor({ user, users, isBrokerUpdate, onSaved, onClose }) {
     if (confirm !== target.login_id) return toast.error(`Type ${target.login_id} to confirm delete`);
     if (!window.confirm(`Delete ${target.login_id}? This cannot be undone.`)) return;
     try {
-      await api.delete(`/admin/users/${target.id}`);
+      await api.delete(`/web-admin/users/${target.id}`);
       toast.success('Deleted');
       onSaved?.();
       if (target.id === user.id) onClose?.();

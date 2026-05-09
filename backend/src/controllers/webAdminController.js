@@ -14,8 +14,12 @@ const SUB_BROKER_PERMISSIONS_KEY = 'sub_broker_feature_permissions';
 const SUB_BROKER_FEATURES = [
   'workspace',
   'adminPositions',
+  'adminPositionsEdit',
+  'adminPositionsExit',
+  'adminPositionsDelete',
   'adminOrders',
   'users',
+  'usersPositions',
   'usersUpdate',
   'usersDelete',
   'leverageMargin',
@@ -1036,6 +1040,15 @@ exports.assignBroker = async (req, res) => {
     res.json({ success: true, message: brokerId ? 'User assigned to sub broker' : 'Broker assignment removed' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.userWriteAccess = async (req, res, next) => {
+  try {
+    await assertManagedUser(req, req.params.id);
+    next();
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };
 
