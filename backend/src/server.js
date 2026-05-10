@@ -318,6 +318,16 @@ app.post('/api/web-admin/trigger-settlement', protect, adminOrSubBroker, async (
   }
 });
 
+app.post('/api/web-admin/repair-settlement', protect, adminOnly, async (req, res) => {
+  try {
+    const result = await weeklySettlementService.repairSettlementState(req.body || {});
+    res.status(result.success === false ? 400 : 200).json(result);
+  } catch (err) {
+    console.error('Settlement repair error:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.get('/api/web-admin/settlement-status', protect, adminOrSubBroker, async (req, res) => {
   try {
     const lastRun = await getLastSettlementTime();

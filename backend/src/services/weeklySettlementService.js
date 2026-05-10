@@ -310,6 +310,168 @@ class WeeklySettlementService {
   }
 
   // ── Get best available price ──
+  async repairSettlementState({ settlementDate } = {}) {
+    const targetDate = settlementDate || await this._getLatestSettlementDate();
+    if (!targetDate) {
+      return { success: false, message: 'No weekly settlement rows found to repair.' };
+    }
+
+    const { data: rows, error } = await supabase
+      .from('weekly_settlements')
+      .select('id,user_id,account_id,old_trade_id,new_trade_id,settlement_date,symbol,trade_type,quantity,open_price,close_price,profit_loss,created_at')
+      .eq('settlement_date', targetDate);
+
+    if (error) {
+      return { success: false, message: error.message };
+    }
+
+    if (!rows || rows.length === 0) {
+      return { success: false, message: `No weekly settlement rows found for ${targetDate}.` };
+    }
+
+    const now = new Date().toISOString();
+    const accountIds = new Set();
+    const errors = [];
+    let fixedOld = 0;
+    let fixedNew = 0;
+
+    for (const row of rows) {
+      const closePrice = Number(row.close_price || 0);
+      if (!closePrice || closePrice <= 0) {
+        errors.push({ settlementId: row.id, error: 'Missing close price' });
+        continue;
+      }
+
+      if (row.account_id) accountIds.add(row.account_id);
+
+      if (row.old_trade_id) {
+        const { error: oldErr } = await supabase
+          .from('trades')
+          .update({
+            close_price: closePrice,
+            current_price: closePrice,
+            profit: Number(row.profit_loss || 0),
+            sell_brokerage: 0,
+            brokerage: 0,
+            status: 'closed',
+            close_time: row.created_at || now,
+            updated_at: now,
+            is_settlement_close: true,
+            settlement_week: targetDate,
+          })
+          .eq('id', row.old_trade_id);
+
+        if (oldErr) {
+          errors.push({ tradeId: row.old_trade_id, error: oldErr.message });
+        } else {
+          fixedOld++;
+        }
+      }
+
+      if (row.new_trade_id) {
+        const { error: newErr } = await supabase
+          .from('trades')
+          .update({
+            open_price: closePrice,
+            current_price: closePrice,
+            profit: 0,
+            brokerage: 0,
+            buy_brokerage: 0,
+            sell_brokerage: 0,
+            status: 'open',
+            updated_at: now,
+            settlement_week: targetDate,
+          })
+          .eq('id', row.new_trade_id);
+
+        if (newErr) {
+          errors.push({ tradeId: row.new_trade_id, error: newErr.message });
+        } else {
+          fixedNew++;
+        }
+      }
+    }
+
+    const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
+
+    return {
+      success: errors.length === 0,
+      message: errors.length === 0
+        ? `Settlement state repaired for ${targetDate}.`
+        : `Settlement repair finished for ${targetDate} with ${errors.length} warning(s).`,
+      settlementDate: targetDate,
+      rows: rows.length,
+      fixedOld,
+      fixedNew,
+      accountsRecalculated,
+      errors: errors.length ? errors : undefined,
+    };
+  }
+
+  async _getLatestSettlementDate() {
+    const { data, error } = await supabase
+      .from('weekly_settlements')
+      .select('settlement_date')
+      .order('settlement_date', { ascending: false })
+      .limit(1);
+
+    if (error) throw new Error(error.message);
+    return data?.[0]?.settlement_date || null;
+  }
+
+  async _recalculateAccounts(accountIds, now, errors) {
+    let updated = 0;
+
+    for (const accountId of accountIds) {
+      const { data: account, error: accountErr } = await supabase
+        .from('accounts')
+        .select('id,balance')
+        .eq('id', accountId)
+        .maybeSingle();
+
+      if (accountErr || !account) {
+        errors.push({ accountId, error: accountErr?.message || 'Account not found' });
+        continue;
+      }
+
+      const { data: openTrades, error: tradeErr } = await supabase
+        .from('trades')
+        .select('profit,margin')
+        .eq('account_id', accountId)
+        .eq('status', 'open');
+
+      if (tradeErr) {
+        errors.push({ accountId, error: tradeErr.message });
+        continue;
+      }
+
+      const balance = Number(account.balance || 0);
+      const floating = (openTrades || []).reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
+      const margin = (openTrades || []).reduce((sum, trade) => sum + Number(trade.margin || 0), 0);
+      const equity = balance + floating;
+
+      const { error: updateErr } = await supabase
+        .from('accounts')
+        .update({
+          credit: 0,
+          profit: 0,
+          equity,
+          margin,
+          free_margin: Math.max(0, equity - margin),
+          updated_at: now,
+        })
+        .eq('id', accountId);
+
+      if (updateErr) {
+        errors.push({ accountId, error: updateErr.message });
+      } else {
+        updated++;
+      }
+    }
+
+    return updated;
+  }
+
   async _getSettlementPrice(trade) {
     // 1. Use the same persisted "last" price shown in Quotes.
     const { data: symRow } = await supabase
