@@ -225,7 +225,7 @@ class WeeklySettlementService {
 
           // ── C) Settlement record for admin ──
           try {
-            await supabase.from('weekly_settlements').insert({
+            const settlementRecord = {
               user_id: trade.user_id,
               account_id: trade.account_id,
               old_trade_id: trade.id,
@@ -243,7 +243,21 @@ class WeeklySettlementService {
               credit_before: creditBefore,
               credit_after: 0,          // credit resets to 0
               settlement_type: 'auto_m2m',
-            });
+            };
+
+            const { error: settlementInsertError } = await supabase
+              .from('weekly_settlements')
+              .insert(settlementRecord);
+
+            if (settlementInsertError && /old_trade_id|new_trade_id/i.test(settlementInsertError.message || '')) {
+              const { old_trade_id, new_trade_id, ...legacySettlementRecord } = settlementRecord;
+              const { error: legacyInsertError } = await supabase
+                .from('weekly_settlements')
+                .insert(legacySettlementRecord);
+              if (legacyInsertError) throw legacyInsertError;
+            } else if (settlementInsertError) {
+              throw settlementInsertError;
+            }
           } catch (e) {
             console.warn(`  ⚠️ Settlement record warning: ${e.message}`);
           }
@@ -320,7 +334,7 @@ class WeeklySettlementService {
 
     const { data: rows, error } = await supabase
       .from('weekly_settlements')
-      .select('id,user_id,account_id,old_trade_id,new_trade_id,settlement_date,symbol,trade_type,quantity,open_price,close_price,profit_loss,created_at')
+      .select('*')
       .eq('settlement_date', targetDate);
 
     if (error) {
