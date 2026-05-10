@@ -11,6 +11,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 const { supabase } = require('../config/supabase');
+const { filterSupersededSettlementTrades } = require('./openTradeSnapshot');
 
 const SETTLEMENT_TIMEZONE = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
 
@@ -60,11 +61,12 @@ class WeeklySettlementService {
     }
 
     // Filter demo unless SETTLE_DEMO=true
-    const openTrades = settleDemo
+    const eligibleTrades = settleDemo
       ? trades
       : trades.filter(
           (t) => !t.accounts?.is_demo && String(t.settlement_week || '') !== settlementWeek,
         );
+    const openTrades = filterSupersededSettlementTrades(eligibleTrades);
 
     if (openTrades.length === 0) {
       console.log('ℹ️  No live-account trades to settle.');
@@ -392,6 +394,7 @@ class WeeklySettlementService {
       }
     }
 
+    const staleRepair = await this._closeSupersededSettlementParents(targetDate, accountIds, now, errors);
     const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
 
     return {
@@ -403,6 +406,8 @@ class WeeklySettlementService {
       rows: rows.length,
       fixedOld,
       fixedNew,
+      staleParentsClosed: staleRepair.staleParentsClosed,
+      reopenedNormalized: staleRepair.reopenedNormalized,
       accountsRecalculated,
       errors: errors.length ? errors : undefined,
     };
@@ -417,6 +422,128 @@ class WeeklySettlementService {
 
     if (error) throw new Error(error.message);
     return data?.[0]?.settlement_date || null;
+  }
+
+  async _closeSupersededSettlementParents(targetDate, accountIds, now, errors) {
+    const { data: openTrades, error } = await supabase
+      .from('trades')
+      .select('id,account_id,user_id,symbol,trade_type,quantity,open_price,current_price,profit,margin,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time')
+      .eq('status', 'open');
+
+    if (error) {
+      errors.push({ repair: 'superseded-settlement-parent', error: error.message });
+      return { staleParentsClosed: 0, reopenedNormalized: 0 };
+    }
+
+    const rows = openTrades || [];
+    const byId = new Map(rows.map((trade) => [String(trade.id), trade]));
+    const childRows = rows.filter((trade) => trade.settled_from_trade_id);
+    let staleParentsClosed = 0;
+    let reopenedNormalized = 0;
+
+    for (const child of childRows) {
+      const parent = byId.get(String(child.settled_from_trade_id));
+      const childSettlementWeek = String(child.settlement_week || targetDate);
+      const parentSettlementWeek = String(parent?.settlement_week || '');
+      if (childSettlementWeek !== targetDate && parentSettlementWeek !== targetDate) {
+        continue;
+      }
+
+      const closePrice = Number(child.open_price || child.current_price || parent?.current_price || parent?.open_price || 0);
+
+      if (child.account_id) accountIds.add(child.account_id);
+
+      if (closePrice > 0) {
+        const { error: childErr } = await supabase
+          .from('trades')
+          .update({
+            open_price: closePrice,
+            current_price: closePrice,
+            profit: 0,
+            brokerage: 0,
+            buy_brokerage: 0,
+            sell_brokerage: 0,
+            settlement_week: childSettlementWeek,
+            updated_at: now,
+          })
+          .eq('id', child.id)
+          .eq('status', 'open');
+
+        if (childErr) {
+          errors.push({ tradeId: child.id, error: childErr.message });
+        } else {
+          reopenedNormalized++;
+        }
+      }
+
+      if (!parent || parent.is_settlement_close === true) {
+        continue;
+      }
+
+      if (parent.account_id) accountIds.add(parent.account_id);
+      const qty = Number(parent.quantity || 0);
+      const openPrice = Number(parent.open_price || 0);
+      const direction = String(parent.trade_type || '').toLowerCase() === 'buy' ? 1 : -1;
+      const grossPnL = closePrice > 0 && openPrice > 0 && qty > 0
+        ? (closePrice - openPrice) * direction * qty
+        : Number(parent.profit || 0);
+
+      const { error: parentErr } = await supabase
+        .from('trades')
+        .update({
+          close_price: closePrice || Number(parent.current_price || parent.open_price || 0),
+          current_price: closePrice || Number(parent.current_price || parent.open_price || 0),
+          profit: grossPnL,
+          sell_brokerage: 0,
+          brokerage: 0,
+          status: 'closed',
+          close_time: child.created_at || child.open_time || now,
+          updated_at: now,
+          is_settlement_close: true,
+          settlement_week: childSettlementWeek,
+        })
+        .eq('id', parent.id)
+        .eq('status', 'open');
+
+      if (parentErr) {
+        errors.push({ tradeId: parent.id, error: parentErr.message });
+      } else {
+        staleParentsClosed++;
+      }
+    }
+
+    const { data: flaggedRows, error: flaggedErr } = await supabase
+      .from('trades')
+      .select('id,account_id,current_price,open_price,profit')
+      .eq('status', 'open')
+      .eq('is_settlement_close', true);
+
+    if (flaggedErr) {
+      errors.push({ repair: 'open-settlement-close-flagged', error: flaggedErr.message });
+    } else {
+      for (const trade of flaggedRows || []) {
+        if (trade.account_id) accountIds.add(trade.account_id);
+        const closePrice = Number(trade.current_price || trade.open_price || 0);
+        const { error: closeErr } = await supabase
+          .from('trades')
+          .update({
+            close_price: closePrice,
+            status: 'closed',
+            close_time: now,
+            updated_at: now,
+          })
+          .eq('id', trade.id)
+          .eq('status', 'open');
+
+        if (closeErr) {
+          errors.push({ tradeId: trade.id, error: closeErr.message });
+        } else {
+          staleParentsClosed++;
+        }
+      }
+    }
+
+    return { staleParentsClosed, reopenedNormalized };
   }
 
   async _recalculateAccounts(accountIds, now, errors) {
@@ -436,7 +563,7 @@ class WeeklySettlementService {
 
       const { data: openTrades, error: tradeErr } = await supabase
         .from('trades')
-        .select('profit,margin')
+        .select('id,profit,margin,settled_from_trade_id,is_settlement_close')
         .eq('account_id', accountId)
         .eq('status', 'open');
 
@@ -445,9 +572,18 @@ class WeeklySettlementService {
         continue;
       }
 
+      const supersededIds = new Set(
+        (openTrades || [])
+          .map((trade) => trade.settled_from_trade_id)
+          .filter(Boolean)
+          .map(String),
+      );
+      const visibleOpenTrades = (openTrades || []).filter((trade) => (
+        trade.is_settlement_close !== true && !supersededIds.has(String(trade.id))
+      ));
       const balance = Number(account.balance || 0);
-      const floating = (openTrades || []).reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
-      const margin = (openTrades || []).reduce((sum, trade) => sum + Number(trade.margin || 0), 0);
+      const floating = visibleOpenTrades.reduce((sum, trade) => sum + Number(trade.profit || 0), 0);
+      const margin = visibleOpenTrades.reduce((sum, trade) => sum + Number(trade.margin || 0), 0);
       const equity = balance + floating;
 
       const { error: updateErr } = await supabase

@@ -3,6 +3,7 @@ const { supabase } = require('../config/supabase');
 const { generateAccountNumber } = require('../utils/auth');
 const { fitTradeComment } = require('../utils/tradeCommentEvents');
 const kiteStreamService = require('../services/kiteStreamService');
+const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
 const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
@@ -567,7 +568,7 @@ exports.summary = async (req, res) => {
     const accountQuery = supabase.from('accounts').select('id, user_id, balance, credit, equity, margin, free_margin');
     const openTradeQuery = supabase
       .from('trades')
-      .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage')
+      .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage, settled_from_trade_id, is_settlement_close')
       .eq('status', 'open');
     const txnQuery = supabase.from('transactions').select('id, user_id, amount, status, type, transaction_type');
 
@@ -611,7 +612,7 @@ exports.summary = async (req, res) => {
 
     const users = usersRes.data || [];
     const accounts = accountsRes.data || [];
-    const trades = (tradesRes.data || []).map(calculateLiveTradeValues);
+    const trades = filterSupersededSettlementTrades(tradesRes.data || []).map(calculateLiveTradeValues);
     const liveOpenPnL = trades.reduce((sum, row) => sum + toNumber(row.profit), 0);
     const liveMargin = trades.reduce((sum, row) => sum + toNumber(row.margin), 0);
     const balanceAndCredit = accounts.reduce((sum, row) => sum + toNumber(row.balance) + toNumber(row.credit), 0);
@@ -681,12 +682,12 @@ exports.listUsers = async (req, res) => {
       let liveTrades = [];
       const { data: tradeRows, error: tradesError } = await supabase
         .from('trades')
-        .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage')
+        .select('id, user_id, account_id, symbol, status, trade_type, quantity, lot_size, open_price, current_price, close_price, profit, margin, buy_brokerage, brokerage, settled_from_trade_id, is_settlement_close')
         .in('user_id', userIds)
         .eq('status', 'open');
 
       if (tradesError) throw tradesError;
-      liveTrades = (tradeRows || []).map(calculateLiveTradeValues);
+      liveTrades = filterSupersededSettlementTrades(tradeRows || []).map(calculateLiveTradeValues);
 
       const pnlByAccount = new Map();
       const marginByAccount = new Map();
@@ -773,6 +774,7 @@ exports.createUser = async (req, res) => {
     if (targetRole === 'admin' && !isAdmin(req)) {
       return res.status(403).json({ success: false, message: 'Only admin can create admin users' });
     }
+    const targetIsAdmin = targetRole === 'admin';
 
     const leverageNum = Number(leverage) || 30;
     if (!isAllowedLeverage(leverageNum)) {
@@ -782,7 +784,7 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    if (!createDemo && !createLive) {
+    if (!targetIsAdmin && !createDemo && !createLive) {
       return res.status(400).json({ success: false, message: 'Select at least one account type' });
     }
 
@@ -838,7 +840,7 @@ exports.createUser = async (req, res) => {
     await rememberPlainPassword(user.id, String(password || 'TA1234'));
 
     const accountsToCreate = [];
-    if (createDemo) {
+    if (!targetIsAdmin && createDemo) {
       accountsToCreate.push({
         user_id: user.id,
         account_number: generateAccountNumber(true).substring(0, 20),
@@ -854,7 +856,7 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    if (createLive) {
+    if (!targetIsAdmin && createLive) {
       accountsToCreate.push({
         user_id: user.id,
         account_number: generateAccountNumber(false).substring(0, 20),
@@ -877,7 +879,7 @@ exports.createUser = async (req, res) => {
 
     res.json({
       success: true,
-      message: `${targetRole === 'sub_broker' ? 'Sub broker' : 'User'} created successfully`,
+      message: `${targetRole === 'admin' ? 'Admin' : targetRole === 'sub_broker' ? 'Sub broker' : 'User'} created successfully`,
       data: { user, loginId: cleanLoginId, tempPassword: password || 'TA1234' },
     });
   } catch (error) {
@@ -1195,7 +1197,7 @@ exports.openPositions = async (req, res) => {
 
     let query = supabase
       .from('trades')
-      .select('id, symbol, exchange, trade_type, quantity, open_price, current_price, profit, margin, brokerage, user_id, account_id, open_time, stop_loss, take_profit, comment')
+      .select('id, symbol, exchange, trade_type, quantity, open_price, current_price, profit, margin, brokerage, user_id, account_id, open_time, stop_loss, take_profit, comment, settled_from_trade_id, is_settlement_close')
       .eq('status', 'open')
       .order('open_time', { ascending: false })
       .limit(500);
@@ -1212,7 +1214,7 @@ exports.openPositions = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ success: true, data: data || [] });
+    res.json({ success: true, data: filterSupersededSettlementTrades(data || []) });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }
@@ -1231,7 +1233,7 @@ exports.positions = async (req, res) => {
 
     let query = supabase
       .from('trades')
-      .select('id, symbol, exchange, trade_type, quantity, lot_size, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at')
+      .select('id, symbol, exchange, trade_type, quantity, lot_size, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at, settled_from_trade_id, is_settlement_close')
       .order(status === 'closed' ? 'close_time' : 'open_time', { ascending: false })
       .limit(Math.min(Number(limit) || 1000, 2000));
 
@@ -1253,7 +1255,10 @@ exports.positions = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    const liveRows = (data || []).map(calculateLiveTradeValues);
+    const visibleRows = status === 'open'
+      ? filterSupersededSettlementTrades(data || [])
+      : (data || []);
+    const liveRows = visibleRows.map(calculateLiveTradeValues);
     res.json({ success: true, data: await attachUserAndAccountInfo(liveRows) });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });

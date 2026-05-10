@@ -12,14 +12,34 @@ const roundMoney = (value) => {
   return Number.isFinite(numeric) ? Number(numeric.toFixed(2)) : 0;
 };
 
-async function buildOpenTradeSnapshots(trades = []) {
+function filterSupersededSettlementTrades(trades = []) {
   if (!Array.isArray(trades) || trades.length === 0) {
+    return [];
+  }
+
+  const supersededIds = new Set(
+    trades
+      .map((trade) => trade?.settled_from_trade_id)
+      .filter(Boolean)
+      .map(String),
+  );
+
+  return trades.filter((trade) => {
+    if (!trade) return false;
+    if (trade.is_settlement_close === true) return false;
+    return !supersededIds.has(String(trade.id));
+  });
+}
+
+async function buildOpenTradeSnapshots(trades = []) {
+  const visibleTrades = filterSupersededSettlementTrades(trades);
+  if (visibleTrades.length === 0) {
     return [];
   }
 
   const uniqueSymbols = [
     ...new Set(
-      trades
+      visibleTrades
         .map((trade) => String(trade.symbol || '').toUpperCase())
         .filter(Boolean),
     ),
@@ -46,7 +66,7 @@ async function buildOpenTradeSnapshots(trades = []) {
     }
   }
 
-  return trades.map((trade) => {
+  return visibleTrades.map((trade) => {
     const symbolKey = String(trade.symbol || '').toUpperCase();
     const openPrice = toNumber(trade.open_price);
     const storedCurrentPrice = toNumber(trade.current_price, openPrice);
@@ -83,4 +103,5 @@ async function buildOpenTradeSnapshots(trades = []) {
 
 module.exports = {
   buildOpenTradeSnapshots,
+  filterSupersededSettlementTrades,
 };

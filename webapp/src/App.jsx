@@ -2960,6 +2960,7 @@ function CreateUserModal({ mode, role, brokerScope = null, onClose, onCreated })
     liquidationType: 'liquidate',
   });
 
+  const creatingAdmin = mode !== 'sub_broker' && role === 'admin' && !brokerScope && form.role === 'admin';
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const create = async () => {
@@ -2986,9 +2987,11 @@ function CreateUserModal({ mode, role, brokerScope = null, onClose, onCreated })
               ['password', 'Password'],
               ['firstName', 'Name'],
               ['phone', 'Phone'],
-              ['leverage', 'Leverage'],
-              ['brokerageRate', 'Brokerage Rate'],
-              ['demoBalance', 'Demo Balance'],
+              ...(!creatingAdmin ? [
+                ['leverage', 'Leverage'],
+                ['brokerageRate', 'Brokerage Rate'],
+                ['demoBalance', 'Demo Balance'],
+              ] : []),
             ].map(([key, label]) => (
               <div className="field" key={key}>
                 <label>{label}</label>
@@ -3005,19 +3008,21 @@ function CreateUserModal({ mode, role, brokerScope = null, onClose, onCreated })
               </select>
             </div>
           )}
-          {mode !== 'sub_broker' && (
+          {mode !== 'sub_broker' && !creatingAdmin && (
             <div className="grid-2">
               <label className="row"><span>Create Demo</span><input type="checkbox" checked={form.createDemo} onChange={(event) => update('createDemo', event.target.checked)} /></label>
               <label className="row"><span>Create Live</span><input type="checkbox" checked={form.createLive} onChange={(event) => update('createLive', event.target.checked)} /></label>
             </div>
           )}
-          <div className="field">
-            <label>Account Liquidation Mode</label>
-            <select className="select" value={form.liquidationType} onChange={(event) => update('liquidationType', event.target.value)}>
-              <option value="liquidate">Liquidate</option>
-              <option value="illiquidate">Illiquidate</option>
-            </select>
-          </div>
+          {!creatingAdmin && (
+            <div className="field">
+              <label>Account Liquidation Mode</label>
+              <select className="select" value={form.liquidationType} onChange={(event) => update('liquidationType', event.target.value)}>
+                <option value="liquidate">Liquidate</option>
+                <option value="illiquidate">Illiquidate</option>
+              </select>
+            </div>
+          )}
           <button className="btn primary" onClick={create}>Create</button>
         </div>
       </div>
