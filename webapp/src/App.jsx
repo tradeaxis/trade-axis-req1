@@ -117,10 +117,10 @@ const roleLabel = (role) => {
 };
 
 const formatMoney = (value) =>
-  `INR ${Number(value || 0).toLocaleString('en-IN', {
+  Number(value || 0).toLocaleString('en-IN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
 
 const formatPlainMoney = (value) =>
   Number(value || 0).toLocaleString('en-IN', {
@@ -453,7 +453,7 @@ function Login({ onLogin }) {
               className="input mono"
               value={form.loginId}
               onChange={(event) => setForm((prev) => ({ ...prev, loginId: event.target.value.toUpperCase() }))}
-              placeholder="TA1000"
+              placeholder="Login ID"
               autoCapitalize="characters"
             />
           </div>
@@ -1625,13 +1625,13 @@ function Trade({ selectedAccount, refreshAuth }) {
           <span className={`pill ${selectedAccount?.is_demo ? 'gold' : 'teal'}`}>{selectedAccount?.is_demo ? 'Demo' : 'Live'}</span>
         </div>
         <div className="trade-metric-grid">
-          <Stat label="Balance" value={formatMoney(balance)} />
-          <Stat label="Equity" value={formatMoney(equity)} tone={equity >= balance ? 'positive-blue' : 'negative'} />
-          <Stat label="Total Dr/Cr" value={formatMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
-          <Stat label="Floating P&L" value={formatMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive-blue' : 'negative'} />
-          <Stat label="Free Margin" value={formatMoney(freeMargin)} tone="positive" />
-          <Stat label="P&L" value={formatMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
-          <Stat label="Used Margin" value={formatMoney(usedMargin)} tone="gold" />
+          <Stat label="Balance" value={formatPlainMoney(balance)} />
+          <Stat label="Equity" value={formatPlainMoney(equity)} tone={equity >= balance ? 'positive-blue' : 'negative'} />
+          <Stat label="Total Dr/Cr" value={formatPlainMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+          <Stat label="Floating P&L" value={formatPlainMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive-blue' : 'negative'} />
+          <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} tone="positive" />
+          <Stat label="P&L" value={formatPlainMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
+          <Stat label="Used Margin" value={formatPlainMoney(usedMargin)} tone="gold" />
           <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} tone="positive" />
         </div>
       </div>
@@ -1667,7 +1667,7 @@ function Trade({ selectedAccount, refreshAuth }) {
                   <span>Current: {Number(position.livePrice || 0).toFixed(2)}</span>
                 </div>
               </div>
-              <strong className={Number(position.livePnl || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.livePnl)}</strong>
+              <strong className={Number(position.livePnl || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatPlainMoney(position.livePnl)}</strong>
             </button>
             {isExpanded && (
               <>
@@ -3609,7 +3609,7 @@ function UserDetailsEditor({ user, users = [], brokers, isBrokerUpdate, onSaved 
 
 function LedgerUpdateEditor({ user, onSaved }) {
   const account = (user.accounts || [])[0] || {};
-  const [form, setForm] = useState({ crdr: 0, remarks: 'Adjustment' });
+  const [form, setForm] = useState({ crdr: 0, remarks: 'Select Type' });
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const amount = Number(form.crdr || 0);

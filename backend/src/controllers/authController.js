@@ -165,26 +165,26 @@ const login = async (req, res) => {
 
     let user;
     const normalizedInput = loginId.trim();
-    const isLoginId = /^TA\d+$/i.test(normalizedInput);
-    
-    if (isLoginId) {
-      const { data, error } = await withDbRequest(
-        () => supabase
-          .from('users')
-          .select('*')
-          .eq('login_id', normalizedInput.toUpperCase())
-          .single(),
-        'Login user lookup',
-      );
-      user = data;
-      if (error && error.code !== 'PGRST116') console.error(error);
-    } else {
+    const normalizedLoginId = normalizedInput.toUpperCase();
+
+    const { data: loginUser, error: loginLookupError } = await withDbRequest(
+      () => supabase
+        .from('users')
+        .select('*')
+        .eq('login_id', normalizedLoginId)
+        .maybeSingle(),
+      'Login user lookup',
+    );
+    user = loginUser;
+    if (loginLookupError && loginLookupError.code !== 'PGRST116') console.error(loginLookupError);
+
+    if (!user && normalizedInput.includes('@')) {
       const { data, error } = await withDbRequest(
         () => supabase
           .from('users')
           .select('*')
           .eq('email', normalizedInput.toLowerCase())
-          .single(),
+          .maybeSingle(),
         'Login email lookup',
       );
       user = data;
@@ -344,15 +344,13 @@ const switchAccount = async (req, res) => {
       const identifierUpper = identifier.toUpperCase();
       const identifierLower = identifier.toLowerCase();
 
-      if (/^TA/i.test(identifierUpper)) {
-        const { data } = await supabase
-          .from('users')
-          .select('*')
-          .eq('login_id', identifierUpper)
-          .maybeSingle();
+      const { data: loginUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('login_id', identifierUpper)
+        .maybeSingle();
 
-        if (data) user = data;
-      }
+      if (loginUser) user = loginUser;
 
       if (!user) {
         const { data } = await supabase

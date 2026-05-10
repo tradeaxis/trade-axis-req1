@@ -77,14 +77,14 @@ const Login = () => {
               onChange={(e) => setFormData({ ...formData, loginId: e.target.value.toUpperCase() })}
               className="w-full px-4 py-3 rounded-lg border text-sm font-mono"
               style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
-              placeholder="TA1000"
+              placeholder="Login ID"
               autoCapitalize="characters"
               autoCorrect="off"
               spellCheck={false}
               required
             />
             <p className="text-xs mt-1" style={{ color: '#787b86' }}>
-              Your unique ID (e.g., TA1000)
+              Your unique ID
             </p>
           </div>
 
@@ -140,7 +140,15 @@ const Login = () => {
 
         <p className="mt-4 text-center text-sm" style={{ color: '#787b86' }}>
           Don't have a Login ID?<br />
-          Contact your administrator.
+          <a
+            href="https://tradeaxis.in"
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium"
+            style={{ color: '#2962ff' }}
+          >
+            Contact your administrator.
+          </a>
         </p>
 
       </div>

@@ -173,7 +173,7 @@ const shouldRunCatchupSettlement = async () => {
 let settlementRunPromise = null;
 
 const runSettlementSafe = async (trigger = 'cron') => {
-  const manualTrigger = trigger === 'manual' || String(trigger).startsWith('web-');
+  const manualTrigger = trigger === 'manual';
   if (!manualTrigger && !isSettlementWindow()) {
     console.log(`ℹ️ Weekly settlement skipped (${trigger}): outside Saturday 01:00 IST window.`);
     return {

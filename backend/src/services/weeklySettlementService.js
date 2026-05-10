@@ -124,6 +124,7 @@ class WeeklySettlementService {
             .from('trades')
             .update({
               close_price: closePrice,
+              current_price: closePrice,
               profit: grossPnL,        // gross — no brokerage on settlement
               sell_brokerage: 0,       // no exit brokerage
               brokerage: 0,            // no brokerage for settlement
@@ -153,6 +154,25 @@ class WeeklySettlementService {
           // ── B) Reopen at SAME close price ──
           const leverage = Number(account.leverage || 5);
           const reopenMargin = (closePrice * qty) / leverage;
+
+          const { data: existingReopen, error: existingReopenErr } = await supabase
+            .from('trades')
+            .select('id, margin')
+            .eq('settled_from_trade_id', trade.id)
+            .eq('status', 'open')
+            .maybeSingle();
+
+          if (existingReopenErr) {
+            console.error(`  âŒ Reopen lookup ${trade.symbol}:`, existingReopenErr.message);
+            errors.push({ tradeId: trade.id, error: existingReopenErr.message });
+            continue;
+          }
+
+          if (existingReopen?.id) {
+            newMarginTotal += Number(existingReopen.margin || reopenMargin || 0);
+            console.log(`  â„¹ï¸ ${trade.symbol} #${trade.id} already reopened as #${existingReopen.id}`);
+            continue;
+          }
 
           const reopenData = {
             user_id: trade.user_id,
@@ -291,16 +311,7 @@ class WeeklySettlementService {
 
   // ── Get best available price ──
   async _getSettlementPrice(trade) {
-    // 1. Try live Kite price
-    try {
-      const kiteStreamService = require('./kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
-      if (livePrice && livePrice.last > 0) {
-        return Number(livePrice.last);
-      }
-    } catch (_) {}
-
-    // 2. DB symbols table
+    // 1. Use the same persisted "last" price shown in Quotes.
     const { data: symRow } = await supabase
       .from('symbols')
       .select('last_price, previous_close, bid, ask')
@@ -312,6 +323,15 @@ class WeeklySettlementService {
       const p = Number(s.last_price || 0) || Number(s.previous_close || 0) || Number(s.bid || 0) || Number(s.ask || 0);
       if (p > 0) return p;
     }
+
+    // 2. Fall back to live Kite price if the DB row is not populated.
+    try {
+      const kiteStreamService = require('./kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(trade.symbol);
+      if (livePrice && livePrice.last > 0) {
+        return Number(livePrice.last);
+      }
+    } catch (_) {}
 
     // 3. Trade's current/open price (last resort)
     return Number(trade.current_price || 0) || Number(trade.open_price || 0);

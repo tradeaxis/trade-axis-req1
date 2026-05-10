@@ -1016,9 +1016,10 @@ tr:last-child td {
 
 .quick-actions {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
 }
 
 .mini-action {
@@ -1029,6 +1030,7 @@ tr:last-child td {
   color: #fff;
   font-weight: 850;
   font-size: 11px;
+  flex: 0 0 auto;
 }
 
 .mini-action.purple {
@@ -1419,7 +1421,7 @@ tr:last-child td {
 
 .trade-metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   background: rgba(255, 255, 255, 0.08);
 }
