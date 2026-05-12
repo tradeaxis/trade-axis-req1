@@ -64,7 +64,7 @@ const withQuoteFallback = (symbol) => {
 };
 
 const withLiveQuote = (symbol) => {
-  const live = kiteStreamService.getPrice(symbol?.symbol);
+  const live = kiteStreamService.getPriceForSymbolRow(symbol);
   if (!live?.last || Number(live.last) <= 0) return withQuoteFallback(symbol);
 
   return {
@@ -213,7 +213,7 @@ exports.getQuote = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Symbol not found' });
     }
 
-    const live = kiteStreamService.getPrice(sym);
+    const live = kiteStreamService.getPriceForSymbolRow(dbSym) || kiteStreamService.getPrice(sym);
     const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
     const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);

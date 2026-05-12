@@ -32,7 +32,7 @@ class MarketDataService {
     if (!sym) return null;
 
     // 1. Live price from kiteStreamService memory (instant)
-    const live = kiteStreamService.getPrice(sym);
+    let live = kiteStreamService.getPrice(sym);
 
     // 2. Static metadata (lot_size, tick_size, display_name, etc.)
     let meta = this.metaCache.get(sym);
@@ -49,6 +49,7 @@ class MarketDataService {
     }
 
     const d = meta.d;
+    live = live || kiteStreamService.getPriceForSymbolRow(d);
 
     // ── Resolve prices ────────────────────────────────────────────────────
     // DB columns: last_price, bid, ask, open_price, high_price, low_price,

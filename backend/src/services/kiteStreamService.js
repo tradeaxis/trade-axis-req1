@@ -67,6 +67,17 @@ const getUpcomingContractRows = (rows = [], now = new Date(), maxContracts = 2) 
   return selectedRows;
 };
 
+const normalizePriceLookupKey = (value = '') =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[-_](JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$/i, '')
+    .replace(/[-_][IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
 class KiteStreamService {
   constructor() {
     this.ticker      = null;
@@ -93,14 +104,36 @@ class KiteStreamService {
   isRunning() { return this.running; }
 
   getPrice(symbol) {
-    return this.priceCache.get(String(symbol).toUpperCase()) || null;
+    const raw = String(symbol || '').toUpperCase();
+    if (!raw) return null;
+
+    const exact = this.priceCache.get(raw);
+    if (exact) return exact;
+
+    const lookupKey = normalizePriceLookupKey(raw);
+    if (!lookupKey) return null;
+
+    for (const [cachedSymbol, price] of this.priceCache.entries()) {
+      if (normalizePriceLookupKey(cachedSymbol) === lookupKey) return price;
+    }
+
+    return null;
+  }
+
+  getPriceForSymbolRow(row = {}) {
+    return (
+      this.getPrice(row.symbol) ||
+      this.getPrice(row.kite_tradingsymbol) ||
+      this.getPrice(row.display_name) ||
+      this.getPrice(row.underlying)
+    );
   }
 
   getPrices(symbols) {
     const out = {};
     for (const s of symbols) {
       const k = String(s).toUpperCase();
-      const c = this.priceCache.get(k);
+      const c = this.getPrice(k);
       if (c) out[k] = c;
     }
     return out;
