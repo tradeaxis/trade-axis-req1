@@ -341,17 +341,13 @@ class WeeklySettlementService {
       return { success: false, message: error.message };
     }
 
-    if (!rows || rows.length === 0) {
-      return { success: false, message: `No weekly settlement rows found for ${targetDate}.` };
-    }
-
     const now = new Date().toISOString();
     const accountIds = new Set();
     const errors = [];
     let fixedOld = 0;
     let fixedNew = 0;
 
-    for (const row of rows) {
+    for (const row of rows || []) {
       const closePrice = Number(row.close_price || 0);
       if (!closePrice || closePrice <= 0) {
         errors.push({ settlementId: row.id, error: 'Missing close price' });
@@ -410,14 +406,17 @@ class WeeklySettlementService {
 
     const staleRepair = await this._closeSupersededSettlementParents(targetDate, accountIds, now, errors);
     const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
+    const repairedAnything = fixedOld > 0 || fixedNew > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
 
     return {
-      success: errors.length === 0,
-      message: errors.length === 0
+      success: repairedAnything && errors.length === 0,
+      message: !repairedAnything
+        ? `No weekly settlement rows or open settlement duplicates found for ${targetDate}.`
+        : errors.length === 0
         ? `Settlement state repaired for ${targetDate}.`
         : `Settlement repair finished for ${targetDate} with ${errors.length} warning(s).`,
       settlementDate: targetDate,
-      rows: rows.length,
+      rows: rows?.length || 0,
       fixedOld,
       fixedNew,
       staleParentsClosed: staleRepair.staleParentsClosed,
@@ -458,11 +457,6 @@ class WeeklySettlementService {
     for (const child of childRows) {
       const parent = byId.get(String(child.settled_from_trade_id));
       const childSettlementWeek = String(child.settlement_week || targetDate);
-      const parentSettlementWeek = String(parent?.settlement_week || '');
-      if (childSettlementWeek !== targetDate && parentSettlementWeek !== targetDate) {
-        continue;
-      }
-
       const closePrice = Number(child.open_price || child.current_price || parent?.current_price || parent?.open_price || 0);
 
       if (child.account_id) accountIds.add(child.account_id);
