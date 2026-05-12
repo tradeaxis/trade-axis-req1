@@ -143,17 +143,22 @@ const useTradingStore = create((set, get) => ({
   },
 
   updateTradePnL: (tradeId, currentPrice, profit) => {
-    set((state) => ({
-      openTrades: state.openTrades.map((t) =>
+    set((state) => {
+      const nextState = {
+        openTrades: state.openTrades.map((t) =>
         t.id === tradeId ? { ...t, current_price: currentPrice, profit: parseFloat(profit) } : t
-      ),
-    }));
+        ),
+        lastSyncedAt: new Date().toISOString(),
+      };
+      writeTradingCache({ ...state, ...nextState });
+      return nextState;
+    });
   },
 
   updateTradesPnLBatch: (updates) => {
     set((state) => {
       const updatesMap = new Map(updates.map(u => [u.tradeId, u]));
-      return {
+      const nextState = {
         openTrades: state.openTrades.map((t) => {
           const update = updatesMap.get(t.id);
           if (update) {
@@ -161,7 +166,10 @@ const useTradingStore = create((set, get) => ({
           }
           return t;
         }),
+        lastSyncedAt: new Date().toISOString(),
       };
+      writeTradingCache({ ...state, ...nextState });
+      return nextState;
     });
   },
 

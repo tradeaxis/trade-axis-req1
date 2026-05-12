@@ -240,8 +240,8 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
       .replace(/-$/, '');
     return `${base}-${monthAbbr}`;
   }
-  // Fallback: just clean up the -I suffix
-  return rawSymbol.replace(/-I+$/, '').replace(/FUT$/i, '');
+  // Fallback: just clean up the series suffix
+  return String(rawSymbol).toUpperCase().replace(/-[IVX]+$/, '').replace(/FUT$/i, '');
 };
 
 const normalizeLiveUnderlyingKey = (value) =>
@@ -3476,7 +3476,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         >
           <div className="flex items-center gap-3">
             <span className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
-              {selectedSymbol}
+              {formatDisplaySymbol(selectedSymbol, allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols)}
             </span>
             <span className="text-base" style={{ color: '#787b86' }}>
               {bid ? `Bid ${bid.toFixed(2)}` : ''}
@@ -3690,7 +3690,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>
-                    {selectedSymbol}
+                    {formatDisplaySymbol(selectedSymbol, allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols)}
                   </div>
                   <div className="text-xs" style={{ color: '#787b86' }}>
                     {currentSymbolData?.display_name || ''}

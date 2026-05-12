@@ -89,6 +89,7 @@ const defaultSubBrokerPermissions = subBrokerFeatureTabs.reduce((acc, tab) => {
   return acc;
 }, {
   usersPositions: true,
+  usersLedger: true,
   usersUpdate: true,
   usersDelete: true,
   adminPositionsEdit: true,
@@ -102,6 +103,7 @@ const normalizeSubBrokerPermissions = (permissions = {}) => (
     return acc;
   }, {
     usersPositions: permissions?.usersPositions !== false,
+    usersLedger: permissions?.usersLedger !== false,
     usersUpdate: permissions?.usersUpdate !== false,
     usersDelete: permissions?.usersDelete !== false,
     adminPositionsEdit: permissions?.adminPositionsEdit !== false,
@@ -318,6 +320,31 @@ const getQuoteAgeMs = (symbol = {}) => {
 };
 
 const isQuoteStale = (symbol = {}) => getQuoteAgeMs(symbol) > 10_000;
+
+const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+const getTradeAxisSymbolLabel = (symbolOrRow, symbols = []) => {
+  const row = typeof symbolOrRow === 'string'
+    ? (symbols || []).find((item) => String(item?.symbol || '').toUpperCase() === String(symbolOrRow).toUpperCase())
+    : symbolOrRow;
+  const raw = typeof symbolOrRow === 'string' ? symbolOrRow : row?.symbol;
+  if (!row && !raw) return '-';
+
+  const expiry = getExpiryDate(row);
+  if (expiry) {
+    const base = String(row?.underlying || row?.display_name || raw || '')
+      .toUpperCase()
+      .replace(/\s+/g, '')
+      .replace(/[-_][IVX]+$/i, '')
+      .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+      .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+      .replace(/FUT$/i, '')
+      .replace(/[^A-Z0-9]/g, '');
+    return `${base}-${monthAbbrs[expiry.getMonth()] || ''}`;
+  }
+
+  return String(raw || row?.display_name || '').toUpperCase().replace(/[-_][IVX]+$/i, '').replace(/FUT$/i, '');
+};
 
 const getContractFamily = (symbol = {}) => {
   const base = symbol.underlying || symbol.symbol || symbol.display_name || '';
@@ -1227,7 +1254,7 @@ function Quotes({ selectedAccount, refreshAuth }) {
                       <Star size={16} />
                     </button>
                   </td>
-                  <td><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name}</div></td>
+                  <td><strong>{getTradeAxisSymbolLabel(symbol)}</strong><div className="meta">{symbol.display_name || symbol.symbol}</div></td>
                   <td className={priceTone}>{getSymbolBid(symbol).toFixed(2)}</td>
                   <td className={priceTone}>{getSymbolAsk(symbol).toFixed(2)}</td>
                   <td className={priceTone}>{getSymbolPrice(symbol).toFixed(2)}</td>
@@ -1250,7 +1277,7 @@ function Quotes({ selectedAccount, refreshAuth }) {
           accountId={selectedAccount?.id}
           symbols={symbols}
           initialSymbol={ticketSymbol.symbol}
-          title={ticketSymbol.symbol}
+          title={getTradeAxisSymbolLabel(ticketSymbol)}
           subtitle={ticketSymbol.display_name || 'Quote trade ticket'}
           onClose={() => setTicketSymbol(null)}
           onDone={load}
@@ -1849,10 +1876,10 @@ function OrderFields({ form, setForm, symbols, lockedSymbol = false }) {
       <div className="field">
         <label>Script</label>
         {lockedSymbol ? (
-          <div className="locked-script-field">{form.symbol || '-'}</div>
+          <div className="locked-script-field">{getTradeAxisSymbolLabel(form.symbol, symbols)}</div>
         ) : (
           <select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>
-            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
+            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{getTradeAxisSymbolLabel(row)}</option>)}
           </select>
         )}
       </div>
@@ -2623,6 +2650,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         showBroker={role === 'admin' && mode !== 'sub_broker'}
         autoCloseSettings={autoCloseSettings}
         canPositions={role !== 'sub_broker' || permissions.usersPositions !== false}
+        canLedger={role !== 'sub_broker' || permissions.usersLedger !== false}
         canUpdate={role !== 'sub_broker' || permissions.usersUpdate !== false}
         canDelete={role !== 'sub_broker' || permissions.usersDelete !== false}
         onRefresh={load}
@@ -2744,7 +2772,7 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                     <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'users')}>
                       <span>
                         <strong>{tab.label}</strong>
-                        <small>Expand to control the tab, P button, Update button, and Delete button.</small>
+                        <small>Expand to control the tab, P button, L button, Update button, and Delete button.</small>
                       </span>
                       <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
                     </button>
@@ -2757,6 +2785,10 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                         <label>
                           <span>P Button</span>
                           <input type="checkbox" checked={permissions.usersPositions !== false} onChange={(event) => updatePermission('usersPositions', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>L Button</span>
+                          <input type="checkbox" checked={permissions.usersLedger !== false} onChange={(event) => updatePermission('usersLedger', event.target.checked)} />
                         </label>
                         <label>
                           <span>Update Button</span>
@@ -2840,7 +2872,7 @@ function getAutoClosePercentForUser(user, settings = {}) {
   return user.auto_close_percent ?? user.stop_loss_percent ?? '-';
 }
 
-function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPositions = true, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
+function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPositions = true, canLedger = true, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
   const updateBroker = async (userId, brokerId) => {
     try {
       await api.post('/web-admin/assign-broker', { userId, brokerId: brokerId || null });
@@ -2893,7 +2925,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
                 <div className="quick-actions">
                   {canPositions && <button className="mini-action purple" onClick={() => onOpenDialog({ type: 'positions', user })}>P</button>}
                   <button className="mini-action orange" onClick={() => onOpenDialog({ type: 'brokerage', user })}>B</button>
-                  <button className="mini-action blue" onClick={() => onOpenDialog({ type: 'ledger', user })}>L</button>
+                  {canLedger && <button className="mini-action blue" onClick={() => onOpenDialog({ type: 'ledger', user })}>L</button>}
                 </div>
               </td>
               <td><strong className="mono">{user.login_id}</strong></td>
@@ -2902,7 +2934,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
               <td>{metrics.equity.toLocaleString('en-IN')}</td>
               <td className={openPnl >= 0 ? 'positive-blue' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td className={closedPnl >= 0 ? 'positive' : 'negative'}>{closedPnl.toFixed(2)}</td>
-              <td className={openPnl >= 0 ? 'positive' : 'negative'}>{openPnl.toFixed(2)}</td>
+              <td className={openPnl >= 0 ? 'positive-blue' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td>{metrics.margin.toLocaleString('en-IN')}</td>
               <td>{metrics.marginLevel ? metrics.marginLevel.toFixed(2) : '-'}</td>
               <td>{metrics.freeMargin.toLocaleString('en-IN')}</td>
@@ -4926,20 +4958,19 @@ function TradeOnBehalfPanel() {
       <div className="card pad">
         <div className="section-head"><div><h2>2. Select Script</h2><p>Pick the market instrument.</p></div></div>
         <div className="field">
-          <label>Script</label>
+          <label>Search Script</label>
           <input
-            className="input script-select"
-            list="trade-on-behalf-symbols"
-            value={form.symbol}
-            onChange={(event) => {
-              update('symbol', event.target.value.toUpperCase());
-              setSymbolSearch(event.target.value);
-            }}
-            placeholder="Search or select script"
+            className="input"
+            value={symbolSearch}
+            onChange={(event) => setSymbolSearch(event.target.value)}
+            placeholder="Search script"
           />
-          <datalist id="trade-on-behalf-symbols">
-            {visibleSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.display_name || symbol.underlying || symbol.exchange || ''}</option>)}
-          </datalist>
+        </div>
+        <div className="field">
+          <label>Script</label>
+          <select className="select" value={form.symbol} onChange={(event) => update('symbol', event.target.value)}>
+            {visibleSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{getTradeAxisSymbolLabel(symbol)}</option>)}
+          </select>
         </div>
         <div className="meta">{visibleSymbols.length} matching scripts</div>
         {selectedSymbol && (

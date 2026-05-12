@@ -21,6 +21,7 @@ const SUB_BROKER_FEATURES = [
   'adminOrders',
   'users',
   'usersPositions',
+  'usersLedger',
   'usersUpdate',
   'usersDelete',
   'leverageMargin',
@@ -459,7 +460,7 @@ exports.listSymbols = async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
     const symbols = (data || []).map((symbol) => {
-      const live = kiteStreamService.getPrice(symbol.symbol);
+      const live = kiteStreamService.getPriceForSymbolRow(symbol);
       if (!live || !toNumber(live.last)) return symbol;
       return {
         ...symbol,

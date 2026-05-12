@@ -152,7 +152,13 @@ const useMarketStore = create((set, get) => ({
           };
         }
 
-        return changed ? { quotes: newQuotes } : {};
+        if (!changed) return {};
+        const nextState = {
+          quotes: newQuotes,
+          lastSyncedAt: new Date().toISOString(),
+        };
+        writeMarketCache({ ...state, ...nextState });
+        return nextState;
       });
       return;
     }
@@ -175,7 +181,7 @@ const useMarketStore = create((set, get) => ({
           existing.timestamp && (now - existing.timestamp < 60000)
         ) return {};
 
-        return {
+        const nextState = {
           quotes: {
             ...state.quotes,
             [sym]: {
@@ -194,7 +200,10 @@ const useMarketStore = create((set, get) => ({
               source:    data.source || 'socket',
             },
           },
+          lastSyncedAt: new Date().toISOString(),
         };
+        writeMarketCache({ ...state, ...nextState });
+        return nextState;
       });
     }
   },

@@ -17,6 +17,7 @@ const SYMBOL_SELECT_FIELDS = [
   'symbol',
   'display_name',
   'underlying',
+  'kite_tradingsymbol',
   'category',
   'segment',
   'instrument_type',

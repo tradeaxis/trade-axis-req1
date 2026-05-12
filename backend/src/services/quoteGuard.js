@@ -51,7 +51,7 @@ const resolveTradeablePrice = ({
   allowStaleDb = false,
 } = {}) => {
   const normalizedSymbol = String(symbol || symbolRow?.symbol || '').toUpperCase();
-  const live = liveQuote || kiteStreamService.getPrice(normalizedSymbol);
+  const live = liveQuote || kiteStreamService.getPriceForSymbolRow(symbolRow || { symbol: normalizedSymbol });
   const liveAgeMs = getAgeMs(live?.timestamp);
   const livePrice = getSidePrice(live, side);
   const hasFreshLive = livePrice > 0 && liveAgeMs <= maxAgeMs;
