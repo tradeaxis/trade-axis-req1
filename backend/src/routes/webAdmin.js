@@ -27,6 +27,10 @@ router.get('/auto-close-settings', webAdminAuth, webAdminController.getAutoClose
 router.post('/auto-close-settings', webAdminAuth, webAdminController.saveAutoCloseSettings);
 router.get('/sub-broker-permissions', webAdminAuth, webAdminController.getSubBrokerFeaturePermissions);
 router.post('/sub-broker-permissions', protect, adminOnly, webAdminController.saveSubBrokerFeaturePermissions);
+router.get('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.getUserSegmentSettings);
+router.post('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.saveUserSegmentSettings);
+router.get('/leverage-margin-settings', webAdminAuth, webAdminController.getGlobalLeverageMarginSettings);
+router.post('/leverage-margin-settings', webAdminAuth, webAdminController.saveGlobalLeverageMarginSettings);
 
 router.get('/transactions', webAdminAuth, webAdminController.listTransactions);
 router.post('/transactions/:id/action', webAdminAuth, webAdminController.updateTransaction);

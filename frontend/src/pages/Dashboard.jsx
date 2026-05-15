@@ -2144,7 +2144,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     if (!closeConfirmTrade) return null;
 
     const trade = closeConfirmTrade;
-    const pnl = Number(trade.profit || 0) + Number(trade.brokerage || 0);
+    const pnl = getTradeLivePnl(trade, getTradeQuotePrice(trade));
     const isProfit = pnl >= 0;
     const maxQty = Number(trade.quantity);
     const partialPnL = isPartialClose ? (pnl / maxQty) * closeQty : pnl;
@@ -2526,6 +2526,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     const symAsk = Number(quote.ask || quote.last_price || 0);
     const change = Number(quote.change_percent || sym.change_percent || 0);
     const spread = Math.abs(symAsk - symBid);
+    const actionDisplaySymbol = formatDisplaySymbol(sym.symbol, allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols);
 
     const expiry = sym.expiry_date
       ? new Date(sym.expiry_date).toLocaleDateString('en-IN', {
@@ -2552,7 +2553,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             <div className="flex items-center justify-between">
               <div>
                 <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
-                  {sym.symbol}
+                  {actionDisplaySymbol}
                 </div>
                 <div className="text-sm" style={{ color: '#787b86' }}>
                   {sym.display_name}

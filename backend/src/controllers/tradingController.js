@@ -53,6 +53,91 @@ const buildPartialCloseComment = (closedQty, totalQty, remainingQty) => (
   fitTradeComment(`Partial close: ${closedQty} of ${totalQty}. Remaining: ${remainingQty}`)
 );
 
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+const normalizeSymbolLookupKey = (value) =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/-[IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+const parseDisplaySymbol = (value) => {
+  const raw = String(value || '').toUpperCase().trim();
+  const match = raw.replace(/\s+/g, '').match(/^(.+?)-?([A-Z]{3})$/);
+  if (!match || !MONTHS.includes(match[2])) return null;
+  return {
+    base: normalizeSymbolLookupKey(match[1]),
+    month: match[2],
+  };
+};
+
+const findSymbolData = async (rawSymbol) => {
+  const requested = String(rawSymbol || '').trim().toUpperCase();
+  const compact = requested.replace(/\s+/g, '');
+  const exactCandidates = [...new Set([requested, compact].filter(Boolean))];
+
+  for (const candidate of exactCandidates) {
+    const { data, error } = await supabase
+      .from('symbols')
+      .select('*')
+      .or(`symbol.eq.${candidate},kite_tradingsymbol.eq.${candidate},display_name.eq.${candidate}`)
+      .order('expiry_date', { ascending: true })
+      .limit(1);
+    if (error) throw error;
+    if (data?.[0]) return data[0];
+  }
+
+  const parsed = parseDisplaySymbol(requested);
+  if (parsed) {
+    const { data, error } = await supabase
+      .from('symbols')
+      .select('*')
+      .order('expiry_date', { ascending: true })
+      .limit(200);
+    if (error) throw error;
+    const row = (data || []).find((item) => {
+      const base = normalizeSymbolLookupKey(item.underlying || item.display_name || item.symbol);
+      const expiry = item.expiry_date ? new Date(item.expiry_date) : null;
+      const month = expiry && !Number.isNaN(expiry.getTime()) ? MONTHS[expiry.getMonth()] : '';
+      return base === parsed.base && month === parsed.month;
+    });
+    if (row) return row;
+  }
+
+  return null;
+};
+
+const getEquivalentSymbols = async (symbolData) => {
+  if (!symbolData?.symbol) return [];
+  const symbols = new Set([String(symbolData.symbol).toUpperCase()]);
+
+  let query = null;
+  if (symbolData.kite_instrument_token) {
+    query = supabase
+      .from('symbols')
+      .select('symbol')
+      .eq('kite_instrument_token', symbolData.kite_instrument_token);
+  } else if (symbolData.underlying && symbolData.expiry_date) {
+    query = supabase
+      .from('symbols')
+      .select('symbol')
+      .eq('underlying', symbolData.underlying)
+      .eq('expiry_date', symbolData.expiry_date);
+  }
+
+  if (query) {
+    const { data } = await query.limit(50);
+    (data || []).forEach((row) => {
+      if (row.symbol) symbols.add(String(row.symbol).toUpperCase());
+    });
+  }
+
+  return [...symbols];
+};
+
 // ─────────────────────────────────────────────
 //  GET POSITIONS
 // ─────────────────────────────────────────────
@@ -146,10 +231,10 @@ exports.placeOrder = async (req, res) => {
 
     // ── Fetch symbol data (MUST be before market hours check) ──
     // ── Fetch symbol data (MUST be before market hours check) ──
-    const { data: symbolData, error: symbolError } = await supabase
-      .from('symbols').select('*').eq('symbol', symbol.toUpperCase()).single();
-    if (symbolError || !symbolData)
+    const symbolData = await findSymbolData(symbol);
+    if (!symbolData)
       return res.status(404).json({ success: false, message: 'Symbol not found' });
+    const equivalentSymbols = await getEquivalentSymbols(symbolData);
 
     if (symbolData.is_banned)
       return res.status(403).json({
@@ -290,7 +375,7 @@ exports.placeOrder = async (req, res) => {
 
     const { data: oppositeTrades } = await supabase
       .from('trades').select('*').eq('account_id', accountId)
-      .eq('symbol', symbolData.symbol).eq('trade_type', oppositeType).eq('status', 'open');
+      .in('symbol', equivalentSymbols).eq('trade_type', oppositeType).eq('status', 'open');
 
     if (oppositeTrades && oppositeTrades.length > 0) {
       const existing = oppositeTrades[0];
@@ -424,7 +509,7 @@ exports.placeOrder = async (req, res) => {
     // ── SAME direction → merge (average-up/down) ──────────────────
     const { data: existingTrades } = await supabase
       .from('trades').select('*').eq('account_id', accountId)
-      .eq('symbol', symbolData.symbol).eq('trade_type', type).eq('status', 'open');
+      .in('symbol', equivalentSymbols).eq('trade_type', type).eq('status', 'open');
 
     if (existingTrades && existingTrades.length > 0) {
       const existing = existingTrades[0];
@@ -573,16 +658,12 @@ exports.closePosition = async (req, res) => {
     const { data: userData } = await supabase.from('users').select('brokerage_rate').eq('id', userId).single();
     const brokerageRate = userData?.brokerage_rate || 0.0003;
 
-    const { data: symRows } = await supabase
-      .from('symbols')
-      .select('symbol, bid, ask, last_price, last_update')
-      .eq('symbol', trade.symbol)
-      .limit(1);
+    const closeSymbolRow = await findSymbolData(trade.symbol);
 
     const closePriceState = resolveTradeablePrice({
       symbol: trade.symbol,
       side: trade.trade_type === 'buy' ? 'sell' : 'buy',
-      symbolRow: symRows?.[0] || null,
+      symbolRow: closeSymbolRow || null,
       allowStaleDb: isAdminClose,
     });
     let closePrice = closePriceState.price;

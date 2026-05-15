@@ -90,11 +90,13 @@ const defaultSubBrokerPermissions = subBrokerFeatureTabs.reduce((acc, tab) => {
 }, {
   usersPositions: true,
   usersLedger: true,
+  usersCreate: true,
   usersUpdate: true,
   usersDelete: true,
   adminPositionsEdit: true,
   adminPositionsExit: true,
   adminPositionsDelete: true,
+  adminPositionsReopen: true,
 });
 
 const normalizeSubBrokerPermissions = (permissions = {}) => (
@@ -104,11 +106,13 @@ const normalizeSubBrokerPermissions = (permissions = {}) => (
   }, {
     usersPositions: permissions?.usersPositions !== false,
     usersLedger: permissions?.usersLedger !== false,
+    usersCreate: permissions?.usersCreate !== false,
     usersUpdate: permissions?.usersUpdate !== false,
     usersDelete: permissions?.usersDelete !== false,
     adminPositionsEdit: permissions?.adminPositionsEdit !== false,
     adminPositionsExit: permissions?.adminPositionsExit !== false,
     adminPositionsDelete: permissions?.adminPositionsDelete !== false,
+    adminPositionsReopen: permissions?.adminPositionsReopen !== false,
   })
 );
 
@@ -320,6 +324,13 @@ const getQuoteAgeMs = (symbol = {}) => {
 };
 
 const isQuoteStale = (symbol = {}) => getQuoteAgeMs(symbol) > 10_000;
+
+const getQuoteSegmentKind = (symbol = {}) => {
+  const source = `${symbol.category || ''} ${symbol.segment || ''} ${symbol.exchange || ''} ${symbol.instrument_type || ''} ${symbol.symbol || ''} ${symbol.underlying || ''}`.toUpperCase();
+  if (/MCX|CRUDE|GOLD|SILVER|COPPER|NATURALGAS|ALUMINIUM|ZINC|LEAD|NICKEL/.test(source)) return 'mcx';
+  if (/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|INDEX|IDX/.test(source)) return 'indices';
+  return 'stocks';
+};
 
 const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
@@ -976,6 +987,8 @@ function AddAccountModal({ onClose, onAdded }) {
 
 function Overview({ role, selectedAccount }) {
   const [summary, setSummary] = useState(null);
+  const [symbols, setSymbols] = useState([]);
+  const [showOrder, setShowOrder] = useState(false);
   const isOperator = role === 'admin' || role === 'sub_broker';
 
   const load = useCallback(async () => {
@@ -991,6 +1004,11 @@ function Overview({ role, selectedAccount }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!isOperator) return;
+    loadTradableSymbols({ limit: 5000 }).then(setSymbols).catch(() => {});
+  }, [isOperator]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1038,6 +1056,29 @@ function Overview({ role, selectedAccount }) {
         <Stat label="Pending Withdrawals" value={summary?.pendingWithdrawals || 0} />
         <Stat label="Pending QR Deposits" value={summary?.pendingDeposits || 0} />
       </div>
+      <div className="card pad compact-action-card">
+        <div className="section-head">
+          <div>
+            <h2>Workspace Order</h2>
+            <p>Place an order from the operator workspace.</p>
+          </div>
+          <button className="btn primary" disabled={!selectedAccount?.id || !symbols.length} onClick={() => setShowOrder(true)}>
+            <Plus size={16} />
+            New Order
+          </button>
+        </div>
+      </div>
+      {showOrder && (
+        <TradeTicketModal
+          accountId={selectedAccount?.id}
+          symbols={symbols}
+          initialSymbol={symbols[0]?.symbol}
+          title="New Order"
+          subtitle="Workspace order ticket"
+          onClose={() => setShowOrder(false)}
+          onDone={() => { setShowOrder(false); load(); }}
+        />
+      )}
     </>
   );
 }
@@ -1056,6 +1097,7 @@ function Quotes({ selectedAccount, refreshAuth }) {
   const [watchlists, setWatchlists] = useState([]);
   const [watchlistSymbols, setWatchlistSymbols] = useState([]);
   const [activeWatchlistId, setActiveWatchlistId] = useState('all');
+  const [segmentFilter, setSegmentFilter] = useState('all');
   const [newWatchlistName, setNewWatchlistName] = useState('');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1181,6 +1223,7 @@ function Quotes({ selectedAccount, refreshAuth }) {
         String(symbol.display_name || '').toLowerCase().includes(term) ||
         String(symbol.underlying || '').toLowerCase().includes(term);
       if (!matchesSearch) return false;
+      if (segmentFilter !== 'all' && getQuoteSegmentKind(symbol) !== segmentFilter) return false;
       if (activeWatchlistId === 'all') return true;
       if (term) return true;
       return watchlistSymbols.includes(String(symbol.symbol || '').toUpperCase());
@@ -1227,6 +1270,17 @@ function Quotes({ selectedAccount, refreshAuth }) {
             <button className="icon-btn danger-text" onClick={() => deleteWatchlist(activeWatchlistId)} title="Delete watchlist"><Trash2 size={16} /></button>
           )}
         </div>
+      </div>
+
+      <div className="tabs scroll-tabs compact-segment-tabs">
+        {[
+          ['all', 'All'],
+          ['stocks', 'Future Stocks'],
+          ['mcx', 'MCX'],
+          ['indices', 'Indices'],
+        ].map(([id, label]) => (
+          <button key={id} className={`tab ${segmentFilter === id ? 'active' : ''}`} onClick={() => setSegmentFilter(id)}>{label}</button>
+        ))}
       </div>
 
       <div className="table-wrap">
@@ -1529,9 +1583,10 @@ function Trade({ selectedAccount, refreshAuth }) {
         }
         toast.success(closeQty < totalQty ? 'Position partially closed' : 'Position closed');
       } else {
+        const targetTrade = childTrades[0] || trade;
         const res = closeQty < totalQty
-          ? await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: closeQty })
-          : await api.post(`/trading/close/${trade.id}`, { accountId });
+          ? await api.post(`/trading/partial-close/${targetTrade.id}`, { accountId, volume: closeQty })
+          : await api.post(`/trading/close/${targetTrade.id}`, { accountId });
         toast.success(res.data?.message || (closeQty < totalQty ? 'Position partially closed' : 'Position closed'));
       }
       setCloseTarget(null);
@@ -1686,7 +1741,7 @@ function Trade({ selectedAccount, refreshAuth }) {
             >
               <div>
                 <div className="position-title">
-                  <strong>{position.symbol}</strong>
+                  <strong>{getTradeAxisSymbolLabel(position.symbol, symbols)}</strong>
                   <span className={`pill ${position.trade_type === 'buy' ? 'teal' : 'red'}`}>{position.trade_type} {position.quantity}</span>
                 </div>
                 <div className="position-prices">
@@ -1724,7 +1779,7 @@ function Trade({ selectedAccount, refreshAuth }) {
               <div className="position-card-main">
                 <div>
                   <div className="position-title">
-                    <strong>{order.symbol}</strong>
+                    <strong>{getTradeAxisSymbolLabel(order.symbol, symbols)}</strong>
                     <span className="pill gold">{order.status || 'pending'}</span>
                   </div>
                   <div className="position-prices">
@@ -2634,7 +2689,9 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         </div>
         <div className="right">
           <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
-          <button className="btn primary" onClick={() => setShowCreate(true)}><Plus size={16} />Create {mode === 'sub_broker' ? 'Sub Broker' : 'User'}</button>
+          {(role !== 'sub_broker' || permissions.usersCreate !== false) && (
+            <button className="btn primary" onClick={() => setShowCreate(true)}><Plus size={16} />Create {mode === 'sub_broker' ? 'Sub Broker' : 'User'}</button>
+          )}
         </div>
       </div>
       {brokerScope && (
@@ -2651,6 +2708,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         autoCloseSettings={autoCloseSettings}
         canPositions={role !== 'sub_broker' || permissions.usersPositions !== false}
         canLedger={role !== 'sub_broker' || permissions.usersLedger !== false}
+        canCreate={role !== 'sub_broker' || permissions.usersCreate !== false}
         canUpdate={role !== 'sub_broker' || permissions.usersUpdate !== false}
         canDelete={role !== 'sub_broker' || permissions.usersDelete !== false}
         onRefresh={load}
@@ -2772,7 +2830,7 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                     <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'users')}>
                       <span>
                         <strong>{tab.label}</strong>
-                        <small>Expand to control the tab, P button, L button, Update button, and Delete button.</small>
+                        <small>Expand to control the tab, Create, P, L, Update, and Delete buttons.</small>
                       </span>
                       <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
                     </button>
@@ -2781,6 +2839,10 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                         <label>
                           <span>Complete User Management</span>
                           <input type="checkbox" checked={permissions.users !== false} onChange={(event) => updatePermission('users', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Create Button</span>
+                          <input type="checkbox" checked={permissions.usersCreate !== false} onChange={(event) => updatePermission('usersCreate', event.target.checked)} />
                         </label>
                         <label>
                           <span>P Button</span>
@@ -2811,7 +2873,7 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                     <button type="button" className="permission-card-toggle" onClick={() => setExpandedPermission(expanded ? '' : 'adminPositions')}>
                       <span>
                         <strong>{tab.label}</strong>
-                        <small>Expand to control the tab and Edit, Exit, Delete actions.</small>
+                        <small>Expand to control the tab and Edit, Exit, Reopen, Delete actions.</small>
                       </span>
                       <span className="permission-expand-indicator">{expanded ? 'Hide' : 'Manage'}</span>
                     </button>
@@ -2828,6 +2890,10 @@ function SubBrokerPermissionsModal({ broker, onClose }) {
                         <label>
                           <span>Exit Button</span>
                           <input type="checkbox" checked={permissions.adminPositionsExit !== false} onChange={(event) => updatePermission('adminPositionsExit', event.target.checked)} />
+                        </label>
+                        <label>
+                          <span>Reopen Button</span>
+                          <input type="checkbox" checked={permissions.adminPositionsReopen !== false} onChange={(event) => updatePermission('adminPositionsReopen', event.target.checked)} />
                         </label>
                         <label>
                           <span>Delete Button</span>
@@ -3120,6 +3186,7 @@ function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPer
         onReload={load}
         canEdit={role !== 'sub_broker' || permissions.adminPositionsEdit !== false}
         canExit={role !== 'sub_broker' || permissions.adminPositionsExit !== false}
+        canReopen={role !== 'sub_broker' || permissions.adminPositionsReopen !== false}
         canDelete={role !== 'sub_broker' || permissions.adminPositionsDelete !== false}
       />
     </div>
@@ -3222,7 +3289,7 @@ function UserPositionsModal({ user, onClose }) {
   );
 }
 
-function AdminPositionTable({ rows, status, onReload, canEdit = true, canExit = true, canDelete = true }) {
+function AdminPositionTable({ rows, status, onReload, canEdit = true, canExit = true, canReopen = true, canDelete = true }) {
   const [editTrade, setEditTrade] = useState(null);
   const [exitTrade, setExitTrade] = useState(null);
 
@@ -3274,7 +3341,7 @@ function AdminPositionTable({ rows, status, onReload, canEdit = true, canExit = 
                 <td>
                   <div className="quick-actions">
                     {canEdit && <button className="mini-action blue" onClick={() => setEditTrade(row)}>Edit</button>}
-                    {row.status === 'closed' ? (
+                    {row.status === 'closed' && canReopen ? (
                       <button className="mini-action orange" onClick={() => reopenTrade(row)}>Reopen</button>
                     ) : canExit ? (
                       <button className="mini-action orange" onClick={() => setExitTrade(row)}>Exit</button>
@@ -3731,15 +3798,46 @@ function LedgerUpdateEditor({ user, onSaved }) {
 
 function SegmentSettingsEditor({ user }) {
   const segments = ['NSE Index (NSEFUT)', 'NSE Index Options (NSEOPT)', 'MCX Futures (MCXFUT)', 'NSE Futures Options'];
+  const fields = ['Intraday Margin %', 'Holding Margin %', 'Brokerage /Cr', 'Max Lots', 'Order Lots'];
+  const [settings, setSettings] = useState({});
+
+  useEffect(() => {
+    api.get(`/web-admin/users/${user.id}/segment-settings`)
+      .then((res) => setSettings(res.data?.data || {}))
+      .catch(() => {});
+  }, [user.id]);
+
+  const setSegmentValue = (segment, key, value) => {
+    setSettings((prev) => ({
+      ...prev,
+      [segment]: {
+        ...(prev[segment] || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  const saveSegment = async (segment) => {
+    try {
+      const res = await api.post(`/web-admin/users/${user.id}/segment-settings`, {
+        segment,
+        values: settings[segment] || {},
+      });
+      toast.success(res.data?.message || 'Segment settings saved');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Segment settings save failed');
+    }
+  };
+
   return (
     <div className="segment-settings">
       {segments.map((segment) => (
         <div className="admin-dark-panel segment-card" key={segment}>
-          <div className="section-head"><div><h2>{segment}</h2><p>0 means use global setting.</p></div><button className="btn primary" onClick={() => toast.error('Segment settings endpoint is not enabled yet')}>Save</button></div>
+          <div className="section-head"><div><h2>{segment}</h2><p>0 means use global setting.</p></div><button className="btn primary" onClick={() => saveSegment(segment)}>Save</button></div>
           <div className="grid-3">
-            {['Intraday Margin %', 'Holding Margin %', 'Brokerage /Cr', 'Max Lots', 'Order Lots'].map((label) => <div className="field" key={label}><label>{label}</label><input className="input" defaultValue="0" /></div>)}
+            {fields.map((label) => <div className="field" key={label}><label>{label}</label><input className="input" value={settings[segment]?.[label] ?? '0'} onChange={(event) => setSegmentValue(segment, label, event.target.value)} /></div>)}
           </div>
-          <div className="grid-2"><label className="row"><span>Option Buying Allowed</span><input type="checkbox" defaultChecked /></label><label className="row"><span>Option Selling Allowed</span><input type="checkbox" /></label></div>
+          <div className="grid-2"><label className="row"><span>Option Buying Allowed</span><input type="checkbox" checked={settings[segment]?.optionBuyingAllowed !== false} onChange={(event) => setSegmentValue(segment, 'optionBuyingAllowed', event.target.checked)} /></label><label className="row"><span>Option Selling Allowed</span><input type="checkbox" checked={settings[segment]?.optionSellingAllowed === true} onChange={(event) => setSegmentValue(segment, 'optionSellingAllowed', event.target.checked)} /></label></div>
         </div>
       ))}
     </div>
@@ -4080,19 +4178,47 @@ function AdminOrdersPanel() {
 
 function LeverageMarginPanel() {
   const groups = ['NSE Index Settings', 'NSE Index Options Settings', 'NSE Future Settings', 'NSE Future Options Settings', 'MCX Settings'];
+  const fields = ['Brokerage / Cr', 'Max Lots', 'Order Lots', 'Holding Margin %', 'Intraday Margin %'];
+  const [settings, setSettings] = useState({});
+
+  useEffect(() => {
+    api.get('/web-admin/leverage-margin-settings')
+      .then((res) => setSettings(res.data?.data?.groups || {}))
+      .catch(() => {});
+  }, []);
+
+  const updateSetting = (group, key, value) => {
+    setSettings((prev) => ({
+      ...prev,
+      [group]: {
+        ...(prev[group] || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  const saveAll = async () => {
+    try {
+      const res = await api.post('/web-admin/leverage-margin-settings', { groups: settings });
+      toast.success(res.data?.message || 'Global settings saved');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Global settings save failed');
+    }
+  };
+
   return (
     <div className="card pad">
-      <div className="section-head"><div><h2>Leverage & Margin Settings</h2><p>Global margin, brokerage, lot size and option permissions.</p></div><button className="btn primary" onClick={() => toast.error('Global settings endpoint is not enabled yet')}>Save All</button></div>
+      <div className="section-head"><div><h2>Leverage & Margin Settings</h2><p>Global margin, brokerage per crore, lot size and option permissions.</p></div><button className="btn primary" onClick={saveAll}>Save All</button></div>
       <div className="segment-settings">
         {groups.map((group) => (
           <div className="card pad" key={group}>
             <h2>{group}</h2>
             <div className="grid-3">
-              {['Brokerage / Cr', 'Max Lots', 'Order Lots', 'Holding Margin %', 'Intraday Margin %'].map((field) => (
-                <div className="field" key={field}><label>{field}</label><input className="input" defaultValue={field.includes('Brokerage') ? 6000 : 30} /></div>
+              {fields.map((field) => (
+                <div className="field" key={field}><label>{field}</label><input className="input" value={settings[group]?.[field] ?? (field.includes('Brokerage') ? 6000 : 30)} onChange={(event) => updateSetting(group, field, event.target.value)} /></div>
               ))}
             </div>
-            <div className="grid-2"><label className="row"><span>Option Buying Allowed</span><input type="checkbox" defaultChecked /></label><label className="row"><span>Option Selling Allowed</span><input type="checkbox" /></label></div>
+            <div className="grid-2"><label className="row"><span>Option Buying Allowed</span><input type="checkbox" checked={settings[group]?.optionBuyingAllowed !== false} onChange={(event) => updateSetting(group, 'optionBuyingAllowed', event.target.checked)} /></label><label className="row"><span>Option Selling Allowed</span><input type="checkbox" checked={settings[group]?.optionSellingAllowed === true} onChange={(event) => updateSetting(group, 'optionSellingAllowed', event.target.checked)} /></label></div>
           </div>
         ))}
       </div>
@@ -4230,32 +4356,52 @@ const downloadBlob = (content, filename, type) => {
 };
 
 const getLedgerExportRows = (rows = []) =>
-  rows.map((row) => ({
-    date: formatDate(row.date || row.created_at || row.updated_at),
-    userId: row.user_login_id || row.user_id || '-',
-    userName: row.user_name || '-',
-    account: row.account_number || '-',
-    source: row.source || '-',
-    action: row.action || '-',
-    amount: Number(row.amount || 0).toFixed(2),
-    status: row.status || '-',
-    message: row.message || '-',
-  }));
+  rows.map((row) => {
+    const amount = Number(row.amount || 0);
+    const brokerage = Number(row.brokerage || row.commission || 0);
+    const debit = amount < 0 ? Math.abs(amount) : 0;
+    const credit = amount > 0 ? amount : 0;
+    return {
+      frDate: formatDate(row.from_date || row.date || row.created_at || row.updated_at),
+      toDate: formatDate(row.to_date || row.processed_at || row.date || row.updated_at || row.created_at),
+      tradeDate: formatDate(row.date || row.created_at || row.updated_at),
+      id: row.user_login_id || row.user_id || '-',
+      name: row.user_name || '-',
+      debit: debit.toFixed(2),
+      credit: credit.toFixed(2),
+      brokerage: brokerage.toFixed(2),
+      netAmount: (credit - debit - brokerage).toFixed(2),
+      remarks: row.message || row.action || row.status || '-',
+      date: formatDate(row.date || row.created_at || row.updated_at),
+      userId: row.user_login_id || row.user_id || '-',
+      userName: row.user_name || '-',
+      account: row.account_number || '-',
+      source: row.source || '-',
+      action: row.action || '-',
+      amount: amount.toFixed(2),
+      status: row.status || '-',
+      message: row.message || '-',
+    };
+  });
 
 const exportLedgerExcel = (rows, label) => {
   const exportRows = getLedgerExportRows(rows);
   const columns = [
-    ['Date & Time', 'date', 150],
-    ['User ID', 'userId', 90],
-    ['User Name', 'userName', 150],
-    ['Account', 'account', 120],
-    ['Source', 'source', 95],
-    ['Action', 'action', 120],
-    ['Amount', 'amount', 95],
-    ['Status', 'status', 95],
-    ['Message', 'message', 420],
+    ['FR DATE', 'frDate', 120],
+    ['TO DATE', 'toDate', 120],
+    ['TR DATE', 'tradeDate', 120],
+    ['ID', 'id', 90],
+    ['NAME', 'name', 150],
+    ['DEBIT', 'debit', 95],
+    ['CREDIT', 'credit', 95],
+    ['BROKERAGE', 'brokerage', 95],
+    ['NET AMT', 'netAmount', 95],
+    ['REMARKS', 'remarks', 360],
   ];
-  const totalAmount = exportRows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2);
+  const totalDebit = exportRows.reduce((sum, row) => sum + Number(row.debit || 0), 0).toFixed(2);
+  const totalCredit = exportRows.reduce((sum, row) => sum + Number(row.credit || 0), 0).toFixed(2);
+  const totalBrokerage = exportRows.reduce((sum, row) => sum + Number(row.brokerage || 0), 0).toFixed(2);
+  const totalNet = exportRows.reduce((sum, row) => sum + Number(row.netAmount || 0), 0).toFixed(2);
   const html = `<!doctype html><html><head><meta charset="utf-8" /><style>
     body{font-family:Arial,sans-serif;color:#172033;background:#fff}
     h1{margin:0;color:#10213f;font-size:22px}
@@ -4271,14 +4417,15 @@ const exportLedgerExcel = (rows, label) => {
   </style></head><body>
     <h1>Trade Axis Action Ledger</h1>
     <div class="sub">${escapeHtml(label)} &nbsp; | &nbsp; Generated: ${escapeHtml(formatDate(new Date()))}</div>
-    <table class="summary"><tr><td>Total Rows: ${exportRows.length}</td><td>Total Amount: ${escapeHtml(totalAmount)}</td></tr></table>
+    <table class="summary"><tr><td>Total Rows: ${exportRows.length}</td><td>Debit: ${escapeHtml(totalDebit)}</td><td>Credit: ${escapeHtml(totalCredit)}</td><td>Brokerage: ${escapeHtml(totalBrokerage)}</td><td>Net: ${escapeHtml(totalNet)}</td></tr></table>
     <table class="report">
       <colgroup>${columns.map(([, , width]) => `<col style="width:${width}px" />`).join('')}</colgroup>
       <thead><tr>${columns.map(([header]) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
       <tbody>${exportRows.map((row) => `<tr>${columns.map(([, key]) => {
         const value = row[key];
-        if (key === 'amount') {
-          return `<td class="${Number(value) >= 0 ? 'amount-pos' : 'amount-neg'}">${escapeHtml(value)}</td>`;
+        if (['debit', 'credit', 'brokerage', 'netAmount', 'amount'].includes(key)) {
+          const isDebit = key === 'debit' || (key === 'netAmount' && Number(value) < 0);
+          return `<td class="${isDebit ? 'amount-neg' : 'amount-pos'}">${escapeHtml(value)}</td>`;
         }
         if (key === 'status') return `<td class="status">${escapeHtml(value)}</td>`;
         return `<td>${escapeHtml(value)}</td>`;
@@ -4318,15 +4465,15 @@ const pdfRect = (x, y, width, height, fill = '1 1 1', stroke = '0.80 0.84 0.89')
 
 const buildPdfPageStream = ({ pageRows, pageNumber, pageCount, label, generatedAt, totalRows, totalAmount }) => {
   const columns = [
-    { key: 'date', label: 'Date & Time', x: 28, width: 100, max: 18 },
-    { key: 'userId', label: 'User ID', x: 128, width: 56, max: 10 },
-    { key: 'userName', label: 'User', x: 184, width: 92, max: 15 },
-    { key: 'account', label: 'Account', x: 276, width: 74, max: 12 },
-    { key: 'source', label: 'Source', x: 350, width: 62, max: 10 },
-    { key: 'action', label: 'Action', x: 412, width: 82, max: 14 },
-    { key: 'amount', label: 'Amount', x: 494, width: 64, max: 11 },
-    { key: 'status', label: 'Status', x: 558, width: 64, max: 11 },
-    { key: 'message', label: 'Message', x: 622, width: 192, max: 34 },
+    { key: 'frDate', label: 'FR DATE', x: 28, width: 76, max: 12 },
+    { key: 'toDate', label: 'TO DATE', x: 104, width: 76, max: 12 },
+    { key: 'id', label: 'ID', x: 180, width: 62, max: 10 },
+    { key: 'name', label: 'NAME', x: 242, width: 92, max: 15 },
+    { key: 'debit', label: 'DEBIT', x: 334, width: 72, max: 11 },
+    { key: 'credit', label: 'CREDIT', x: 406, width: 72, max: 11 },
+    { key: 'brokerage', label: 'BROKERAGE', x: 478, width: 76, max: 11 },
+    { key: 'netAmount', label: 'NET AMT', x: 554, width: 76, max: 11 },
+    { key: 'remarks', label: 'REMARKS', x: 630, width: 184, max: 32 },
   ];
 
   const commands = [
@@ -4349,11 +4496,11 @@ const buildPdfPageStream = ({ pageRows, pageNumber, pageCount, label, generatedA
     commands.push(pdfRect(28, y - 7, 786, 32, fill, '0.80 0.84 0.89'));
     columns.forEach((column) => {
       const value = row[column.key];
-      const color = column.key === 'amount'
-        ? (Number(value) >= 0 ? '0.14 0.34 0.84' : '0.71 0.14 0.18')
+      const color = ['debit', 'credit', 'brokerage', 'netAmount'].includes(column.key)
+        ? ((column.key !== 'debit' && Number(value) >= 0) ? '0.14 0.34 0.84' : '0.71 0.14 0.18')
         : '0.09 0.13 0.20';
-      splitText(value, column.max, column.key === 'message' ? 2 : 1).forEach((line, lineIndex) => {
-        commands.push(pdfText(line, column.x + 5, y + 10 - (lineIndex * 10), 7, column.key === 'amount' ? 'F2' : 'F1', color));
+      splitText(value, column.max, column.key === 'remarks' ? 2 : 1).forEach((line, lineIndex) => {
+        commands.push(pdfText(line, column.x + 5, y + 10 - (lineIndex * 10), 7, ['debit', 'credit', 'brokerage', 'netAmount'].includes(column.key) ? 'F2' : 'F1', color));
       });
     });
     y -= 32;
@@ -4366,10 +4513,10 @@ const buildPdfPageStream = ({ pageRows, pageNumber, pageCount, label, generatedA
 const exportLedgerPdf = (rows, label) => {
   const exportRows = getLedgerExportRows(rows);
   const generatedAt = formatDate(new Date());
-  const totalAmount = exportRows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2);
+  const totalAmount = exportRows.reduce((sum, row) => sum + Number(row.netAmount || 0), 0).toFixed(2);
   const pages = [];
   const rowsPerPage = 13;
-  const sourceRows = exportRows.length ? exportRows : [{ date: '-', userId: '-', userName: '-', account: '-', source: '-', action: '-', amount: '0.00', status: '-', message: 'No ledger rows found for this filter.' }];
+  const sourceRows = exportRows.length ? exportRows : [{ frDate: '-', toDate: '-', id: '-', name: '-', debit: '0.00', credit: '0.00', brokerage: '0.00', netAmount: '0.00', remarks: 'No ledger rows found for this filter.' }];
   for (let i = 0; i < sourceRows.length; i += rowsPerPage) pages.push(sourceRows.slice(i, i + rowsPerPage));
   const objects = [];
   const addObject = (id, body) => objects.push({ id, body });
@@ -4921,7 +5068,7 @@ function TradeOnBehalfPanel() {
       api.get('/web-admin/symbols', { params: { limit: 20000, active: 'true', banned: 'false' } }),
     ]).then(([usersRes, symbolsRes]) => {
       const nextUsers = usersRes.data?.data || [];
-      const nextSymbols = filterTradableSymbols(symbolsRes.data?.symbols || symbolsRes.data?.data || []);
+      const nextSymbols = dedupeTradableSymbols(filterTradableSymbols(symbolsRes.data?.symbols || symbolsRes.data?.data || []));
       setUsers(nextUsers);
       setSymbols(nextSymbols);
       setForm((prev) => ({ ...prev, userId: nextUsers.find((u) => u.role === 'user')?.id || '', symbol: nextSymbols[0]?.symbol || '' }));

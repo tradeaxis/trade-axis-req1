@@ -129,6 +129,10 @@ export default function QuotesTab({
     const inWL = activeSymbols.includes(String(sym.symbol).toUpperCase());
     const q    = quotes[sym.symbol] || {};
     const staleNow = isStale(q);
+    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const displaySymbol = sym.expiry_date
+      ? `${String(sym.underlying || sym.symbol || '').toUpperCase().replace(/\d{2}[A-Z]{3}FUT$/i, '').replace(/FUT$/i, '').replace(/-[IVX]+$/i, '')}-${months[new Date(sym.expiry_date).getMonth()] || ''}`
+      : String(sym.symbol || '').toUpperCase().replace(/-[IVX]+$/i, '').replace(/FUT$/i, '');
 
     return (
       <div
@@ -143,7 +147,7 @@ export default function QuotesTab({
           <div className="flex items-center justify-between mb-3">
             <div>
               <div className="flex items-center gap-2 font-bold text-xl" style={{ color: '#d1d4dc' }}>
-                {sym.symbol}
+                {displaySymbol}
                 {staleNow && (
                   <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#363a45', color: '#787b86' }}>
                     Off Quotes

@@ -18,8 +18,10 @@ const SUB_BROKER_FEATURES = [
   'adminPositionsEdit',
   'adminPositionsExit',
   'adminPositionsDelete',
+  'adminPositionsReopen',
   'adminOrders',
   'users',
+  'usersCreate',
   'usersPositions',
   'usersLedger',
   'usersUpdate',
@@ -157,6 +159,52 @@ const normalizeRole = (role) => {
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeSymbolLookupKey = (value) =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/-[IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+const findSymbolData = async (rawSymbol) => {
+  const requested = String(rawSymbol || '').trim().toUpperCase();
+  const compact = requested.replace(/\s+/g, '');
+  const exactCandidates = [...new Set([requested, compact].filter(Boolean))];
+
+  for (const candidate of exactCandidates) {
+    const { data, error } = await supabase
+      .from('symbols')
+      .select('*')
+      .or(`symbol.eq.${candidate},kite_tradingsymbol.eq.${candidate},display_name.eq.${candidate}`)
+      .order('expiry_date', { ascending: true })
+      .limit(1);
+    if (error) throw error;
+    if (data?.[0]) return data[0];
+  }
+
+  const match = compact.match(/^(.+?)-?([A-Z]{3})$/);
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  if (match && months.includes(match[2])) {
+    const baseKey = normalizeSymbolLookupKey(match[1]);
+    const { data, error } = await supabase
+      .from('symbols')
+      .select('*')
+      .order('expiry_date', { ascending: true })
+      .limit(500);
+    if (error) throw error;
+    return (data || []).find((row) => {
+      const rowBase = normalizeSymbolLookupKey(row.underlying || row.display_name || row.symbol);
+      const expiry = row.expiry_date ? new Date(row.expiry_date) : null;
+      const rowMonth = expiry && !Number.isNaN(expiry.getTime()) ? months[expiry.getMonth()] : '';
+      return rowBase === baseKey && rowMonth === match[2];
+    }) || null;
+  }
+
+  return null;
 };
 
 const firstNonEmptyString = (...values) => {
@@ -441,24 +489,34 @@ exports.listSymbols = async (req, res) => {
       limit = 10000,
     } = req.query;
 
-    let query = supabase
-      .from('symbols')
-      .select('*')
-      .order('underlying', { ascending: true })
-      .order('expiry_date', { ascending: true })
-      .limit(Math.min(Number(limit) || 10000, 20000));
+    const maxLimit = Math.min(Number(limit) || 10000, 20000);
+    const pageSize = 1000;
+    const data = [];
 
-    if (active === 'true') query = query.eq('is_active', true);
-    if (active === 'false') query = query.eq('is_active', false);
-    if (banned === 'true') query = query.eq('is_banned', true);
-    if (banned === 'false') query = query.or('is_banned.is.false,is_banned.is.null');
-    if (q && q.trim()) {
-      const term = q.trim();
-      query = query.or(`symbol.ilike.%${term}%,display_name.ilike.%${term}%,underlying.ilike.%${term}%`);
+    for (let from = 0; from < maxLimit; from += pageSize) {
+      const to = Math.min(from + pageSize - 1, maxLimit - 1);
+      let query = supabase
+        .from('symbols')
+        .select('*')
+        .order('underlying', { ascending: true })
+        .order('expiry_date', { ascending: true })
+        .range(from, to);
+
+      if (active === 'true') query = query.eq('is_active', true);
+      if (active === 'false') query = query.eq('is_active', false);
+      if (banned === 'true') query = query.eq('is_banned', true);
+      if (banned === 'false') query = query.or('is_banned.is.false,is_banned.is.null');
+      if (q && q.trim()) {
+        const term = q.trim();
+        query = query.or(`symbol.ilike.%${term}%,display_name.ilike.%${term}%,underlying.ilike.%${term}%`);
+      }
+
+      const { data: pageRows, error } = await query;
+      if (error) throw error;
+      data.push(...(pageRows || []));
+      if (!pageRows || pageRows.length < pageSize) break;
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
     const symbols = (data || []).map((symbol) => {
       const live = kiteStreamService.getPriceForSymbolRow(symbol);
       if (!live || !toNumber(live.last)) return symbol;
@@ -1013,6 +1071,63 @@ exports.saveSubBrokerFeaturePermissions = async (req, res) => {
   }
 };
 
+exports.getUserSegmentSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await assertManagedUser(req, id);
+    const settings = await readJsonSetting('web_user_segment_settings', {});
+    res.json({ success: true, data: settings[id] || {} });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveUserSegmentSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await assertManagedUser(req, id);
+    const { segment = '', values = {} } = req.body || {};
+    if (!segment) return res.status(400).json({ success: false, message: 'Segment is required' });
+
+    const settings = await readJsonSetting('web_user_segment_settings', {});
+    settings[id] = {
+      ...(settings[id] || {}),
+      [segment]: {
+        ...values,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.user.id,
+      },
+    };
+    await writeJsonSetting('web_user_segment_settings', settings);
+    res.json({ success: true, data: settings[id][segment], message: 'Segment settings saved' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getGlobalLeverageMarginSettings = async (req, res) => {
+  try {
+    const data = await readJsonSetting('web_global_leverage_margin_settings', {});
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveGlobalLeverageMarginSettings = async (req, res) => {
+  try {
+    const payload = {
+      groups: req.body?.groups || {},
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user.id,
+    };
+    await writeJsonSetting('web_global_leverage_margin_settings', payload);
+    res.json({ success: true, data: payload, message: 'Global settings saved' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.assignBroker = async (req, res) => {
   try {
     if (!isAdmin(req)) {
@@ -1481,13 +1596,8 @@ exports.tradeOnBehalf = async (req, res) => {
       });
     }
 
-    const { data: symbolData, error: symbolError } = await supabase
-      .from('symbols')
-      .select('*')
-      .eq('symbol', String(symbol).toUpperCase())
-      .single();
-
-    if (symbolError || !symbolData) {
+    const symbolData = await findSymbolData(symbol);
+    if (!symbolData) {
       return res.status(404).json({ success: false, message: 'Script not found' });
     }
 
