@@ -1081,6 +1081,7 @@ function Overview({ role, selectedAccount }) {
           initialSymbol={symbols[0]?.symbol}
           title="New Order"
           subtitle="Workspace order ticket"
+          lockedSymbol={false}
           onClose={() => setShowOrder(false)}
           onDone={() => { setShowOrder(false); load(); }}
         />
@@ -1416,7 +1417,7 @@ function ChartWorkspace({ selectedAccount }) {
   );
 }
 
-function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, onClose, onDone }) {
+function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, onClose, onDone, lockedSymbol }) {
   return (
     <div className="modal-backdrop">
       <div className="modal ticket-modal">
@@ -1432,6 +1433,7 @@ function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, 
             accountId={accountId}
             symbols={symbols}
             initialSymbol={initialSymbol}
+            lockedSymbol={lockedSymbol}
             onDone={async () => {
               await onDone?.();
               onClose();
