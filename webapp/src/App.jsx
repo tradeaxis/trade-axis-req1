@@ -162,12 +162,17 @@ const getMonthKey = (date) =>
 
 const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
 
+const isCommoditySymbol = (symbol = {}) => {
+  const source = `${symbol.category || ''} ${symbol.segment || ''} ${symbol.exchange || ''} ${symbol.instrument_type || ''} ${symbol.symbol || ''} ${symbol.kite_tradingsymbol || ''} ${symbol.display_name || ''} ${symbol.underlying || ''}`.toUpperCase();
+  return /MCX|COMMODITY|CRUDE|GOLD|SILVER|COPPER|NATURALGAS|ALUMINI|ALUMINIUM|ZINC|LEAD|NICKEL/.test(source);
+};
+
 const isVisibleContract = (symbol, referenceDate = new Date()) => {
   const expiry = getExpiryDate(symbol);
   if (!expiry) return true;
 
   const allowedMonths = new Set([getMonthKey(referenceDate)]);
-  if (referenceDate.getDate() >= 20) {
+  if (referenceDate.getDate() >= 20 || isCommoditySymbol(symbol)) {
     allowedMonths.add(getMonthKey(addMonths(referenceDate, 1)));
   }
 
@@ -327,7 +332,7 @@ const isQuoteStale = (symbol = {}) => getQuoteAgeMs(symbol) > 10_000;
 
 const getQuoteSegmentKind = (symbol = {}) => {
   const source = `${symbol.category || ''} ${symbol.segment || ''} ${symbol.exchange || ''} ${symbol.instrument_type || ''} ${symbol.symbol || ''} ${symbol.underlying || ''}`.toUpperCase();
-  if (/MCX|CRUDE|GOLD|SILVER|COPPER|NATURALGAS|ALUMINIUM|ZINC|LEAD|NICKEL/.test(source)) return 'mcx';
+  if (isCommoditySymbol(symbol)) return 'mcx';
   if (/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|INDEX|IDX/.test(source)) return 'indices';
   return 'stocks';
 };
@@ -748,7 +753,7 @@ function App() {
     : commonTabs;
   const fallbackTab = isOperator ? operatorTabs[0]?.id || 'trade' : 'trade';
   const safeActive = navTabs.some((tab) => tab.id === active) ? active : fallbackTab;
-  const renderedActive = safeActive === 'workspace' ? 'trade' : safeActive;
+  const renderedActive = safeActive;
   const activeTab = navTabs.find((tab) => tab.id === safeActive) || navTabs[0];
 
   return (
@@ -828,6 +833,7 @@ function App() {
         )}
 
         <section className="content">
+          {renderedActive === 'workspace' && <Overview role={role} selectedAccount={selectedAccount} />}
           {renderedActive === 'quotes' && <Quotes selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
           {renderedActive === 'chart' && <ChartWorkspace selectedAccount={selectedAccount} />}
           {renderedActive === 'trade' && <Trade selectedAccount={selectedAccount} refreshAuth={refreshAuth} />}
@@ -1221,7 +1227,8 @@ function Quotes({ selectedAccount, refreshAuth }) {
       const matchesSearch = !term ||
         String(symbol.symbol || '').toLowerCase().includes(term) ||
         String(symbol.display_name || '').toLowerCase().includes(term) ||
-        String(symbol.underlying || '').toLowerCase().includes(term);
+        String(symbol.underlying || '').toLowerCase().includes(term) ||
+        getTradeAxisSymbolLabel(symbol).toLowerCase().includes(term);
       if (!matchesSearch) return false;
       if (segmentFilter !== 'all' && getQuoteSegmentKind(symbol) !== segmentFilter) return false;
       if (activeWatchlistId === 'all') return true;
@@ -5082,7 +5089,8 @@ function TradeOnBehalfPanel() {
     if (!term) return true;
     return String(symbol.symbol || '').toLowerCase().includes(term)
       || String(symbol.display_name || '').toLowerCase().includes(term)
-      || String(symbol.underlying || '').toLowerCase().includes(term);
+      || String(symbol.underlying || '').toLowerCase().includes(term)
+      || getTradeAxisSymbolLabel(symbol).toLowerCase().includes(term);
   });
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
