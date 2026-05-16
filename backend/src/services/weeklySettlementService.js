@@ -545,10 +545,10 @@ class WeeklySettlementService {
       if (!keep) continue;
 
       const settlementPrice = [
-        keep.open_price,
         keep.current_price,
-        ...children.map((trade) => trade.open_price),
         ...children.map((trade) => trade.current_price),
+        keep.open_price,
+        ...children.map((trade) => trade.open_price),
       ].map((value) => toNumber(value)).find((value) => value > 0) || 0;
 
       if (settlementPrice <= 0) {
