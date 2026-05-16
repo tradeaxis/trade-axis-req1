@@ -6,6 +6,7 @@ const marketDataService  = require('../services/marketDataService');
 const kiteStreamService  = require('../services/kiteStreamService');
 const tradingService     = require('../services/tradingService');
 const { isMarketOpen, isAnyMarketOpen } = require('../services/marketStatus');
+const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
 const {
   QUOTE_FRESHNESS_MS,
   getAgeMs,
@@ -126,7 +127,7 @@ class SocketHandler {
       ]);
 
       socket.emit('accounts:update', accountsResult?.data || []);
-      socket.emit('trades:update',   tradesResult?.data   || []);
+      socket.emit('trades:update',   filterSupersededSettlementTrades(tradesResult?.data || []));
     } catch (err) {
       console.error('Initial data error:', err.message);
     }
@@ -251,7 +252,8 @@ class SocketHandler {
     const connectedUserIds = new Set(this.connectedUsers.keys());
 
     // Still write ALL trades to DB (for accuracy), but only emit connected users
-    const allTradesForDB = openTrades;
+    const allTradesForDB = filterSupersededSettlementTrades(openTrades);
+    if (allTradesForDB.length === 0) return;
 
     // ── 3. Resolve prices ─────────────────────────────────────────────────────
     const uniqueSymbols = [...new Set(allTradesForDB.map((t) => t.symbol))];

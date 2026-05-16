@@ -17,17 +17,30 @@ function filterSupersededSettlementTrades(trades = []) {
     return [];
   }
 
+  const groupKey = (trade) => [
+    trade?.account_id || '',
+    String(trade?.symbol || '').toUpperCase(),
+    String(trade?.trade_type || '').toLowerCase(),
+  ].join('|');
+
   const supersededIds = new Set(
     trades
       .map((trade) => trade?.settled_from_trade_id)
       .filter(Boolean)
       .map(String),
   );
+  const settlementChildGroups = new Set(
+    trades
+      .filter((trade) => trade?.settled_from_trade_id)
+      .map(groupKey),
+  );
 
   return trades.filter((trade) => {
     if (!trade) return false;
     if (trade.is_settlement_close === true) return false;
-    return !supersededIds.has(String(trade.id));
+    if (supersededIds.has(String(trade.id))) return false;
+    if (!trade.settled_from_trade_id && settlementChildGroups.has(groupKey(trade))) return false;
+    return true;
   });
 }
 

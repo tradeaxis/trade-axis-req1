@@ -30,6 +30,26 @@ const formatDateInTimezone = (date, timeZone = SETTLEMENT_TIMEZONE) => {
   return `${year}-${month}-${day}`;
 };
 
+const toNumber = (value, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const roundMoney = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Number(numeric.toFixed(2)) : 0;
+};
+
+const settlementGroupKey = (trade) => [
+  trade?.account_id || '',
+  String(trade?.symbol || '').toUpperCase(),
+  String(trade?.trade_type || '').toLowerCase(),
+].join('|');
+
+const tradeDirection = (trade) => (
+  String(trade?.trade_type || '').toLowerCase() === 'buy' ? 1 : -1
+);
+
 class WeeklySettlementService {
   async runSettlement() {
     const now = new Date();
@@ -42,7 +62,7 @@ class WeeklySettlementService {
     console.log(`   Time: ${now.toISOString()}`);
     console.log('═══════════════════════════════════════════════════════');
 
-    const settleDemo = String(process.env.SETTLE_DEMO || 'false') === 'true';
+    const settleDemo = String(process.env.SETTLE_DEMO || 'true') === 'true';
 
     // ── 1. Fetch all open trades with account info ──
     const { data: trades, error } = await supabase
@@ -60,12 +80,9 @@ class WeeklySettlementService {
       return { success: true, settled: 0 };
     }
 
-    // Filter demo unless SETTLE_DEMO=true
-    const eligibleTrades = settleDemo
-      ? trades
-      : trades.filter(
-          (t) => !t.accounts?.is_demo && String(t.settlement_week || '') !== settlementWeek,
-        );
+    // Filter demo only if explicitly disabled, and never re-settle rows already opened for this settlement date.
+    const eligibleTrades = (settleDemo ? trades : trades.filter((t) => !t.accounts?.is_demo))
+      .filter((t) => String(t.settlement_week || '') !== settlementWeek);
     const openTrades = filterSupersededSettlementTrades(eligibleTrades);
 
     if (openTrades.length === 0) {
@@ -305,6 +322,20 @@ class WeeklySettlementService {
       totalWeeklyPnL += weeklyPnL;
     }
 
+    const normalized = await this._normalizeSettlementOpenRows(
+      settlementWeek,
+      new Set(Object.keys(byAccount)),
+      closeTime,
+      errors,
+    );
+    const normalizedAccounts = new Set([
+      ...Object.keys(byAccount),
+      ...(normalized.accountIds || []),
+    ]);
+    if (normalizedAccounts.size > 0) {
+      await this._recalculateAccounts([...normalizedAccounts], closeTime, errors);
+    }
+
     console.log('');
     console.log('═══════════════════════════════════════════════════════');
     console.log('✅ WEEKLY SETTLEMENT COMPLETE');
@@ -404,9 +435,11 @@ class WeeklySettlementService {
       }
     }
 
+    const normalized = await this._normalizeSettlementOpenRows(targetDate, accountIds, now, errors);
+    for (const accountId of normalized.accountIds || []) accountIds.add(accountId);
     const staleRepair = await this._closeSupersededSettlementParents(targetDate, accountIds, now, errors);
     const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
-    const repairedAnything = fixedOld > 0 || fixedNew > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
+    const repairedAnything = fixedOld > 0 || fixedNew > 0 || normalized.staleRowsClosed > 0 || normalized.groupsNormalized > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
 
     return {
       success: repairedAnything && errors.length === 0,
@@ -419,6 +452,8 @@ class WeeklySettlementService {
       rows: rows?.length || 0,
       fixedOld,
       fixedNew,
+      settlementGroupsNormalized: normalized.groupsNormalized,
+      duplicateSettlementRowsClosed: normalized.staleRowsClosed,
       staleParentsClosed: staleRepair.staleParentsClosed,
       reopenedNormalized: staleRepair.reopenedNormalized,
       accountsRecalculated,
@@ -435,6 +470,179 @@ class WeeklySettlementService {
 
     if (error) throw new Error(error.message);
     return data?.[0]?.settlement_date || null;
+  }
+
+  async _normalizeSettlementOpenRows(targetDate, accountIds, now, errors) {
+    const scopedAccountIds = [...(accountIds || [])].filter(Boolean);
+    let query = supabase
+      .from('trades')
+      .select('id,account_id,user_id,symbol,exchange,trade_type,quantity,open_price,current_price,profit,margin,stop_loss,take_profit,brokerage,buy_brokerage,sell_brokerage,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time,comment')
+      .eq('status', 'open');
+
+    if (scopedAccountIds.length > 0) {
+      query = query.in('account_id', scopedAccountIds);
+    }
+
+    const { data: openTrades, error } = await query;
+    if (error) {
+      errors.push({ repair: 'normalize-settlement-open-rows', error: error.message });
+      return { groupsNormalized: 0, staleRowsClosed: 0, accountIds: [] };
+    }
+
+    const rows = openTrades || [];
+    const target = String(targetDate || '');
+    const settlementChildren = rows.filter((trade) => (
+      trade.settled_from_trade_id
+      && (!target || String(trade.settlement_week || target) === target)
+      && trade.is_settlement_close !== true
+    ));
+
+    if (settlementChildren.length === 0) {
+      return { groupsNormalized: 0, staleRowsClosed: 0, accountIds: [] };
+    }
+
+    const allAccountIds = [...new Set(rows.map((trade) => trade.account_id).filter(Boolean))];
+    const accountMap = new Map();
+    if (allAccountIds.length > 0) {
+      const { data: accounts, error: accountErr } = await supabase
+        .from('accounts')
+        .select('id,balance,leverage')
+        .in('id', allAccountIds);
+
+      if (accountErr) {
+        errors.push({ repair: 'normalize-settlement-accounts', error: accountErr.message });
+      } else {
+        for (const account of accounts || []) {
+          accountMap.set(String(account.id), account);
+        }
+      }
+    }
+
+    const groups = new Map();
+    for (const child of settlementChildren) {
+      const key = settlementGroupKey(child);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(child);
+    }
+
+    const touchedAccounts = new Set();
+    let groupsNormalized = 0;
+    let staleRowsClosed = 0;
+
+    for (const [key, children] of groups) {
+      const groupRows = rows.filter((trade) => settlementGroupKey(trade) === key);
+      const childIds = new Set(children.map((trade) => String(trade.id)));
+      const representedParentIds = new Set(
+        children
+          .map((trade) => trade.settled_from_trade_id)
+          .filter(Boolean)
+          .map(String),
+      );
+
+      const keep = [...children].sort((a, b) => (
+        String(a.open_time || a.created_at || '').localeCompare(String(b.open_time || b.created_at || ''))
+      ))[0];
+      if (!keep) continue;
+
+      const settlementPrice = [
+        keep.open_price,
+        keep.current_price,
+        ...children.map((trade) => trade.open_price),
+        ...children.map((trade) => trade.current_price),
+      ].map((value) => toNumber(value)).find((value) => value > 0) || 0;
+
+      if (settlementPrice <= 0) {
+        errors.push({ tradeId: keep.id, error: 'Missing settlement price while normalizing rollover rows' });
+        continue;
+      }
+
+      const orphanParents = groupRows.filter((trade) => (
+        !childIds.has(String(trade.id))
+        && !representedParentIds.has(String(trade.id))
+        && trade.is_settlement_close !== true
+      ));
+      const duplicateChildren = children.filter((trade) => String(trade.id) !== String(keep.id));
+      const parentsToClose = groupRows.filter((trade) => (
+        !childIds.has(String(trade.id))
+        && trade.is_settlement_close !== true
+      ));
+
+      const totalQuantity = roundMoney(
+        children.reduce((sum, trade) => sum + toNumber(trade.quantity), 0)
+        + orphanParents.reduce((sum, trade) => sum + toNumber(trade.quantity), 0),
+      );
+
+      if (totalQuantity <= 0) continue;
+
+      for (const trade of [...parentsToClose, ...duplicateChildren]) {
+        if (String(trade.id) === String(keep.id)) continue;
+        const qty = toNumber(trade.quantity);
+        const openPrice = toNumber(trade.open_price);
+        const pnl = childIds.has(String(trade.id))
+          ? 0
+          : roundMoney((settlementPrice - openPrice) * tradeDirection(trade) * qty);
+
+        const { error: closeErr } = await supabase
+          .from('trades')
+          .update({
+            close_price: settlementPrice,
+            current_price: settlementPrice,
+            profit: pnl,
+            sell_brokerage: 0,
+            brokerage: 0,
+            status: 'closed',
+            close_time: keep.open_time || keep.created_at || now,
+            updated_at: now,
+            is_settlement_close: true,
+            settlement_week: targetDate,
+            comment: `Weekly settlement normalized. Gross P&L: ${pnl.toFixed(2)}`,
+          })
+          .eq('id', trade.id)
+          .eq('status', 'open');
+
+        if (closeErr) {
+          errors.push({ tradeId: trade.id, error: closeErr.message });
+        } else {
+          staleRowsClosed++;
+        }
+      }
+
+      const account = accountMap.get(String(keep.account_id));
+      const leverage = toNumber(account?.leverage, 5) || 5;
+      const margin = roundMoney((settlementPrice * totalQuantity) / leverage);
+      const { error: keepErr } = await supabase
+        .from('trades')
+        .update({
+          quantity: totalQuantity,
+          open_price: settlementPrice,
+          current_price: settlementPrice,
+          profit: 0,
+          margin,
+          brokerage: 0,
+          buy_brokerage: 0,
+          sell_brokerage: 0,
+          status: 'open',
+          updated_at: now,
+          settlement_week: targetDate,
+          is_settlement_close: false,
+          comment: `M2M reopen normalized for ${targetDate}`,
+        })
+        .eq('id', keep.id)
+        .eq('status', 'open');
+
+      if (keepErr) {
+        errors.push({ tradeId: keep.id, error: keepErr.message });
+      } else {
+        groupsNormalized++;
+        if (keep.account_id) touchedAccounts.add(keep.account_id);
+      }
+    }
+
+    return {
+      groupsNormalized,
+      staleRowsClosed,
+      accountIds: [...touchedAccounts],
+    };
   }
 
   async _closeSupersededSettlementParents(targetDate, accountIds, now, errors) {
