@@ -491,11 +491,19 @@ class WeeklySettlementService {
 
     const rows = openTrades || [];
     const target = String(targetDate || '');
-    const settlementChildren = rows.filter((trade) => (
-      trade.settled_from_trade_id
-      && (!target || String(trade.settlement_week || target) === target)
-      && trade.is_settlement_close !== true
-    ));
+    const settlementChildren = rows.filter((trade) => {
+      const settlementWeek = String(trade.settlement_week || '');
+      const comment = String(trade.comment || '').toLowerCase();
+      const isSettlementReopen = Boolean(trade.settled_from_trade_id)
+        || (target && settlementWeek === target)
+        || comment.includes('m2m reopen')
+        || comment.includes('settlement reopen')
+        || comment.includes('reopen normalized');
+
+      return isSettlementReopen
+        && (!target || !settlementWeek || settlementWeek === target)
+        && trade.is_settlement_close !== true;
+    });
 
     if (settlementChildren.length === 0) {
       return { groupsNormalized: 0, staleRowsClosed: 0, accountIds: [] };
