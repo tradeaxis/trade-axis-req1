@@ -150,11 +150,41 @@ const getUserName = (user) => {
 
 const getLoginId = (user) => user?.login_id || user?.loginId || '';
 
+const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
 const getExpiryDate = (symbol) => {
   const raw = symbol?.expiry_date || symbol?.expiryDate || symbol?.expiry;
-  if (!raw) return null;
-  const date = new Date(raw);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (raw) {
+    const date = new Date(raw);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  const source = [
+    symbol?.symbol,
+    symbol?.kite_tradingsymbol,
+    symbol?.display_name,
+    symbol?.underlying,
+    typeof symbol === 'string' ? symbol : '',
+  ].filter(Boolean).join(' ').toUpperCase();
+  if (!source) return null;
+
+  const compact = source.replace(/[\s_-]+/g, '');
+  const monthPattern = monthAbbrs.join('|');
+  const match =
+    compact.match(new RegExp(`(\\d{2})?(${monthPattern})(\\d{2})?(?:FUT)?`, 'i')) ||
+    compact.match(new RegExp(`(${monthPattern})`, 'i'));
+  if (!match) return null;
+
+  const monthText = (match[2] || match[1] || '').toUpperCase();
+  const month = monthAbbrs.indexOf(monthText);
+  if (month < 0) return null;
+
+  const yearToken = match[3] || match[1];
+  const reference = new Date();
+  const year = yearToken && /^\d{2}$/.test(yearToken)
+    ? 2000 + Number(yearToken)
+    : reference.getFullYear();
+  return new Date(year, month, 1);
 };
 
 const getMonthKey = (date) =>
@@ -172,7 +202,7 @@ const isVisibleContract = (symbol, referenceDate = new Date()) => {
   if (!expiry) return true;
 
   const allowedMonths = new Set([getMonthKey(referenceDate)]);
-  if (referenceDate.getDate() >= 20 || isCommoditySymbol(symbol)) {
+  if (referenceDate.getDate() >= 20) {
     allowedMonths.add(getMonthKey(addMonths(referenceDate, 1)));
   }
 
@@ -229,17 +259,33 @@ const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPri
 const getSymbolAsk = (symbol) => firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol));
 
 const findPositionSymbol = (position, symbols = []) => {
-  const raw = String(position?.symbol || '').toUpperCase();
+  return findSymbolByInput(position?.symbol, symbols);
+};
+
+const findSymbolByInput = (input, symbols = []) => {
+  const raw = String(input || '').toUpperCase().trim();
   if (!raw) return null;
 
-  const exact = symbols.find((row) => String(row?.symbol || '').toUpperCase() === raw);
+  const exact = symbols.find((row) => [
+    row?.symbol,
+    row?.kite_tradingsymbol,
+    row?.display_name,
+  ].some((value) => String(value || '').toUpperCase().trim() === raw));
   if (exact) return exact;
 
+  const labelExact = symbols.find((row) => getTradeAxisSymbolLabel(row, symbols).toUpperCase() === raw);
+  if (labelExact) return labelExact;
+
+  const requestedExpiry = getExpiryDate(raw);
+  const requestedMonth = requestedExpiry ? getMonthKey(requestedExpiry) : '';
   const positionKey = normalizeLiveUnderlyingKey(raw);
   return symbols.find((row) => {
     const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
     const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name || row?.name);
-    return symbolKey === positionKey || underlyingKey === positionKey;
+    const rowExpiry = getExpiryDate(row);
+    const rowMonth = rowExpiry ? getMonthKey(rowExpiry) : '';
+    const monthMatches = !requestedMonth || !rowMonth || requestedMonth === rowMonth;
+    return monthMatches && (symbolKey === positionKey || underlyingKey === positionKey);
   }) || null;
 };
 
@@ -337,11 +383,9 @@ const getQuoteSegmentKind = (symbol = {}) => {
   return 'stocks';
 };
 
-const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-
 const getTradeAxisSymbolLabel = (symbolOrRow, symbols = []) => {
   const row = typeof symbolOrRow === 'string'
-    ? (symbols || []).find((item) => String(item?.symbol || '').toUpperCase() === String(symbolOrRow).toUpperCase())
+    ? findSymbolByInput(symbolOrRow, symbols)
     : symbolOrRow;
   const raw = typeof symbolOrRow === 'string' ? symbolOrRow : row?.symbol;
   if (!row && !raw) return '-';
@@ -376,7 +420,8 @@ const getContractFamily = (symbol = {}) => {
 
 const getSymbolIdentityKey = (symbol = {}) => {
   const underlying = getContractFamily(symbol);
-  const expiry = symbol.expiry_date ? String(symbol.expiry_date).slice(0, 10) : '';
+  const expiryDate = getExpiryDate(symbol);
+  const expiry = expiryDate ? expiryDate.toISOString().slice(0, 10) : '';
   return `${symbol.category || symbol.exchange || ''}|${underlying}|${expiry}`;
 };
 
@@ -618,14 +663,19 @@ function App() {
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem(themeStorageKey) || 'light');
   const [subBrokerPermissions, setSubBrokerPermissions] = useState(defaultSubBrokerPermissions);
+  const tabHistoryReadyRef = useRef(false);
+  const lastBackTapRef = useRef(0);
 
   const user = auth?.user || null;
   const role = String(user?.role || 'user').toLowerCase();
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) || accounts[0] || null;
 
-  const setActive = useCallback((tabId) => {
+  const setActive = useCallback((tabId, options = {}) => {
     setActiveState(tabId);
     localStorage.setItem(activeTabStorageKey, tabId);
+    if (tabHistoryReadyRef.current && !options.replace && window.history?.pushState) {
+      window.history.pushState({ tradeAxisApp: true, tab: tabId }, '', window.location.href);
+    }
   }, []);
 
   useEffect(() => {
@@ -740,21 +790,74 @@ function App() {
     }));
   };
 
-  if (!auth) return <Login onLogin={handleLogin} />;
-
   const isOperator = role === 'admin' || role === 'sub_broker';
-  const operatorTabs = adminTabs.filter((tab) => {
+  const operatorTabs = useMemo(() => adminTabs.filter((tab) => {
     if (tab.adminOnly && role !== 'admin') return false;
     if (role !== 'sub_broker') return true;
     return subBrokerPermissions?.[tab.id] !== false;
-  });
-  const navTabs = isOperator
+  }), [role, subBrokerPermissions]);
+  const navTabs = useMemo(() => (isOperator
     ? [...operatorTabs, ...commonTabs]
-    : commonTabs;
+    : commonTabs), [isOperator, operatorTabs]);
   const fallbackTab = isOperator ? operatorTabs[0]?.id || 'trade' : 'trade';
   const safeActive = navTabs.some((tab) => tab.id === active) ? active : fallbackTab;
   const renderedActive = safeActive;
   const activeTab = navTabs.find((tab) => tab.id === safeActive) || navTabs[0];
+
+  useEffect(() => {
+    if (!auth || !window.history?.replaceState) return undefined;
+
+    const isMobileViewport = window.matchMedia?.('(max-width: 768px)').matches;
+    if (!tabHistoryReadyRef.current) {
+      window.history.replaceState({ tradeAxisApp: true, tab: safeActive, exitGuard: true }, '', window.location.href);
+      if (isMobileViewport) {
+        window.history.pushState({ tradeAxisApp: true, tab: safeActive }, '', window.location.href);
+      }
+      tabHistoryReadyRef.current = true;
+    } else {
+      window.history.replaceState({ tradeAxisApp: true, tab: safeActive }, '', window.location.href);
+    }
+
+    const handleBack = (event) => {
+      const isMobile = window.matchMedia?.('(max-width: 768px)').matches;
+      if (event.state?.exitGuard && isMobile) {
+        const now = Date.now();
+        if (now - lastBackTapRef.current < 1600) {
+          window.history.back();
+          return;
+        }
+        lastBackTapRef.current = now;
+        toast('Tap back again to exit');
+        window.history.pushState({ tradeAxisApp: true, tab: safeActive }, '', window.location.href);
+        return;
+      }
+
+      const nextTab = event.state?.tab;
+      if (nextTab && navTabs.some((tab) => tab.id === nextTab)) {
+        setActiveState(nextTab);
+        localStorage.setItem(activeTabStorageKey, nextTab);
+        setSidebarOpen(false);
+        return;
+      }
+
+      if (!isMobile) return;
+
+      const now = Date.now();
+      if (now - lastBackTapRef.current < 1600) {
+        window.history.back();
+        return;
+      }
+
+      lastBackTapRef.current = now;
+      toast('Tap back again to exit');
+      window.history.pushState({ tradeAxisApp: true, tab: safeActive }, '', window.location.href);
+    };
+
+    window.addEventListener('popstate', handleBack);
+    return () => window.removeEventListener('popstate', handleBack);
+  }, [auth, safeActive, navTabs]);
+
+  if (!auth) return <Login onLogin={handleLogin} />;
 
   return (
     <div className={`app-shell ${isOperator ? 'operator-shell' : 'user-shell'}`}>
@@ -1447,7 +1550,7 @@ function TradeTicketModal({ accountId, symbols, initialSymbol, title, subtitle, 
 
 function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol = Boolean(initialSymbol) }) {
   const [form, setForm] = useState({
-    symbol: initialSymbol || symbols?.[0]?.symbol || '',
+    symbol: findSymbolByInput(initialSymbol, symbols)?.symbol || initialSymbol || symbols?.[0]?.symbol || '',
     orderType: 'market',
     quantity: 1,
     price: '',
@@ -1455,16 +1558,17 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol =
     takeProfit: '',
   });
   const [busy, setBusy] = useState(false);
-  const selectedSymbol = symbols.find((row) => String(row.symbol).toUpperCase() === String(form.symbol).toUpperCase());
+  const selectedSymbol = findSymbolByInput(form.symbol, symbols);
   const runningPrice = getSymbolPrice(selectedSymbol);
   const sellPrice = getSymbolBid(selectedSymbol) || runningPrice;
   const buyPrice = getSymbolAsk(selectedSymbol) || runningPrice;
 
   useEffect(() => {
     if (initialSymbol) {
-      setForm((prev) => ({ ...prev, symbol: initialSymbol }));
+      const row = findSymbolByInput(initialSymbol, symbols);
+      setForm((prev) => ({ ...prev, symbol: row?.symbol || initialSymbol }));
     }
-  }, [initialSymbol]);
+  }, [initialSymbol, symbols]);
 
   useEffect(() => {
     if (!form.symbol && symbols?.[0]?.symbol) {
@@ -1495,7 +1599,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol =
         : Number(form.price || runningPrice || 0);
       const res = await api.post('/trading/order', {
         accountId,
-        symbol: form.symbol,
+        symbol: selectedSymbol?.symbol || form.symbol,
         type: resolvedSide,
         orderType,
         quantity: Number(form.quantity),
@@ -1569,7 +1673,7 @@ function Trade({ selectedAccount, refreshAuth }) {
         setSymbols(rows);
         setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
       } catch {}
-    }, 1000);
+    }, 750);
     return () => clearInterval(interval);
   }, [accountId]);
 
@@ -5069,7 +5173,21 @@ function TradeOnBehalfPanel() {
   const [users, setUsers] = useState([]);
   const [symbols, setSymbols] = useState([]);
   const [symbolSearch, setSymbolSearch] = useState('');
-  const [form, setForm] = useState({ userId: '', accountId: '', symbol: '', side: 'buy', quantity: 1, openPrice: '', stopLoss: '', takeProfit: '', entryTime: '', exitPrice: '', exitTime: '' });
+  const [form, setForm] = useState({
+    userId: '',
+    accountId: '',
+    symbol: '',
+    side: 'buy',
+    quantity: 1,
+    openPrice: '',
+    stopLoss: '',
+    takeProfit: '',
+    entryTime: '',
+    exitPrice: '',
+    exitTime: '',
+    includeEntryBrokerage: true,
+    includeExitBrokerage: true,
+  });
 
   useEffect(() => {
     Promise.all([
@@ -5085,7 +5203,7 @@ function TradeOnBehalfPanel() {
   }, []);
 
   const selectedUser = users.find((user) => user.id === form.userId);
-  const selectedSymbol = symbols.find((symbol) => String(symbol.symbol).toUpperCase() === String(form.symbol).toUpperCase());
+  const selectedSymbol = findSymbolByInput(form.symbol, symbols);
   const visibleSymbols = symbols.filter((symbol) => {
     const term = symbolSearch.toLowerCase().trim();
     if (!term) return true;
@@ -5098,7 +5216,10 @@ function TradeOnBehalfPanel() {
 
   const submit = async () => {
     try {
-      const res = await api.post('/web-admin/trade-on-behalf', form);
+      const res = await api.post('/web-admin/trade-on-behalf', {
+        ...form,
+        symbol: selectedSymbol?.symbol || form.symbol,
+      });
       toast.success(res.data?.message || 'Trade opened');
     } catch (error) {
       toast.error(error.response?.data?.message || 'Trade failed');
@@ -5143,6 +5264,24 @@ function TradeOnBehalfPanel() {
         <div className="side-switch">
           <button className={`btn ${form.side === 'buy' ? 'success' : 'subtle'}`} onClick={() => update('side', 'buy')}>Buy</button>
           <button className={`btn ${form.side === 'sell' ? 'danger' : 'subtle'}`} onClick={() => update('side', 'sell')}>Sell</button>
+        </div>
+        <div className="grid-2">
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={form.includeEntryBrokerage}
+              onChange={(event) => update('includeEntryBrokerage', event.target.checked)}
+            />
+            <span>Apply entry brokerage</span>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={form.includeExitBrokerage}
+              onChange={(event) => update('includeExitBrokerage', event.target.checked)}
+            />
+            <span>Apply exit brokerage</span>
+          </label>
         </div>
         {[
           ['quantity', 'Quantity', 'number'],

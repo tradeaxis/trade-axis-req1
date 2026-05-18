@@ -1582,6 +1582,8 @@ exports.tradeOnBehalf = async (req, res) => {
       stopLoss = 0,
       takeProfit = 0,
       entryTime,
+      includeEntryBrokerage = true,
+      includeExitBrokerage = true,
       comment = '',
     } = req.body || {};
 
@@ -1624,7 +1626,8 @@ exports.tradeOnBehalf = async (req, res) => {
     const leverage = Number(account.leverage || 5) || 5;
     const brokerageRate = await require('../services/tradingService').getBrokerageRate(userId);
     const marginRequired = (price * qty * lotSize) / leverage;
-    const brokerage = price * qty * lotSize * brokerageRate;
+    const shouldApplyEntryBrokerage = includeEntryBrokerage !== false;
+    const brokerage = shouldApplyEntryBrokerage ? price * qty * lotSize * brokerageRate : 0;
     const requestedEntryTime = entryTime ? new Date(entryTime) : null;
     const now = requestedEntryTime && !Number.isNaN(requestedEntryTime.getTime())
       ? requestedEntryTime.toISOString()

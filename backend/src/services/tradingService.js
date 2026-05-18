@@ -52,6 +52,41 @@ class TradingService {
       .eq('id', accountId);
   }
 
+  getPendingReservedMargin(order = {}, account = {}) {
+    const existing = Number(order.margin_reserved || 0);
+    if (Number.isFinite(existing) && existing > 0) return existing;
+    const leverage = Number(account.leverage || 5) || 5;
+    return (Number(order.price || 0) * Number(order.quantity || 0) * Number(order.lot_size || 1)) / leverage;
+  }
+
+  async adjustPendingReservedMargin(accountId, delta, now = new Date().toISOString()) {
+    if (!accountId || !Number.isFinite(delta) || Math.abs(delta) < 0.000001) return null;
+
+    const { data: account, error } = await supabase
+      .from('accounts')
+      .select('balance, credit, equity, margin')
+      .eq('id', accountId)
+      .single();
+    if (error || !account) throw error || new Error('Account not found');
+
+    const balance = Number(account.balance || 0);
+    const credit = Number(account.credit || 0);
+    const equity = Number(account.equity ?? (balance + credit));
+    const newMargin = Math.max(0, Number(account.margin || 0) + delta);
+
+    const { error: updateError } = await supabase
+      .from('accounts')
+      .update({
+        margin: newMargin,
+        free_margin: equity - newMargin,
+        updated_at: now,
+      })
+      .eq('id', accountId);
+    if (updateError) throw updateError;
+
+    return { margin: newMargin, free_margin: equity - newMargin };
+  }
+
   async resolveCloseMarketData(trade, overrideClosePrice = null) {
     const manualClosePrice = Number(overrideClosePrice || 0);
     if (manualClosePrice > 0) {
@@ -317,13 +352,25 @@ class TradingService {
         created_at: new Date().toISOString(),
       };
 
-      const { data: order, error: orderError } = await supabase
+      let { data: order, error: orderError } = await supabase
         .from('pending_orders')
         .insert(orderData)
         .select()
         .single();
+      if (orderError && /margin_reserved/i.test(orderError.message || '')) {
+        delete orderData.margin_reserved;
+        const retry = await supabase
+          .from('pending_orders')
+          .insert(orderData)
+          .select()
+          .single();
+        order = retry.data;
+        orderError = retry.error;
+      }
 
       if (orderError) throw orderError;
+
+      await this.adjustPendingReservedMargin(account.id, marginRequired);
 
       return {
         success: true,
@@ -557,6 +604,7 @@ class TradingService {
         // ── AUTO-EXPIRE when market is closed for this symbol/segment ──
         if (!isMarketOpen(order.symbol, order.exchange)) {
           const now = new Date().toISOString();
+          const reservedMargin = this.getPendingReservedMargin(order, order.accounts || {});
 
           await supabase
             .from('pending_orders')
@@ -567,6 +615,8 @@ class TradingService {
               comment: `${order.comment || ''} [Auto-expired: market closed]`.trim(),
             })
             .eq('id', order.id);
+
+          await this.adjustPendingReservedMargin(order.account_id, -reservedMargin, now);
 
           console.log(`⌛ Auto-expired pending order #${order.id} (${order.symbol}) — market closed`);
           continue;
@@ -612,6 +662,17 @@ class TradingService {
         }
 
         if (shouldTrigger) {
+          const reservedMargin = this.getPendingReservedMargin(order, order.accounts || {});
+          if (reservedMargin > 0) {
+            await this.adjustPendingReservedMargin(order.account_id, -reservedMargin);
+            if (order.accounts) {
+              const equity = Number(order.accounts.equity ?? (Number(order.accounts.balance || 0) + Number(order.accounts.credit || 0)));
+              const nextMargin = Math.max(0, Number(order.accounts.margin || 0) - reservedMargin);
+              order.accounts.margin = nextMargin;
+              order.accounts.free_margin = equity - nextMargin;
+            }
+          }
+
           // Execute the order
           const result = await this.executeMarketOrder({
             userId: order.user_id,
@@ -638,6 +699,9 @@ class TradingService {
 
             console.log(`✅ Pending order #${order.id} triggered`);
           }
+          if (!result.success && reservedMargin > 0) {
+            await this.adjustPendingReservedMargin(order.account_id, reservedMargin);
+          }
         }
 
         // Check expiration
@@ -646,23 +710,29 @@ class TradingService {
           const today = new Date().toDateString();
 
           if (orderDate !== today) {
+            const now = new Date().toISOString();
+            const reservedMargin = this.getPendingReservedMargin(order, order.accounts || {});
             await supabase
               .from('pending_orders')
               .update({
                 status: 'expired',
-                expired_at: new Date().toISOString(),
+                expired_at: now,
               })
               .eq('id', order.id);
+            await this.adjustPendingReservedMargin(order.account_id, -reservedMargin, now);
           }
         } else if (order.expiration === 'specified' && order.expiration_time) {
           if (new Date() > new Date(order.expiration_time)) {
+            const now = new Date().toISOString();
+            const reservedMargin = this.getPendingReservedMargin(order, order.accounts || {});
             await supabase
               .from('pending_orders')
               .update({
                 status: 'expired',
-                expired_at: new Date().toISOString(),
+                expired_at: now,
               })
               .eq('id', order.id);
+            await this.adjustPendingReservedMargin(order.account_id, -reservedMargin, now);
           }
         }
       }

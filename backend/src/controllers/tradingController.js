@@ -49,6 +49,43 @@ async function settleAccount(accountId, netProfit, marginFreed, now) {
     .eq('id', accountId);
 }
 
+async function adjustPendingReservedMargin(accountId, delta, now = new Date().toISOString()) {
+  if (!accountId || !Number.isFinite(delta) || Math.abs(delta) < 0.000001) return null;
+
+  const { data: account, error } = await supabase
+    .from('accounts')
+    .select('balance, credit, equity, margin, free_margin')
+    .eq('id', accountId)
+    .single();
+  if (error || !account) throw error || new Error('Account not found');
+
+  const balance = Number(account.balance || 0);
+  const credit = Number(account.credit || 0);
+  const equity = Number(account.equity ?? (balance + credit));
+  const currentMargin = Number(account.margin || 0);
+  const newMargin = Math.max(0, currentMargin + delta);
+  const newFreeMargin = equity - newMargin;
+
+  const { error: updateError } = await supabase
+    .from('accounts')
+    .update({
+      margin: newMargin,
+      free_margin: newFreeMargin,
+      updated_at: now,
+    })
+    .eq('id', accountId);
+  if (updateError) throw updateError;
+
+  return { margin: newMargin, free_margin: newFreeMargin };
+}
+
+const getPendingReservedMargin = (order = {}, account = {}) => {
+  const existing = Number(order.margin_reserved || 0);
+  if (Number.isFinite(existing) && existing > 0) return existing;
+  const leverage = Number(account.leverage || 5) || 5;
+  return (Number(order.price || 0) * Number(order.quantity || 0)) / leverage;
+};
+
 const buildPartialCloseComment = (closedQty, totalQty, remainingQty) => (
   fitTradeComment(`Partial close: ${closedQty} of ${totalQty}. Remaining: ${remainingQty}`)
 );
@@ -317,19 +354,38 @@ exports.placeOrder = async (req, res) => {
         });
 
       try {
+        const pendingLeverage = Number(account.leverage || 5) || 5;
+        const pendingMarginRequired = (parseFloat(price) * parseFloat(quantity)) / pendingLeverage;
+        const pendingFreeMargin = parseFloat(account.free_margin ?? account.balance);
+        if (pendingMarginRequired > pendingFreeMargin) {
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient margin. Required: â‚¹${pendingMarginRequired.toFixed(2)}, Available: â‚¹${pendingFreeMargin.toFixed(2)}`,
+          });
+        }
+
         const pendingOrderData = {
           user_id: userId, account_id: accountId, symbol: symbolData.symbol,
           exchange: symbolData.exchange || 'NSE', order_type: orderType, trade_type: type,
           quantity: parseFloat(quantity), price: parseFloat(price),
           stop_loss: parseFloat(stopLoss) || 0, take_profit: parseFloat(takeProfit) || 0,
+          margin_reserved: pendingMarginRequired,
           status: 'pending', comment: sanitizedComment, created_at: new Date().toISOString(),
         };
-        const { data: pendingOrder, error: poError } = await supabase
+        let { data: pendingOrder, error: poError } = await supabase
           .from('pending_orders').insert(pendingOrderData).select().single();
+        if (poError && /margin_reserved/i.test(poError.message || '')) {
+          delete pendingOrderData.margin_reserved;
+          const retry = await supabase
+            .from('pending_orders').insert(pendingOrderData).select().single();
+          pendingOrder = retry.data;
+          poError = retry.error;
+        }
         if (poError) {
           console.error('Pending order insert error:', poError);
           return res.status(400).json({ success: false, message: 'Failed to create pending order.' });
         }
+        await adjustPendingReservedMargin(accountId, pendingMarginRequired, new Date().toISOString());
         return res.json({
           success: true, data: pendingOrder, pending: true,
           message: `${orderType.replace('_', ' ').toUpperCase()} order placed at ₹${parseFloat(price).toFixed(2)}`,
@@ -1023,9 +1079,40 @@ exports.modifyPendingOrder = async (req, res) => {
     if (stopLoss !== undefined) updates.stop_loss = parseFloat(stopLoss) || 0;
     if (takeProfit !== undefined) updates.take_profit = parseFloat(takeProfit) || 0;
 
-    const { data: updatedOrder, error: updateError } = await supabase
+    const { data: account } = await supabase
+      .from('accounts')
+      .select('leverage, free_margin, balance')
+      .eq('id', order.account_id)
+      .single();
+
+    const oldReserved = getPendingReservedMargin(order, account || {});
+    const nextOrder = {
+      ...order,
+      price: updates.price ?? order.price,
+      quantity: updates.quantity ?? order.quantity,
+    };
+    const newReserved = getPendingReservedMargin({ ...nextOrder, margin_reserved: 0 }, account || {});
+    const reserveDelta = newReserved - oldReserved;
+    if (reserveDelta > Number(account?.free_margin ?? account?.balance ?? 0)) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient margin. Required additional: â‚¹${reserveDelta.toFixed(2)}`,
+      });
+    }
+    updates.margin_reserved = newReserved;
+
+    let { data: updatedOrder, error: updateError } = await supabase
       .from('pending_orders').update(updates).eq('id', orderId).select().single();
+    if (updateError && /margin_reserved/i.test(updateError.message || '')) {
+      delete updates.margin_reserved;
+      const retry = await supabase
+        .from('pending_orders').update(updates).eq('id', orderId).select().single();
+      updatedOrder = retry.data;
+      updateError = retry.error;
+    }
     if (updateError) throw updateError;
+
+    await adjustPendingReservedMargin(order.account_id, reserveDelta, updates.updated_at);
 
     res.json({ success: true, data: updatedOrder, message: 'Pending order modified successfully' });
   } catch (err) {
@@ -1050,10 +1137,19 @@ exports.cancelPendingOrder = async (req, res) => {
     if (error || !order)
       return res.status(404).json({ success: false, message: 'Pending order not found or already processed' });
 
+    const { data: account } = await supabase
+      .from('accounts')
+      .select('leverage')
+      .eq('id', order.account_id)
+      .single();
+    const reservedMargin = getPendingReservedMargin(order, account || {});
+
     const { data: cancelledOrder, error: updateError } = await supabase
       .from('pending_orders').update({ status: 'cancelled', updated_at: new Date().toISOString() })
       .eq('id', orderId).select().single();
     if (updateError) throw updateError;
+
+    await adjustPendingReservedMargin(order.account_id, -reservedMargin, new Date().toISOString());
 
     res.json({
       success: true, data: cancelledOrder,
@@ -1076,10 +1172,26 @@ exports.cancelAllPendingOrders = async (req, res) => {
     if (!accountId)
       return res.status(400).json({ success: false, message: 'Account ID is required' });
 
+    const { data: pendingOrders, error: fetchError } = await supabase
+      .from('pending_orders').select('*')
+      .eq('account_id', accountId).eq('user_id', userId).eq('status', 'pending');
+    if (fetchError) throw fetchError;
+
+    const { data: account } = await supabase
+      .from('accounts')
+      .select('leverage')
+      .eq('id', accountId)
+      .single();
+    const reservedTotal = (pendingOrders || []).reduce((sum, order) => (
+      sum + getPendingReservedMargin(order, account || {})
+    ), 0);
+
     const { data: orders, error } = await supabase
       .from('pending_orders').update({ status: 'cancelled', updated_at: new Date().toISOString() })
       .eq('account_id', accountId).eq('user_id', userId).eq('status', 'pending').select();
     if (error) throw error;
+
+    await adjustPendingReservedMargin(accountId, -reservedTotal, new Date().toISOString());
 
     res.json({ success: true, data: orders || [], message: `${(orders || []).length} order(s) cancelled` });
   } catch (err) {
