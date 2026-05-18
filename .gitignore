@@ -13,6 +13,7 @@ backend/.env
 frontend/dist/
 frontend/build/
 webapp/dist/
+trade-axis-website/
 
 # Logs
 *.log
