@@ -152,6 +152,36 @@ const getLoginId = (user) => user?.login_id || user?.loginId || '';
 
 const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
+const parseContractMonth = (value = '') => {
+  const raw = String(value || '').toUpperCase().trim();
+  if (!raw) return null;
+
+  const monthPattern = monthAbbrs.join('|');
+  const spaced = raw.replace(/\s+/g, '');
+  const labelMatch = spaced.match(new RegExp(`[-_](${monthPattern})$`, 'i'));
+  if (labelMatch) return { month: monthAbbrs.indexOf(labelMatch[1].toUpperCase()), year: new Date().getFullYear() };
+
+  const compact = spaced.replace(/[-_]/g, '');
+  const kiteMatch = compact.match(new RegExp(`(\\d{2})(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (kiteMatch) {
+    const yearToken = kiteMatch[3] || kiteMatch[1];
+    return {
+      month: monthAbbrs.indexOf(kiteMatch[2].toUpperCase()),
+      year: 2000 + Number(yearToken),
+    };
+  }
+
+  const displayMatch = compact.match(new RegExp(`(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (displayMatch) {
+    return {
+      month: monthAbbrs.indexOf(displayMatch[1].toUpperCase()),
+      year: displayMatch[2] ? 2000 + Number(displayMatch[2]) : new Date().getFullYear(),
+    };
+  }
+
+  return null;
+};
+
 const getExpiryDate = (symbol) => {
   const raw = symbol?.expiry_date || symbol?.expiryDate || symbol?.expiry;
   if (raw) {
@@ -168,23 +198,9 @@ const getExpiryDate = (symbol) => {
   ].filter(Boolean).join(' ').toUpperCase();
   if (!source) return null;
 
-  const compact = source.replace(/[\s_-]+/g, '');
-  const monthPattern = monthAbbrs.join('|');
-  const match =
-    compact.match(new RegExp(`(\\d{2})?(${monthPattern})(\\d{2})?(?:FUT)?`, 'i')) ||
-    compact.match(new RegExp(`(${monthPattern})`, 'i'));
-  if (!match) return null;
-
-  const monthText = (match[2] || match[1] || '').toUpperCase();
-  const month = monthAbbrs.indexOf(monthText);
-  if (month < 0) return null;
-
-  const yearToken = match[3] || match[1];
-  const reference = new Date();
-  const year = yearToken && /^\d{2}$/.test(yearToken)
-    ? 2000 + Number(yearToken)
-    : reference.getFullYear();
-  return new Date(year, month, 1);
+  const parsed = parseContractMonth(source);
+  if (!parsed || parsed.month < 0) return null;
+  return new Date(parsed.year, parsed.month, 1);
 };
 
 const getMonthKey = (date) =>
@@ -233,14 +249,17 @@ const normalizeLiveUnderlyingKey = (value = '') =>
   String(value || '')
     .toUpperCase()
     .replace(/\s+/g, '')
-    .replace(/[-_]/g, '')
+    .replace(new RegExp(`[-_](${monthAbbrs.join('|')})$`, 'i'), '')
+    .replace(/[-_][IVX]+$/i, '')
     .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
     .replace(/FUT$/i, '')
+    .replace(/[-_]/g, '')
     .replace(/[^A-Z0-9]/g, '');
 
 const getSymbolPrice = (symbol) =>
   firstPositiveNumber(
+    symbol?.last,
     symbol?.last_price,
     symbol?.lastPrice,
     symbol?.current_price,
@@ -1873,7 +1892,16 @@ function Trade({ selectedAccount, refreshAuth }) {
                   </div>
                 )}
                 <div className="position-card-actions">
-                  <button className="btn primary" onClick={() => { setOrderSymbol(position.symbol); setShowOrder(true); }}>New Order</button>
+                  <button
+                    className="btn primary"
+                    onClick={() => {
+                      const row = findSymbolByInput(position.symbol, symbols);
+                      setOrderSymbol(row?.symbol || position.symbol);
+                      setShowOrder(true);
+                    }}
+                  >
+                    New Order
+                  </button>
                   <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
                 </div>
               </>

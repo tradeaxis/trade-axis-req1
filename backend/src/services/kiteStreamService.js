@@ -67,6 +67,32 @@ const getUpcomingContractRows = (rows = [], now = new Date(), maxContracts = 2) 
   return selectedRows;
 };
 
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+const getContractMonthKey = (value = '') => {
+  const raw = String(value || '').toUpperCase().trim();
+  if (!raw) return '';
+
+  const monthPattern = MONTHS.join('|');
+  const spaced = raw.replace(/\s+/g, '');
+  const labelMatch = spaced.match(new RegExp(`[-_](${monthPattern})$`, 'i'));
+  if (labelMatch) return labelMatch[1].toUpperCase();
+
+  const compact = spaced.replace(/[-_]/g, '');
+  const kiteMatch = compact.match(new RegExp(`\\d{2}(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (kiteMatch) return kiteMatch[1].toUpperCase();
+
+  const displayMatch = compact.match(new RegExp(`(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  return displayMatch ? displayMatch[1].toUpperCase() : '';
+};
+
+const getRowContractMonthKey = (row = {}) => (
+  getContractMonthKey(row.symbol) ||
+  getContractMonthKey(row.kite_tradingsymbol) ||
+  getContractMonthKey(row.display_name) ||
+  (row.expiry_date ? MONTHS[new Date(row.expiry_date).getMonth()] || '' : '')
+);
+
 const normalizePriceLookupKey = (value = '') =>
   String(value || '')
     .toUpperCase()
@@ -77,6 +103,28 @@ const normalizePriceLookupKey = (value = '') =>
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
     .replace(/FUT$/i, '')
     .replace(/[^A-Z0-9]/g, '');
+
+const getRowPriceAliases = (row = {}) => {
+  const aliases = new Set(
+    [row.symbol, row.kite_tradingsymbol, row.display_name]
+      .map((value) => String(value || '').toUpperCase().trim())
+      .filter(Boolean)
+  );
+
+  const underlying = String(row.underlying || row.display_name || row.symbol || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[-_][IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+  const month = getRowContractMonthKey(row);
+  if (underlying && month) aliases.add(`${underlying}-${month}`);
+
+  return [...aliases];
+};
 
 class KiteStreamService {
   constructor() {
@@ -98,7 +146,7 @@ class KiteStreamService {
     this.dirtySymbols   = new Set();
     this.dbFlushInterval= null;
     this.DB_FLUSH_MS      = Number(process.env.KITE_DB_FLUSH_MS || 30000);
-    this.EMIT_INTERVAL_MS = 3000;   // keep socket emit at 3s for live feel
+    this.EMIT_INTERVAL_MS = Number(process.env.KITE_EMIT_INTERVAL_MS || 1000);
   }
 
   isRunning() { return this.running; }
@@ -111,22 +159,39 @@ class KiteStreamService {
     if (exact) return exact;
 
     const lookupKey = normalizePriceLookupKey(raw);
+    const requestedMonth = getContractMonthKey(raw);
     if (!lookupKey) return null;
 
     for (const [cachedSymbol, price] of this.priceCache.entries()) {
-      if (normalizePriceLookupKey(cachedSymbol) === lookupKey) return price;
+      if (normalizePriceLookupKey(cachedSymbol) !== lookupKey) continue;
+      const cachedMonth = getContractMonthKey(cachedSymbol);
+      if (requestedMonth && cachedMonth && requestedMonth !== cachedMonth) continue;
+      return price;
     }
 
     return null;
   }
 
   getPriceForSymbolRow(row = {}) {
-    return (
-      this.getPrice(row.symbol) ||
-      this.getPrice(row.kite_tradingsymbol) ||
-      this.getPrice(row.display_name) ||
-      this.getPrice(row.underlying)
-    );
+    const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
+      .map((value) => String(value || '').toUpperCase())
+      .filter(Boolean);
+
+    for (const key of exactKeys) {
+      const exact = this.priceCache.get(key);
+      if (exact) return exact;
+    }
+
+    const requestedMonth = getRowContractMonthKey(row);
+    if (requestedMonth) {
+      for (const key of exactKeys) {
+        const price = this.getPrice(key);
+        if (price) return price;
+      }
+      return null;
+    }
+
+    return this.getPrice(row.underlying || row.symbol);
   }
 
   getPrices(symbols) {
@@ -209,9 +274,10 @@ class KiteStreamService {
       if (!map.has(token)) {
         map.set(token, { symbols: [], tickSize, exchange });
       }
-      const symbol = row.symbol.toUpperCase();
-      if (!map.get(token).symbols.includes(symbol)) {
-        map.get(token).symbols.push(symbol);
+      for (const symbol of getRowPriceAliases(row)) {
+        if (!map.get(token).symbols.includes(symbol)) {
+          map.get(token).symbols.push(symbol);
+        }
       }
     }
 

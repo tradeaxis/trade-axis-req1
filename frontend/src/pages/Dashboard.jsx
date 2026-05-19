@@ -102,6 +102,7 @@ const HISTORY_PERIODS = [
 ];
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
+const CONTRACT_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 const DASHBOARD_TABS = new Set([
   'trade',
   'quotes',
@@ -222,6 +223,23 @@ const formatINR = (amount) => {
   return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+const parseContractMonth = (value = '') => {
+  const raw = String(value || '').toUpperCase().trim();
+  if (!raw) return '';
+
+  const monthPattern = CONTRACT_MONTHS.join('|');
+  const spaced = raw.replace(/\s+/g, '');
+  const labelMatch = spaced.match(new RegExp(`[-_](${monthPattern})$`, 'i'));
+  if (labelMatch) return labelMatch[1].toUpperCase();
+
+  const compact = spaced.replace(/[-_]/g, '');
+  const kiteMatch = compact.match(new RegExp(`\\d{2}(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (kiteMatch) return kiteMatch[1].toUpperCase();
+
+  const displayMatch = compact.match(new RegExp(`(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  return displayMatch ? displayMatch[1].toUpperCase() : '';
+};
+
 // ============ DISPLAY SYMBOL FORMATTER ============
 // Converts raw symbol like "HDFCBANK-I" to "HDFCBANK-MAR" format
 const formatDisplaySymbol = (rawSymbol, allSyms) => {
@@ -229,9 +247,8 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
   // Try to find the symbol in our known symbols list to get expiry
   const symData = (allSyms || []).find((s) => s.symbol === rawSymbol);
   if (symData && symData.expiry_date) {
-    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
     const d = new Date(symData.expiry_date);
-    const monthAbbr = months[d.getMonth()] || '';
+    const monthAbbr = CONTRACT_MONTHS[d.getMonth()] || '';
     const base = (symData.underlying || rawSymbol)
       .toUpperCase()
       .replace(/\d{2}[A-Z]{3}FUT$/i, '')
@@ -247,9 +264,13 @@ const formatDisplaySymbol = (rawSymbol, allSyms) => {
 const normalizeLiveUnderlyingKey = (value) =>
   String(value || '')
     .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(new RegExp(`[-_](${CONTRACT_MONTHS.join('|')})$`, 'i'), '')
     .replace(/-[IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
     .replace(/FUT$/i, '')
+    .replace(/[-_]/g, '')
     .replace(/[^A-Z0-9]/g, '');
 
 const firstPositiveNumber = (...values) => {
@@ -271,10 +292,17 @@ const findTradeQuote = (trade, quotes = {}, symbols = []) => {
   if (exactSymbol) return { ...exactSymbol, ...(quotes?.[String(exactSymbol.symbol).toUpperCase()] || {}) };
 
   const tradeKey = normalizeLiveUnderlyingKey(raw);
+  const tradeMonth = parseContractMonth(raw);
   const matchedSymbol = (symbols || []).find((row) => {
     const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
     const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name);
-    return symbolKey === tradeKey || underlyingKey === tradeKey;
+    const rowMonth =
+      parseContractMonth(row?.symbol) ||
+      parseContractMonth(row?.kite_tradingsymbol) ||
+      parseContractMonth(row?.display_name) ||
+      (row?.expiry_date ? CONTRACT_MONTHS[new Date(row.expiry_date).getMonth()] || '' : '');
+    const monthMatches = !tradeMonth || !rowMonth || tradeMonth === rowMonth;
+    return monthMatches && (symbolKey === tradeKey || underlyingKey === tradeKey);
   });
 
   if (!matchedSymbol) return null;

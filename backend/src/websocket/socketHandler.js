@@ -19,11 +19,10 @@ const AUTO_CLOSE_VANISH_PERCENT = Math.min(
 );
 
 // ─── Timing constants (Pro plan can handle more frequent writes) ──────────────
-const PNL_EMIT_INTERVAL_MS = 5_000;  // emit to sockets every 5s
-const PNL_DB_WRITE_EVERY   = 4;      // write to DB every 4th tick = 20s
-                                     // (was 6 = 30s on free tier)
-const PENDING_CHECK_EVERY  = 6;      // check pending orders every 30s
-const STOPOUT_CHECK_EVERY  = 4;      // stop-out check every 20s
+const PNL_EMIT_INTERVAL_MS = Number(process.env.PNL_EMIT_INTERVAL_MS || 1_000);
+const PNL_DB_WRITE_EVERY   = Number(process.env.PNL_DB_WRITE_EVERY || 20);
+const PENDING_CHECK_EVERY  = Number(process.env.PENDING_CHECK_EVERY || 6);
+const STOPOUT_CHECK_EVERY  = Number(process.env.STOPOUT_CHECK_EVERY || 4);
 
 class SocketHandler {
   constructor(io) {

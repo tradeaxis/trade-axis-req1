@@ -55,6 +55,7 @@ class MarketDataService {
     // DB columns: last_price, bid, ask, open_price, high_price, low_price,
     //             previous_close, change_value, change_percent
     const fallbackPrice = firstPositiveNumber(
+      d.last,
       d.last_price,
       d.previous_close,
       d.close_price,
