@@ -155,17 +155,17 @@ class KiteStreamService {
     const raw = String(symbol || '').toUpperCase();
     if (!raw) return null;
 
+    const requestedMonth = getContractMonthKey(raw);
     const exact = this.priceCache.get(raw);
-    if (exact) return exact;
+    if (exact && (!requestedMonth || exact.contractMonth === requestedMonth)) return exact;
 
     const lookupKey = normalizePriceLookupKey(raw);
-    const requestedMonth = getContractMonthKey(raw);
     if (!lookupKey) return null;
 
     for (const [cachedSymbol, price] of this.priceCache.entries()) {
       if (normalizePriceLookupKey(cachedSymbol) !== lookupKey) continue;
       const cachedMonth = getContractMonthKey(cachedSymbol);
-      if (requestedMonth && cachedMonth && requestedMonth !== cachedMonth) continue;
+      if (requestedMonth && cachedMonth !== requestedMonth) continue;
       return price;
     }
 
@@ -176,13 +176,14 @@ class KiteStreamService {
     const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
       .map((value) => String(value || '').toUpperCase())
       .filter(Boolean);
+    const requestedMonth = getRowContractMonthKey(row);
 
     for (const key of exactKeys) {
       const exact = this.priceCache.get(key);
+      if (exact && requestedMonth && exact.contractMonth !== requestedMonth) continue;
       if (exact) return exact;
     }
 
-    const requestedMonth = getRowContractMonthKey(row);
     if (requestedMonth) {
       for (const key of exactKeys) {
         const price = this.getPrice(key);
@@ -233,6 +234,7 @@ class KiteStreamService {
     );
 
     const rowsByUnderlying = new Map();
+    const validCacheAliases = new Set();
     for (const row of allowedRows) {
       const key = String(row.underlying || row.symbol || '').toUpperCase();
       if (!rowsByUnderlying.has(key)) rowsByUnderlying.set(key, []);
@@ -270,14 +272,25 @@ class KiteStreamService {
 
       const tickSize = Number(row.tick_size || 0.05);
       const exchange = String(row.kite_exchange || 'NFO').toUpperCase();
+      const contractMonth = getRowContractMonthKey(row);
 
       if (!map.has(token)) {
-        map.set(token, { symbols: [], tickSize, exchange });
+        map.set(token, { symbols: [], tickSize, exchange, contractMonth });
+      } else if (!map.get(token).contractMonth && contractMonth) {
+        map.get(token).contractMonth = contractMonth;
       }
       for (const symbol of getRowPriceAliases(row)) {
+        validCacheAliases.add(symbol);
         if (!map.get(token).symbols.includes(symbol)) {
           map.get(token).symbols.push(symbol);
         }
+      }
+    }
+
+    for (const cachedSymbol of this.priceCache.keys()) {
+      if (!validCacheAliases.has(cachedSymbol)) {
+        this.priceCache.delete(cachedSymbol);
+        this.lastEmitAt.delete(cachedSymbol);
       }
     }
 
@@ -527,8 +540,10 @@ class KiteStreamService {
 
       // ── Emit to ALL alias symbols for this token ─────────────────────────
       for (const sym of entry.symbols) {
+        const contractMonth = getContractMonthKey(sym) || entry.contractMonth || '';
+        const aliasPriceData = { ...priceData, contractMonth };
         // Update cache
-        this.priceCache.set(sym, priceData);
+        this.priceCache.set(sym, aliasPriceData);
         this.dirtySymbols.add(sym);
 
         // Emit to socket room for this symbol (frontend subscribes to symbol name)
@@ -559,6 +574,7 @@ class KiteStreamService {
             change:        priceData.change,
             changePercent: priceData.changePct,
             volume:        priceData.volume,
+            contractMonth,
             timestamp:     emitTs,
             source:        'kite',
           });
