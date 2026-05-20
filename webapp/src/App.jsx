@@ -2242,8 +2242,8 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
   const [orderRows, setOrderRows] = useState([]);
   const [deals, setDeals] = useState([]);
   const [dealsSummary, setDealsSummary] = useState(null);
-  const [period, setPeriod] = useState('month');
-  const [view, setView] = useState('positions');
+  const [period, setPeriod] = useState('today');
+  const [view, setView] = useState('deals');
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
