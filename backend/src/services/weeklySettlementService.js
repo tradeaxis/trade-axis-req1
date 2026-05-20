@@ -93,6 +93,30 @@ class WeeklySettlementService {
     console.log(`📊 Found ${openTrades.length} open trade(s) to settle`);
 
     // ── 2. Group by account (so we update each account ONCE) ──
+    const settlementPrices = new Map();
+    const missingPrices = [];
+    for (const trade of openTrades) {
+      const closePrice = await this._getSettlementPrice(trade);
+      if (!closePrice || closePrice <= 0) {
+        missingPrices.push({ tradeId: trade.id, symbol: trade.symbol });
+      } else {
+        settlementPrices.set(String(trade.id), Number(closePrice));
+      }
+    }
+
+    if (missingPrices.length > 0) {
+      const message = `Settlement aborted before changes: ${missingPrices.length} open trade(s) have no valid settlement price.`;
+      console.error(message);
+      return {
+        success: false,
+        message,
+        settled: 0,
+        totalWeeklyPnL: 0,
+        accounts: 0,
+        errors: missingPrices,
+      };
+    }
+
     const byAccount = {};
     for (const trade of openTrades) {
       const accId = trade.account_id;
@@ -121,11 +145,12 @@ class WeeklySettlementService {
       const weeklyPnL = equityBefore - balance; // = credit + floating = total week P&L
 
       let newMarginTotal = 0; // Sum of reopened trades' margins
+      const errorsBeforeAccount = errors.length;
 
       for (const trade of accountTrades) {
         try {
           // ── Get settlement price ──
-          const closePrice = await this._getSettlementPrice(trade);
+          const closePrice = settlementPrices.get(String(trade.id)) || await this._getSettlementPrice(trade);
           if (!closePrice || closePrice <= 0) {
             console.warn(`  ⚠️ Skipping ${trade.symbol} — no valid price`);
             continue;
@@ -226,6 +251,22 @@ class WeeklySettlementService {
           if (reopenErr) {
             console.error(`  ❌ Reopen ${trade.symbol}:`, reopenErr.message);
             errors.push({ tradeId: trade.id, error: reopenErr.message });
+            await supabase
+              .from('trades')
+              .update({
+                close_price: null,
+                close_time: null,
+                status: 'open',
+                current_price: closePrice,
+                profit: grossPnL,
+                sell_brokerage: Number(trade.sell_brokerage || 0),
+                brokerage: Number(trade.brokerage || 0),
+                is_settlement_close: false,
+                settlement_week: null,
+                updated_at: closeTime,
+                comment: trade.comment || null,
+              })
+              .eq('id', trade.id);
             continue;
           }
 
@@ -291,11 +332,17 @@ class WeeklySettlementService {
       //   Equity:      = Balance (since credit=0 and floating=0)
       //   Free Margin: = Balance - Margin
       //   Profit:      0
+      if (errors.length > errorsBeforeAccount) {
+        console.error(`  ❌ Account ${accId}: settlement had trade errors, skipping account reset`);
+        totalWeeklyPnL += weeklyPnL;
+        continue;
+      }
+
       try {
         const newEquity = balance;  // credit=0, floating=0
         const newFreeMargin = Math.max(0, balance - newMarginTotal);
 
-        await supabase
+        const { error: accountUpdateError } = await supabase
           .from('accounts')
           .update({
             // balance: NOT TOUCHED — only admin changes this
@@ -308,6 +355,8 @@ class WeeklySettlementService {
           })
           .eq('id', accId);
 
+        if (accountUpdateError) throw accountUpdateError;
+
         const emoji = weeklyPnL >= 0 ? '💰' : '💸';
         console.log(
           `  ${emoji} Account ${accId}:` +
@@ -317,6 +366,7 @@ class WeeklySettlementService {
         );
       } catch (e) {
         console.error(`  ❌ Account ${accId} update error:`, e.message);
+        errors.push({ accountId: accId, error: e.message });
       }
 
       totalWeeklyPnL += weeklyPnL;
@@ -328,9 +378,16 @@ class WeeklySettlementService {
       closeTime,
       errors,
     );
+    const staleRepair = await this._closeSupersededSettlementParents(
+      settlementWeek,
+      new Set([...(normalized.accountIds || []), ...Object.keys(byAccount)]),
+      closeTime,
+      errors,
+    );
     const normalizedAccounts = new Set([
       ...Object.keys(byAccount),
       ...(normalized.accountIds || []),
+      ...(staleRepair.accountIds || []),
     ]);
     if (normalizedAccounts.size > 0) {
       await this._recalculateAccounts([...normalizedAccounts], closeTime, errors);
@@ -348,7 +405,7 @@ class WeeklySettlementService {
     console.log('');
 
     return {
-      success: true,
+      success: errors.length === 0,
       settled: settledCount,
       totalWeeklyPnL,
       accounts: Object.keys(byAccount).length,
@@ -667,6 +724,7 @@ class WeeklySettlementService {
     const rows = openTrades || [];
     const byId = new Map(rows.map((trade) => [String(trade.id), trade]));
     const childRows = rows.filter((trade) => trade.settled_from_trade_id);
+    const touchedAccounts = new Set();
     let staleParentsClosed = 0;
     let reopenedNormalized = 0;
 
@@ -675,7 +733,10 @@ class WeeklySettlementService {
       const childSettlementWeek = String(child.settlement_week || targetDate);
       const closePrice = Number(child.open_price || child.current_price || parent?.current_price || parent?.open_price || 0);
 
-      if (child.account_id) accountIds.add(child.account_id);
+      if (child.account_id) {
+        accountIds.add(child.account_id);
+        touchedAccounts.add(child.account_id);
+      }
 
       if (closePrice > 0) {
         const { error: childErr } = await supabase
@@ -704,7 +765,10 @@ class WeeklySettlementService {
         continue;
       }
 
-      if (parent.account_id) accountIds.add(parent.account_id);
+      if (parent.account_id) {
+        accountIds.add(parent.account_id);
+        touchedAccounts.add(parent.account_id);
+      }
       const qty = Number(parent.quantity || 0);
       const openPrice = Number(parent.open_price || 0);
       const direction = String(parent.trade_type || '').toLowerCase() === 'buy' ? 1 : -1;
@@ -746,7 +810,10 @@ class WeeklySettlementService {
       errors.push({ repair: 'open-settlement-close-flagged', error: flaggedErr.message });
     } else {
       for (const trade of flaggedRows || []) {
-        if (trade.account_id) accountIds.add(trade.account_id);
+        if (trade.account_id) {
+          accountIds.add(trade.account_id);
+          touchedAccounts.add(trade.account_id);
+        }
         const closePrice = Number(trade.current_price || trade.open_price || 0);
         const { error: closeErr } = await supabase
           .from('trades')
@@ -767,7 +834,7 @@ class WeeklySettlementService {
       }
     }
 
-    return { staleParentsClosed, reopenedNormalized };
+    return { staleParentsClosed, reopenedNormalized, accountIds: [...touchedAccounts] };
   }
 
   async _recalculateAccounts(accountIds, now, errors) {

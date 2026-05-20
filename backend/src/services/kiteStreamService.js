@@ -615,10 +615,21 @@ class KiteStreamService {
         const chunk = updates.slice(i, i + CHUNK_SIZE);
         const symbols = chunk.map(u => u.sym);
 
-        // Use the first price in chunk for the update (they're all near-identical within 3s)
-        // For per-symbol accuracy, use upsert with array of rows instead
         try {
-          const rows = chunk.map(({ sym, price }) => ({
+          const { data: existingRows, error: existingError } = await supabase
+            .from('symbols')
+            .select('symbol')
+            .in('symbol', symbols);
+
+          if (existingError) throw existingError;
+
+          const existingSymbols = new Set(
+            (existingRows || []).map((row) => String(row.symbol || '').toUpperCase()),
+          );
+
+          const rows = chunk
+            .filter(({ sym }) => existingSymbols.has(String(sym || '').toUpperCase()))
+            .map(({ sym, price }) => ({
             symbol:         sym,
             last_price:     price.last,
             bid:            price.bid,
@@ -632,6 +643,8 @@ class KiteStreamService {
             volume:         price.volume,
             last_update:    now,
           }));
+
+          if (rows.length === 0) continue;
 
           await supabase
             .from('symbols')

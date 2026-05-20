@@ -68,6 +68,9 @@ const useMarketStore = create((set, get) => ({
             tick_size:      s.tick_size,
             underlying:     s.underlying,
             expiry_date:    s.expiry_date,
+            contractMonth:  s.expiry_date
+              ? ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'][new Date(s.expiry_date).getMonth()]
+              : undefined,
             // ── Use last_update from DB if available, else "now" ──
             // DB prices may be minutes old so we use last_update if present.
             timestamp: s.last_update ? new Date(s.last_update).getTime() : now,
@@ -146,6 +149,7 @@ const useMarketStore = create((set, get) => ({
             change:         Number(item.change ?? item.change_value    ?? existing.change         ?? 0),
             change_percent: Number(item.changePercent ?? item.change_percent ?? existing.change_percent ?? 0),
             volume:         Number(item.volume ?? existing.volume  ?? 0),
+            contractMonth:  item.contractMonth ?? item.contract_month ?? existing.contractMonth,
             // ── Always stamp now so staleness detection works ──
             timestamp: now,
             source:    item.source || 'socket',
@@ -196,6 +200,7 @@ const useMarketStore = create((set, get) => ({
               change:         Number(data.change ?? data.change_value    ?? existing.change         ?? 0),
               change_percent: Number(data.changePercent ?? data.change_percent ?? existing.change_percent ?? 0),
               volume:         Number(data.volume ?? existing.volume  ?? 0),
+              contractMonth:  data.contractMonth ?? data.contract_month ?? existing.contractMonth,
               timestamp: now,
               source:    data.source || 'socket',
             },
@@ -236,6 +241,7 @@ const useMarketStore = create((set, get) => ({
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume:         Number(q.volume     || 0),
           display_name:   q.displayName || q.display_name,
+          contractMonth:  q.contractMonth || q.contract_month || existing?.contractMonth,
           timestamp:      quoteTimestamp,
           source:         q.source || 'api',
           off_quotes:     Boolean(q.off_quotes),

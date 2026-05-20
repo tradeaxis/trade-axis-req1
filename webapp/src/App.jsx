@@ -228,7 +228,12 @@ const isVisibleContract = (symbol, referenceDate = new Date()) => {
 const filterTradableSymbols = (symbols = []) => {
   const seen = new Set();
   return (symbols || [])
-    .filter((symbol) => symbol?.is_active !== false && isVisibleContract(symbol))
+    .filter((symbol) => {
+      if (symbol?.is_active === false || !isVisibleContract(symbol)) return false;
+      const source = `${symbol?.symbol || ''} ${symbol?.kite_tradingsymbol || ''} ${symbol?.display_name || ''}`.toUpperCase();
+      const looksLikeFutureAlias = new RegExp(`[-_](${monthAbbrs.join('|')})\\b|\\d{2}(${monthAbbrs.join('|')})\\d{0,2}FUT`).test(source);
+      return !(looksLikeFutureAlias && !symbol?.kite_instrument_token && !symbol?.expiry_date);
+    })
     .filter((symbol) => {
       const key = String(symbol?.symbol || '').toUpperCase();
       if (!key || seen.has(key)) return false;
@@ -5162,10 +5167,15 @@ function KiteSetupPanel() {
   const [status, setStatus] = useState(null);
   const [loginUrl, setLoginUrl] = useState('');
   const [requestToken, setRequestToken] = useState('');
+  const [tokenMode, setTokenMode] = useState('automatic');
 
   const load = async () => {
-    const res = await api.get('/web-admin/kite/status');
+    const [res, settingsRes] = await Promise.all([
+      api.get('/web-admin/kite/status'),
+      api.get('/web-admin/kite/settings').catch(() => ({ data: { data: null } })),
+    ]);
     setStatus(res.data || {});
+    setTokenMode(settingsRes.data?.data?.tokenMode || res.data?.authSettings?.tokenMode || 'automatic');
   };
 
   useEffect(() => {
@@ -5198,6 +5208,18 @@ function KiteSetupPanel() {
     }
   };
 
+  const updateTokenMode = async (mode) => {
+    try {
+      setTokenMode(mode);
+      const res = await api.post('/web-admin/kite/settings', { tokenMode: mode });
+      setTokenMode(res.data?.data?.tokenMode || mode);
+      toast.success(mode === 'automatic' ? 'Automatic token mode enabled' : 'Manual token mode enabled');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Could not update token mode');
+      load().catch(() => {});
+    }
+  };
+
   return (
     <div className="grid-2">
       <div className="card pad">
@@ -5206,9 +5228,24 @@ function KiteSetupPanel() {
           <Stat label="Session Ready" value={status?.sessionReady ? 'Yes' : 'No'} />
           <Stat label="Stream" value={status?.stream?.running ? 'Running' : 'Stopped'} />
           <Stat label="Tokens" value={status?.stream?.tokenCount || 0} />
+          <Stat label="Token Mode" value={tokenMode === 'automatic' ? 'Automatic' : 'Manual'} />
         </div>
       </div>
       <div className="card pad">
+        <div className="section-head">
+          <div>
+            <h2>Token Mode</h2>
+            <p>Automatic starts stream and syncs symbols after a valid Kite session is created. Manual keeps request-token entry as fallback.</p>
+          </div>
+        </div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={tokenMode === 'automatic'}
+            onChange={(event) => updateTokenMode(event.target.checked ? 'automatic' : 'manual')}
+          />
+          <span>Enable automatic Kite token handling</span>
+        </label>
         <div className="section-head"><div><h2>Daily Setup</h2><p>Generate login URL and enter request token.</p></div></div>
         <button className="btn primary" onClick={getLogin}>Get Login URL</button>
         {loginUrl && <textarea className="textarea mono" readOnly value={loginUrl} style={{ marginTop: 12 }} />}

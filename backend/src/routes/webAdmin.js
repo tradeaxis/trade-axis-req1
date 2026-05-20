@@ -58,6 +58,8 @@ router.post('/kite/create-session', webAdminAuth, adminController.createKiteSess
 router.post('/kite/sync-symbols', webAdminAuth, adminController.syncKiteSymbols);
 router.post('/kite/start-stream', webAdminAuth, adminController.startKiteStream);
 router.post('/kite/stop-stream', webAdminAuth, adminController.stopKiteStream);
+router.get('/kite/settings', webAdminAuth, adminController.getKiteAuthSettings);
+router.post('/kite/settings', webAdminAuth, adminController.updateKiteAuthSettings);
 
 router.get('/support-messages', webAdminAuth, messageController.listSupportMessages);
 router.post('/support-messages', webAdminAuth, messageController.sendSupportReply);

@@ -1,7 +1,12 @@
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../config/supabase');
 const { generateAccountNumber } = require('../utils/auth');
-const { fitTradeComment } = require('../utils/tradeCommentEvents');
+const {
+  buildTradeEntryEvent,
+  ensureTradeEntryHistory,
+  fitTradeComment,
+  mergeTradeCommentEvents,
+} = require('../utils/tradeCommentEvents');
 const kiteStreamService = require('../services/kiteStreamService');
 const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
 const {
@@ -205,6 +210,35 @@ const findSymbolData = async (rawSymbol) => {
   }
 
   return null;
+};
+
+const getEquivalentSymbols = async (symbolData = {}) => {
+  const symbols = new Set([String(symbolData.symbol || '').toUpperCase()].filter(Boolean));
+
+  let query = null;
+  if (symbolData.kite_instrument_token) {
+    query = supabase
+      .from('symbols')
+      .select('symbol')
+      .eq('kite_instrument_token', symbolData.kite_instrument_token);
+  } else if (symbolData.underlying && symbolData.expiry_date) {
+    query = supabase
+      .from('symbols')
+      .select('symbol')
+      .eq('underlying', symbolData.underlying)
+      .eq('expiry_date', symbolData.expiry_date);
+  }
+
+  if (!query) return [...symbols];
+
+  const { data, error } = await query.limit(100);
+  if (error) throw error;
+
+  for (const row of data || []) {
+    if (row.symbol) symbols.add(String(row.symbol).toUpperCase());
+  }
+
+  return [...symbols];
 };
 
 const firstNonEmptyString = (...values) => {
@@ -1633,7 +1667,83 @@ exports.tradeOnBehalf = async (req, res) => {
       ? requestedEntryTime.toISOString()
       : new Date().toISOString();
     const accountEquity = Number(account.equity ?? (Number(account.balance || 0) + Number(account.credit || 0)));
-    const newMargin = Number(account.margin || 0) + marginRequired;
+    const accountNewMargin = Number(account.margin || 0) + marginRequired;
+    const current = Number(currentPrice || price);
+    const equivalentSymbols = await getEquivalentSymbols(symbolData);
+    const { data: existingTrades, error: existingError } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('account_id', account.id)
+      .eq('trade_type', tradeType)
+      .eq('status', 'open')
+      .in('symbol', equivalentSymbols)
+      .order('open_time', { ascending: true })
+      .limit(1);
+
+    if (existingError) throw existingError;
+
+    const existingTrade = existingTrades?.[0] || null;
+    if (existingTrade) {
+      const existingQty = Number(existingTrade.quantity || 0);
+      const existingPrice = Number(existingTrade.open_price || 0);
+      const mergedQty = existingQty + qty;
+      const mergedPrice = mergedQty > 0
+        ? ((existingPrice * existingQty) + (price * qty)) / mergedQty
+        : price;
+      const mergedBrokerage = Number(existingTrade.buy_brokerage ?? existingTrade.brokerage ?? 0) + brokerage;
+      const mergedMargin = Number(existingTrade.margin || 0) + marginRequired;
+      const direction = tradeType === 'sell' ? -1 : 1;
+      const mergedProfit = ((current - mergedPrice) * direction * mergedQty * lotSize) - mergedBrokerage;
+      const entryEvents = [
+        ...ensureTradeEntryHistory(existingTrade),
+        buildTradeEntryEvent({
+          action: 'add',
+          time: now,
+          quantity: qty,
+          price,
+          commission: brokerage,
+        }),
+      ];
+
+      const { data: updatedTrade, error: updateTradeError } = await supabase
+        .from('trades')
+        .update({
+          quantity: mergedQty,
+          open_price: mergedPrice,
+          current_price: current,
+          margin: mergedMargin,
+          brokerage: mergedBrokerage,
+          buy_brokerage: mergedBrokerage,
+          profit: mergedProfit,
+          stop_loss: Number(stopLoss) || Number(existingTrade.stop_loss || 0),
+          take_profit: Number(takeProfit) || Number(existingTrade.take_profit || 0),
+          comment: mergeTradeCommentEvents(existingTrade.comment || '', entryEvents),
+          updated_at: now,
+        })
+        .eq('id', existingTrade.id)
+        .select()
+        .single();
+
+      if (updateTradeError) throw updateTradeError;
+
+      const { error: updateAccountError } = await supabase
+        .from('accounts')
+        .update({
+          margin: accountNewMargin,
+          free_margin: accountEquity - accountNewMargin,
+          updated_at: now,
+        })
+        .eq('id', account.id);
+
+      if (updateAccountError) throw updateAccountError;
+
+      return res.json({
+        success: true,
+        merged: true,
+        data: updatedTrade,
+        message: `${tradeType.toUpperCase()} ${symbolData.symbol} merged for selected user`,
+      });
+    }
 
     const tradeData = {
       user_id: userId,
@@ -1643,7 +1753,7 @@ exports.tradeOnBehalf = async (req, res) => {
       trade_type: tradeType,
       quantity: qty,
       open_price: price,
-      current_price: Number(currentPrice || price),
+      current_price: current,
       stop_loss: Number(stopLoss) || 0,
       take_profit: Number(takeProfit) || 0,
       margin: marginRequired,
@@ -1667,8 +1777,8 @@ exports.tradeOnBehalf = async (req, res) => {
     const { error: updateError } = await supabase
       .from('accounts')
       .update({
-        margin: newMargin,
-        free_margin: accountEquity - newMargin,
+        margin: accountNewMargin,
+        free_margin: accountEquity - accountNewMargin,
         updated_at: now,
       })
       .eq('id', account.id);

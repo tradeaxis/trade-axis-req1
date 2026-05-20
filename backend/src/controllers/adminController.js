@@ -35,6 +35,23 @@ const buildAdminTradeComment = (prefix, note) => (
   fitTradeComment(`${prefix}: ${note || 'Manual admin action'}`)
 );
 
+const KITE_AUTH_SETTINGS_KEY = 'kite_auth_settings';
+const DEFAULT_KITE_AUTH_SETTINGS = {
+  tokenMode: 'automatic',
+  automatic: true,
+};
+
+const normalizeKiteAuthSettings = (value = {}) => {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const tokenMode = source.tokenMode === 'manual' || source.mode === 'manual' ? 'manual' : 'automatic';
+  return {
+    ...DEFAULT_KITE_AUTH_SETTINGS,
+    ...source,
+    tokenMode,
+    automatic: tokenMode === 'automatic',
+  };
+};
+
 const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
 const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
 const QR_DEPOSIT_DESCRIPTION_PREFIX = 'QR Deposit Request';
@@ -1464,6 +1481,51 @@ exports.cancelAllPendingOrders = async (req, res) => {
 
 // ============ KITE CONNECT FUNCTIONS ============
 
+const getKiteAuthSettingsValue = async () => {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('value')
+    .eq('key', KITE_AUTH_SETTINGS_KEY)
+    .maybeSingle();
+
+  if (error) throw error;
+  return normalizeKiteAuthSettings(parseAppSettingValue(data?.value));
+};
+
+exports.getKiteAuthSettings = async (req, res) => {
+  try {
+    const settings = await getKiteAuthSettingsValue();
+    res.json({ success: true, data: settings });
+  } catch (error) {
+    console.error('getKiteAuthSettings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateKiteAuthSettings = async (req, res) => {
+  try {
+    const tokenMode = req.body?.tokenMode === 'manual' || req.body?.automatic === false
+      ? 'manual'
+      : 'automatic';
+    const settings = normalizeKiteAuthSettings({ tokenMode });
+
+    const { error } = await supabase
+      .from('app_settings')
+      .upsert({
+        key: KITE_AUTH_SETTINGS_KEY,
+        value: JSON.stringify(settings),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'key' });
+
+    if (error) throw error;
+
+    res.json({ success: true, data: settings, message: `Kite token mode set to ${tokenMode}` });
+  } catch (error) {
+    console.error('updateKiteAuthSettings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getKiteLoginUrl = async (req, res) => {
   try {
     await kiteService.init();
@@ -1519,8 +1581,10 @@ exports.createKiteSession = async (req, res) => {
 
     // ── AUTO-SYNC instruments before stream start ──────────────────
     // This ensures the stream subscribes to the current valid contracts immediately.
+    const kiteAuthSettings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
+    const automaticTokenMode = kiteAuthSettings.tokenMode !== 'manual';
     let syncResult = null;
-    try {
+    if (automaticTokenMode) try {
       const { syncKiteInstruments } = require('../utils/syncKiteInstruments');
       syncResult = await syncKiteInstruments();
       if (syncResult.success) {
@@ -1532,7 +1596,7 @@ exports.createKiteSession = async (req, res) => {
 
     // ── AUTO-RESTART STREAM with new token ──────────────────────────
     let streamResult = null;
-    try {
+    if (automaticTokenMode) try {
       // Stop existing stream (uses old expired token)
       console.log('🔄 Stopping old stream...');
       await kiteStreamService.stop();
@@ -1563,12 +1627,15 @@ exports.createKiteSession = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Kite session created successfully! Stream restarted. Token valid until tomorrow 6 AM IST.',
+      message: automaticTokenMode
+        ? 'Kite session created successfully! Stream restarted. Token valid until tomorrow 6 AM IST.'
+        : 'Kite session created successfully! Manual mode is enabled, start stream when ready.',
       userId: session.userId,
       createdAt: session.createdAt,
       stream: streamResult,
       sync: syncResult,
       holidays: holidayResult,
+      authSettings: kiteAuthSettings,
     });
   } catch (error) {
     console.error('createKiteSession error:', error);
@@ -1655,6 +1722,7 @@ exports.kiteStatus = async (req, res) => {
     const streamStatus = kiteStreamService.status();
     const sessionReady = kiteService.isSessionReady();
     const configured = kiteService.isConfigured();
+    const authSettings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
 
     let profileValid = false;
     let profile = null;
@@ -1681,6 +1749,7 @@ exports.kiteStatus = async (req, res) => {
           }
         : null,
       stream: streamStatus,
+      authSettings,
     });
   } catch (error) {
     console.error('kiteStatus error:', error);

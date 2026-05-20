@@ -55,6 +55,8 @@ router.post('/kite/sync-symbols', adminAuth, adminController.syncKiteSymbols);
 router.post('/kite/start-stream', adminAuth, adminController.startKiteStream);
 router.post('/kite/stop-stream', adminAuth, adminController.stopKiteStream);
 router.get('/kite/status', adminAuth, adminController.kiteStatus);
+router.get('/kite/settings', adminAuth, adminController.getKiteAuthSettings);
+router.post('/kite/settings', adminAuth, adminController.updateKiteAuthSettings);
 // Add these with the other admin routes
 router.post('/cleanup-data', adminAuth, adminController.cleanupOldData);
 router.post('/kite/delete-token', adminAuth, adminController.deleteExpiredToken);

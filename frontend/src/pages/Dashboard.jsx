@@ -285,14 +285,16 @@ const findTradeQuote = (trade, quotes = {}, symbols = []) => {
   const raw = String(trade?.symbol || '').toUpperCase();
   if (!raw) return null;
 
+  const tradeMonth = parseContractMonth(raw);
   const exactQuote = quotes?.[raw];
-  if (exactQuote) return exactQuote;
+  if (exactQuote && (!tradeMonth || !exactQuote.contractMonth || exactQuote.contractMonth === tradeMonth)) {
+    return exactQuote;
+  }
 
   const exactSymbol = (symbols || []).find((row) => String(row?.symbol || '').toUpperCase() === raw);
   if (exactSymbol) return { ...exactSymbol, ...(quotes?.[String(exactSymbol.symbol).toUpperCase()] || {}) };
 
   const tradeKey = normalizeLiveUnderlyingKey(raw);
-  const tradeMonth = parseContractMonth(raw);
   const matchedSymbol = (symbols || []).find((row) => {
     const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
     const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name);
@@ -1767,11 +1769,13 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
           : `Order Executed`,
       });
 
-      await refreshAccountActivity(selectedAccount.id);
       setShowOrderModal(false);
       setLimitPrice('');
       setOrderExecType('instant');
-      setTimeout(() => setOrderConfirmation(null), 3000);
+      refreshAccountActivity(selectedAccount.id).catch((err) => {
+        console.warn('Post-order refresh failed:', err?.message || err);
+      });
+      setTimeout(() => setOrderConfirmation(null), 700);
     } else {
       setOrderConfirmation({
         phase: 'rejected',
