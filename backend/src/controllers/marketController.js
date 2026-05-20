@@ -49,10 +49,10 @@ const firstPositiveNumber = (...values) => {
 
 const withQuoteFallback = (symbol) => {
   const fallbackPrice = firstPositiveNumber(
-    symbol?.last,
-    symbol?.last_price,
     symbol?.previous_close,
     symbol?.close_price,
+    symbol?.last,
+    symbol?.last_price,
     symbol?.bid,
     symbol?.ask,
   );
@@ -220,10 +220,10 @@ exports.getQuote = async (req, res) => {
     const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
     const fallbackPrice = firstPositiveNumber(
-      dbSym.last,
-      dbSym.last_price,
       dbSym.previous_close,
       dbSym.close_price,
+      dbSym.last,
+      dbSym.last_price,
       dbSym.bid,
       dbSym.ask,
     );

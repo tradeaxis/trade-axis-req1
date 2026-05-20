@@ -257,21 +257,40 @@ const normalizeLiveUnderlyingKey = (value = '') =>
     .replace(/[-_]/g, '')
     .replace(/[^A-Z0-9]/g, '');
 
-const getSymbolPrice = (symbol) =>
-  firstPositiveNumber(
+const getSymbolPrice = (symbol) => {
+  const isLive = String(symbol?.source || '').includes('kite_live') || symbol?.timestamp;
+  if (isLive) {
+    return firstPositiveNumber(
+      symbol?.last,
+      symbol?.last_price,
+      symbol?.lastPrice,
+      symbol?.current_price,
+      symbol?.currentPrice,
+      symbol?.bid,
+      symbol?.ask,
+      symbol?.previous_close,
+      symbol?.previousClose,
+      symbol?.close_price,
+      symbol?.closePrice,
+      symbol?.ohlc?.close,
+    );
+  }
+
+  return firstPositiveNumber(
+    symbol?.previous_close,
+    symbol?.previousClose,
+    symbol?.close_price,
+    symbol?.closePrice,
     symbol?.last,
     symbol?.last_price,
     symbol?.lastPrice,
     symbol?.current_price,
     symbol?.currentPrice,
-    symbol?.previous_close,
-    symbol?.previousClose,
-    symbol?.close_price,
-    symbol?.closePrice,
     symbol?.ohlc?.close,
     symbol?.bid,
     symbol?.ask,
   );
+};
 
 const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPrice, getSymbolPrice(symbol));
 
@@ -2417,11 +2436,19 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
               const side = deal.side || deal.trade_type || deal.type || '-';
               const qty = Number(deal.quantity || 0);
               const price = Number(deal.price || 0);
+              const actionLabel = deal.dealLabel || (
+                deal.symbol
+                  ? (String(side).toLowerCase() === 'buy' ? 'Buy In' : String(side).toLowerCase() === 'sell' ? 'Sell Out' : String(side).replace('_', ' '))
+                  : ''
+              );
               return (
                 <div className="deal-ledger-row" key={deal.id}>
                   <div className="deal-ledger-main">
                     <div>
-                      <strong>{deal.symbol || deal.dealLabel || deal.description || '-'}</strong>
+                      <strong>
+                        {deal.symbol || deal.dealLabel || deal.description || '-'}
+                        {deal.symbol && actionLabel ? <span className={`pill ${String(actionLabel).toLowerCase().includes('buy') ? 'teal' : 'red'}`}>{actionLabel}</span> : null}
+                      </strong>
                       <div className="meta">{formatDate(deal.time || deal.created_at)}</div>
                       <div className="deal-detail-line">
                         {qty ? <span>Qty {qty}</span> : null}
