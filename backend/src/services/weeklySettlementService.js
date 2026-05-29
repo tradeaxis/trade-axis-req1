@@ -11,7 +11,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 const { supabase } = require('../config/supabase');
-const { filterSupersededSettlementTrades } = require('./openTradeSnapshot');
+const {
+  buildOpenTradeSnapshots,
+  filterSupersededSettlementTrades,
+} = require('./openTradeSnapshot');
 
 const SETTLEMENT_TIMEZONE = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
 
@@ -83,7 +86,8 @@ class WeeklySettlementService {
     // Filter demo only if explicitly disabled, and never re-settle rows already opened for this settlement date.
     const eligibleTrades = (settleDemo ? trades : trades.filter((t) => !t.accounts?.is_demo))
       .filter((t) => String(t.settlement_week || '') !== settlementWeek);
-    const openTrades = filterSupersededSettlementTrades(eligibleTrades);
+    const snapshotTrades = await buildOpenTradeSnapshots(eligibleTrades);
+    const openTrades = filterSupersededSettlementTrades(snapshotTrades);
 
     if (openTrades.length === 0) {
       console.log('ℹ️  No live-account trades to settle.');
@@ -145,6 +149,14 @@ class WeeklySettlementService {
       const weeklyPnL = equityBefore - balance; // = credit + floating = total week P&L
 
       let newMarginTotal = 0; // Sum of reopened trades' margins
+      const reopenedMarginById = new Map();
+      const applyReopenedMargin = (tradeId, marginValue) => {
+        const key = String(tradeId);
+        const nextMargin = roundMoney(marginValue);
+        const previousMargin = reopenedMarginById.get(key) || 0;
+        newMarginTotal += nextMargin - previousMargin;
+        reopenedMarginById.set(key, nextMargin);
+      };
       const errorsBeforeAccount = errors.length;
 
       for (const trade of accountTrades) {
@@ -195,62 +207,12 @@ class WeeklySettlementService {
             continue;
           }
 
-          // ── B) Reopen at SAME close price ──
+          // B) Reopen at the same settlement price, merged by account + script + side.
           const leverage = Number(account.leverage || 5);
           const reopenMargin = (closePrice * qty) / leverage;
+          let newTrade = null;
 
-          const { data: existingReopen, error: existingReopenErr } = await supabase
-            .from('trades')
-            .select('id, margin')
-            .eq('settled_from_trade_id', trade.id)
-            .eq('status', 'open')
-            .maybeSingle();
-
-          if (existingReopenErr) {
-            console.error(`  âŒ Reopen lookup ${trade.symbol}:`, existingReopenErr.message);
-            errors.push({ tradeId: trade.id, error: existingReopenErr.message });
-            continue;
-          }
-
-          if (existingReopen?.id) {
-            newMarginTotal += Number(existingReopen.margin || reopenMargin || 0);
-            console.log(`  â„¹ï¸ ${trade.symbol} #${trade.id} already reopened as #${existingReopen.id}`);
-            continue;
-          }
-
-          const reopenData = {
-            user_id: trade.user_id,
-            account_id: trade.account_id,
-            symbol: trade.symbol,
-            exchange: trade.exchange || 'NSE',
-            trade_type: trade.trade_type,       // same direction
-            quantity: qty,                       // same quantity
-            open_price: closePrice,              // opens at settlement price
-            current_price: closePrice,           // same → P&L = 0
-            stop_loss: Number(trade.stop_loss || 0),    // preserved
-            take_profit: Number(trade.take_profit || 0), // preserved
-            margin: reopenMargin,
-            brokerage: 0,                        // no brokerage
-            buy_brokerage: 0,
-            sell_brokerage: 0,
-            profit: 0,                           // fresh start
-            status: 'open',
-            open_time: closeTime,
-            updated_at: closeTime,
-            settled_from_trade_id: trade.id,
-            settlement_week: settlementWeek,
-            comment: `M2M reopen from #${trade.id}`,
-          };
-
-          const { data: newTrade, error: reopenErr } = await supabase
-            .from('trades')
-            .insert(reopenData)
-            .select()
-            .single();
-
-          if (reopenErr) {
-            console.error(`  ❌ Reopen ${trade.symbol}:`, reopenErr.message);
-            errors.push({ tradeId: trade.id, error: reopenErr.message });
+          const rollbackClosedTrade = async () => {
             await supabase
               .from('trades')
               .update({
@@ -267,10 +229,128 @@ class WeeklySettlementService {
                 comment: trade.comment || null,
               })
               .eq('id', trade.id);
+          };
+
+          const { data: existingReopens, error: existingReopenErr } = await supabase
+            .from('trades')
+            .select('id, margin')
+            .eq('settled_from_trade_id', trade.id)
+            .eq('status', 'open')
+            .limit(1);
+
+          if (existingReopenErr) {
+            console.error(`  Reopen lookup ${trade.symbol}:`, existingReopenErr.message);
+            errors.push({ tradeId: trade.id, error: existingReopenErr.message });
             continue;
           }
 
-          newMarginTotal += reopenMargin;
+          const existingReopen = existingReopens?.[0] || null;
+          if (existingReopen?.id) {
+            newTrade = existingReopen;
+            console.log(`  ${trade.symbol} #${trade.id} already reopened as #${existingReopen.id}`);
+          }
+
+          if (!newTrade) {
+            const { data: groupedReopens, error: groupedReopenErr } = await supabase
+              .from('trades')
+              .select('id, quantity, open_price, current_price, margin')
+              .eq('account_id', trade.account_id)
+              .eq('symbol', trade.symbol)
+              .eq('trade_type', trade.trade_type)
+              .eq('status', 'open')
+              .eq('settlement_week', settlementWeek)
+              .not('settled_from_trade_id', 'is', null)
+              .limit(1);
+
+            if (groupedReopenErr) {
+              console.error(`  Reopen group lookup ${trade.symbol}:`, groupedReopenErr.message);
+              errors.push({ tradeId: trade.id, error: groupedReopenErr.message });
+              continue;
+            }
+
+            const groupedReopen = groupedReopens?.[0] || null;
+            if (groupedReopen?.id) {
+              const existingQty = Number(groupedReopen.quantity || 0);
+              const mergedQty = existingQty + qty;
+              const existingPrice = Number(groupedReopen.open_price || groupedReopen.current_price || closePrice);
+              const mergedPrice = mergedQty > 0
+                ? ((existingPrice * existingQty) + (closePrice * qty)) / mergedQty
+                : closePrice;
+              const mergedMargin = (mergedPrice * mergedQty) / leverage;
+
+              const { error: mergeErr } = await supabase
+                .from('trades')
+                .update({
+                  quantity: roundMoney(mergedQty),
+                  open_price: roundMoney(mergedPrice),
+                  current_price: roundMoney(mergedPrice),
+                  margin: roundMoney(mergedMargin),
+                  profit: 0,
+                  brokerage: 0,
+                  buy_brokerage: 0,
+                  sell_brokerage: 0,
+                  updated_at: closeTime,
+                  comment: `M2M reopen merged for ${settlementWeek}`,
+                })
+                .eq('id', groupedReopen.id)
+                .eq('status', 'open');
+
+              if (mergeErr) {
+                console.error(`  Merge reopen ${trade.symbol}:`, mergeErr.message);
+                errors.push({ tradeId: trade.id, error: mergeErr.message });
+                await rollbackClosedTrade();
+                continue;
+              }
+
+              newTrade = {
+                id: groupedReopen.id,
+                margin: roundMoney(mergedMargin),
+              };
+            }
+          }
+
+          if (!newTrade) {
+            const reopenData = {
+              user_id: trade.user_id,
+              account_id: trade.account_id,
+              symbol: trade.symbol,
+              exchange: trade.exchange || 'NSE',
+              trade_type: trade.trade_type,
+              quantity: qty,
+              open_price: closePrice,
+              current_price: closePrice,
+              stop_loss: Number(trade.stop_loss || 0),
+              take_profit: Number(trade.take_profit || 0),
+              margin: reopenMargin,
+              brokerage: 0,
+              buy_brokerage: 0,
+              sell_brokerage: 0,
+              profit: 0,
+              status: 'open',
+              open_time: closeTime,
+              updated_at: closeTime,
+              settled_from_trade_id: trade.id,
+              settlement_week: settlementWeek,
+              comment: `M2M reopen from #${trade.id}`,
+            };
+
+            const { data: insertedTrade, error: reopenErr } = await supabase
+              .from('trades')
+              .insert(reopenData)
+              .select()
+              .single();
+
+            if (reopenErr) {
+              console.error(`  Reopen ${trade.symbol}:`, reopenErr.message);
+              errors.push({ tradeId: trade.id, error: reopenErr.message });
+              await rollbackClosedTrade();
+              continue;
+            }
+
+            newTrade = insertedTrade;
+          }
+
+          applyReopenedMargin(newTrade.id, Number(newTrade.margin || reopenMargin || 0));
           settledCount++;
 
           const emoji = grossPnL >= 0 ? '🟢' : '🔴';
@@ -900,7 +980,20 @@ class WeeklySettlementService {
   }
 
   async _getSettlementPrice(trade) {
-    // 1. Use the same persisted "last" price shown in Quotes.
+    // Settlement must match the open position current price shown to the user.
+    const positionCurrentPrice = Number(trade.current_price || 0);
+    if (positionCurrentPrice > 0) return positionCurrentPrice;
+
+    // If the trade row has no current price, use the live stream cache next.
+    try {
+      const kiteStreamService = require('./kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(trade.symbol);
+      if (livePrice && livePrice.last > 0) {
+        return Number(livePrice.last);
+      }
+    } catch (_) {}
+
+    // Last fallback: persisted quote row, then the trade entry price.
     const { data: symRow } = await supabase
       .from('symbols')
       .select('last_price, previous_close, bid, ask')
@@ -913,17 +1006,7 @@ class WeeklySettlementService {
       if (p > 0) return p;
     }
 
-    // 2. Fall back to live Kite price if the DB row is not populated.
-    try {
-      const kiteStreamService = require('./kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
-      if (livePrice && livePrice.last > 0) {
-        return Number(livePrice.last);
-      }
-    } catch (_) {}
-
-    // 3. Trade's current/open price (last resort)
-    return Number(trade.current_price || 0) || Number(trade.open_price || 0);
+    return Number(trade.open_price || 0);
   }
 }
 

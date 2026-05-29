@@ -240,6 +240,45 @@ const parseContractMonth = (value = '') => {
   return displayMatch ? displayMatch[1].toUpperCase() : '';
 };
 
+const getContractExpiryDate = (symbol) => {
+  const raw = symbol?.expiry_date || symbol?.expiryDate || symbol?.expiry;
+  if (raw) {
+    const date = new Date(raw);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  return null;
+};
+
+const getMonthKey = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
+
+const getAllowedContractMonthKeys = (referenceDate = new Date()) => {
+  const allowed = new Set([getMonthKey(referenceDate)]);
+  if (referenceDate.getDate() >= 20) {
+    allowed.add(getMonthKey(addMonths(referenceDate, 1)));
+  }
+  return allowed;
+};
+
+const isVisibleContract = (symbol, referenceDate = new Date()) => {
+  const allowedKeys = getAllowedContractMonthKeys(referenceDate);
+  const expiry = getContractExpiryDate(symbol);
+  if (expiry) return allowedKeys.has(getMonthKey(expiry));
+
+  const parsedMonth =
+    parseContractMonth(symbol?.symbol) ||
+    parseContractMonth(symbol?.kite_tradingsymbol) ||
+    parseContractMonth(symbol?.display_name);
+
+  if (!parsedMonth) return true;
+
+  const monthIndex = CONTRACT_MONTHS.indexOf(parsedMonth);
+  if (monthIndex < 0) return true;
+  return allowedKeys.has(getMonthKey(new Date(referenceDate.getFullYear(), monthIndex, 1)));
+};
+
 // ============ DISPLAY SYMBOL FORMATTER ============
 // Converts raw symbol like "HDFCBANK-I" to "HDFCBANK-MAR" format
 const formatDisplaySymbol = (rawSymbol, allSyms) => {
@@ -412,15 +451,16 @@ const getUpcomingLiveContractRows = (rows = [], now = new Date(), maxContracts =
 
 const pickLiveContractRows = (symbolsList = []) => {
   const rowsByUnderlying = new Map();
+  const now = new Date();
 
   for (const row of symbolsList) {
+    if (!isVisibleContract(row, now)) continue;
     const key = normalizeLiveUnderlyingKey(row?.underlying || row?.symbol);
     if (!key) continue;
     if (!rowsByUnderlying.has(key)) rowsByUnderlying.set(key, []);
     rowsByUnderlying.get(key).push(row);
   }
 
-  const now = new Date();
   const preferredVisibleContracts = now.getDate() >= 20 ? 2 : 1;
   const picked = [];
 
@@ -1296,6 +1336,7 @@ const accountStats = useMemo(() => {
 
   const filteredSymbols = useMemo(() => {
     let list = symbols || [];
+    list = list.filter((s) => isVisibleContract(s));
     list = list.filter((s) => matchesSelectedCategory(s, selectedCategory));
 
     if (searchTerm.trim()) {
@@ -1366,6 +1407,8 @@ const accountStats = useMemo(() => {
 
       return false;
     });
+
+    list = list.filter((s) => isVisibleContract(s));
 
     // 1) Category filter
     if (selectedCategory !== 'all') {

@@ -13,6 +13,8 @@ const ALLOWED_CATEGORIES = [
   'commodity_futures',
 ];
 
+const CONTRACT_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
 const SYMBOL_SELECT_FIELDS = [
   'symbol',
   'display_name',
@@ -45,6 +47,53 @@ const firstPositiveNumber = (...values) => {
     if (Number.isFinite(number) && number > 0) return number;
   }
   return 0;
+};
+
+const getIstNow = () => new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+
+const getMonthKey = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
+
+const parseContractMonth = (value = '') => {
+  const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
+  if (!raw) return '';
+
+  const monthPattern = CONTRACT_MONTHS.join('|');
+  const labelMatch = raw.match(new RegExp(`[-_](${monthPattern})$`, 'i'));
+  if (labelMatch) return labelMatch[1].toUpperCase();
+
+  const compact = raw.replace(/[-_]/g, '');
+  const kiteMatch = compact.match(new RegExp(`\\d{2}(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (kiteMatch) return kiteMatch[1].toUpperCase();
+
+  const displayMatch = compact.match(new RegExp(`(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  return displayMatch ? displayMatch[1].toUpperCase() : '';
+};
+
+const isVisibleContractRow = (symbol, referenceDate = getIstNow()) => {
+  const allowedMonthKeys = new Set([getMonthKey(referenceDate)]);
+  if (referenceDate.getDate() >= 20) {
+    allowedMonthKeys.add(getMonthKey(addMonths(referenceDate, 1)));
+  }
+
+  if (symbol?.expiry_date) {
+    const expiry = new Date(symbol.expiry_date);
+    if (!Number.isNaN(expiry.getTime())) {
+      return allowedMonthKeys.has(getMonthKey(expiry));
+    }
+  }
+
+  const parsedMonth =
+    parseContractMonth(symbol?.symbol) ||
+    parseContractMonth(symbol?.kite_tradingsymbol) ||
+    parseContractMonth(symbol?.display_name);
+
+  if (!parsedMonth) return true;
+  const monthIndex = CONTRACT_MONTHS.indexOf(parsedMonth);
+  if (monthIndex < 0) return true;
+  return allowedMonthKeys.has(getMonthKey(new Date(referenceDate.getFullYear(), monthIndex, 1)));
 };
 
 const withQuoteFallback = (symbol) => {
@@ -152,7 +201,7 @@ exports.getSymbols = async (req, res) => {
       if (offset >= 10000) hasMore = false;
     }
 
-    allSymbols = allSymbols.filter(isAllowedSymbolRow);
+    allSymbols = allSymbols.filter((row) => isAllowedSymbolRow(row) && isVisibleContractRow(row));
 
     // Always include Gift Nifty if present in DB
     const { data: giftRows } = await supabase
@@ -164,7 +213,7 @@ exports.getSymbols = async (req, res) => {
 
     if (giftRows && giftRows.length > 0) {
       const seenSymbols = new Set(allSymbols.map((s) => s.symbol));
-      giftRows.filter(isAllowedSymbolRow).forEach((g) => {
+      giftRows.filter((row) => isAllowedSymbolRow(row) && isVisibleContractRow(row)).forEach((g) => {
         if (!seenSymbols.has(g.symbol)) {
           allSymbols.unshift(g);
           seenSymbols.add(g.symbol);
@@ -304,7 +353,10 @@ exports.searchSymbols = async (req, res) => {
 
     if (error) throw error;
 
-    const filteredSymbols = (symbols || []).filter(isAllowedSymbolRow).map(withQuoteFallback).map(withLiveQuote);
+    const filteredSymbols = (symbols || [])
+      .filter((row) => isAllowedSymbolRow(row) && isVisibleContractRow(row))
+      .map(withQuoteFallback)
+      .map(withLiveQuote);
     res.json({ success: true, symbols: filteredSymbols, total: filteredSymbols.length });
   } catch (error) {
     console.error('searchSymbols error:', error);
