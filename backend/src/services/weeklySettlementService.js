@@ -53,11 +53,19 @@ const tradeDirection = (trade) => (
   String(trade?.trade_type || '').toLowerCase() === 'buy' ? 1 : -1
 );
 
+const normalizeIdList = (value) => {
+  if (!value) return [];
+  const list = Array.isArray(value) ? value : [value];
+  return [...new Set(list.map((item) => String(item || '').trim()).filter(Boolean))];
+};
+
 class WeeklySettlementService {
-  async runSettlement() {
+  async runSettlement(options = {}) {
     const now = new Date();
     const settlementWeek = formatDateInTimezone(now);
     const closeTime = now.toISOString();
+    const scopedUserIds = new Set(normalizeIdList(options.userIds));
+    const scopedAccountIds = new Set(normalizeIdList(options.accountIds));
 
     console.log('');
     console.log('═══════════════════════════════════════════════════════');
@@ -78,13 +86,30 @@ class WeeklySettlementService {
       return { success: false, message: error.message };
     }
 
-    if (!trades || trades.length === 0) {
-      console.log('ℹ️  No open trades to settle.');
-      return { success: true, settled: 0 };
+    let scopedTrades = trades || [];
+    if (scopedUserIds.size > 0 || scopedAccountIds.size > 0) {
+      scopedTrades = scopedTrades.filter((trade) => {
+        const userId = String(trade.user_id || trade.accounts?.user_id || '');
+        const accountId = String(trade.account_id || trade.accounts?.id || '');
+        const userAllowed = scopedUserIds.size === 0 || scopedUserIds.has(userId);
+        const accountAllowed = scopedAccountIds.size === 0 || scopedAccountIds.has(accountId);
+        return userAllowed && accountAllowed;
+      });
+    }
+
+    if (!scopedTrades || scopedTrades.length === 0) {
+      console.log('No open trades to settle for selected scope.');
+      return {
+        success: true,
+        settled: 0,
+        scoped: scopedUserIds.size > 0 || scopedAccountIds.size > 0,
+        userIds: [...scopedUserIds],
+        accountIds: [...scopedAccountIds],
+      };
     }
 
     // Filter demo only if explicitly disabled, and never re-settle rows already opened for this settlement date.
-    const eligibleTrades = (settleDemo ? trades : trades.filter((t) => !t.accounts?.is_demo))
+    const eligibleTrades = (settleDemo ? scopedTrades : scopedTrades.filter((t) => !t.accounts?.is_demo))
       .filter((t) => String(t.settlement_week || '') !== settlementWeek);
     const snapshotTrades = await buildOpenTradeSnapshots(eligibleTrades);
     const openTrades = filterSupersededSettlementTrades(snapshotTrades);
@@ -489,6 +514,9 @@ class WeeklySettlementService {
       settled: settledCount,
       totalWeeklyPnL,
       accounts: Object.keys(byAccount).length,
+      scoped: scopedUserIds.size > 0 || scopedAccountIds.size > 0,
+      userIds: [...scopedUserIds],
+      accountIds: [...scopedAccountIds],
       errors: errors.length > 0 ? errors : undefined,
     };
   }

@@ -24,6 +24,9 @@ export default function AdminPanel() {
   });
   const [settlementLoading, setSettlementLoading] = useState(false);
   const [settlementTriggering, setSettlementTriggering] = useState(false);
+  const [settlementMode, setSettlementMode] = useState('all');
+  const [settlementSingleUserId, setSettlementSingleUserId] = useState('');
+  const [settlementUserIds, setSettlementUserIds] = useState([]);
 
   const [manualTradeId, setManualTradeId]   = useState('');
   const [manualPrice,   setManualPrice]     = useState('');
@@ -127,11 +130,26 @@ export default function AdminPanel() {
   };
 
   const triggerSettlement = async () => {
-    if (!window.confirm('Run weekly settlement manually right now?')) return;
+    const userIds = settlementMode === 'all'
+      ? []
+      : settlementMode === 'single'
+        ? [settlementSingleUserId].filter(Boolean)
+        : settlementUserIds.filter(Boolean);
+
+    if (settlementMode !== 'all' && userIds.length === 0) {
+      toast.error('Select at least one user for settlement');
+      return;
+    }
+
+    const scopeText = settlementMode === 'all'
+      ? 'all users'
+      : `${userIds.length} selected user${userIds.length === 1 ? '' : 's'}`;
+
+    if (!window.confirm(`Run weekly settlement manually for ${scopeText}? This will close and reopen selected open positions at the current settlement price.`)) return;
 
     setSettlementTriggering(true);
     try {
-      const res = await api.post('/admin/trigger-settlement');
+      const res = await api.post('/admin/trigger-settlement', { confirm: true, userIds });
       if (res.data?.success) {
         toast.success(
           typeof res.data.settled === 'number'
@@ -363,6 +381,75 @@ export default function AdminPanel() {
                 <div className="text-xs" style={{ color: '#9ca3af' }}>
                   Use this when the automatic weekly settlement does not run on time.
                 </div>
+              </div>
+
+              <div className="p-3 rounded-lg mb-4" style={{ background: '#1e222d', border: '1px solid #363a45' }}>
+                <label className="block text-xs font-semibold mb-2" style={{ color: '#9ca3af' }}>
+                  Settlement scope
+                </label>
+                <select
+                  value={settlementMode}
+                  onChange={(e) => {
+                    setSettlementMode(e.target.value);
+                    setSettlementSingleUserId('');
+                    setSettlementUserIds([]);
+                  }}
+                  className="w-full px-3 py-2 rounded-lg mb-3"
+                  style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  <option value="all">All users</option>
+                  <option value="single">Select one user</option>
+                  <option value="multiple">Select multiple users</option>
+                </select>
+
+                {settlementMode === 'single' && (
+                  <select
+                    value={settlementSingleUserId}
+                    onChange={(e) => setSettlementSingleUserId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg"
+                    style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                  >
+                    <option value="">Select user</option>
+                    {adminUsers.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.login_id || user.email || user.id} - {[user.first_name, user.last_name].filter(Boolean).join(' ')}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {settlementMode === 'multiple' && (
+                  <div className="max-h-52 overflow-auto rounded-lg" style={{ border: '1px solid #363a45' }}>
+                    {adminUsers.map((user) => {
+                      const checked = settlementUserIds.includes(user.id);
+                      return (
+                        <label
+                          key={user.id}
+                          className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer"
+                          style={{ color: '#d1d4dc', borderBottom: '1px solid #2a2e39' }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              setSettlementUserIds((prev) => (
+                                e.target.checked
+                                  ? [...new Set([...prev, user.id])]
+                                  : prev.filter((id) => id !== user.id)
+                              ));
+                            }}
+                          />
+                          <span>
+                            {user.login_id || user.email || user.id}
+                            <span style={{ color: '#787b86' }}>
+                              {' '} {[user.first_name, user.last_name].filter(Boolean).join(' ')}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <button

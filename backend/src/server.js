@@ -172,8 +172,21 @@ const shouldRunCatchupSettlement = async () => {
 
 let settlementRunPromise = null;
 
-const runSettlementSafe = async (trigger = 'cron') => {
-  const manualTrigger = trigger === 'manual';
+const normalizeSettlementScope = (body = {}) => {
+  const normalizeList = (value) => {
+    if (!value) return [];
+    const list = Array.isArray(value) ? value : [value];
+    return [...new Set(list.map((item) => String(item || '').trim()).filter(Boolean))];
+  };
+
+  return {
+    userIds: normalizeList(body.userIds || body.userId),
+    accountIds: normalizeList(body.accountIds || body.accountId),
+  };
+};
+
+const runSettlementSafe = async (trigger = 'cron', options = {}) => {
+  const manualTrigger = trigger === 'manual' || String(trigger || '').startsWith('web-manual');
   if (!manualTrigger && !isSettlementWindow()) {
     console.log(`ℹ️ Weekly settlement skipped (${trigger}): outside Saturday 01:00 IST window.`);
     return {
@@ -189,7 +202,7 @@ const runSettlementSafe = async (trigger = 'cron') => {
   const target = getLastSettlementTarget();
   const lastRun = await getLastSettlementTime();
 
-  if (lastRun && lastRun >= target) {
+  if (!manualTrigger && lastRun && lastRun >= target) {
     console.log(`ℹ️ Weekly settlement already completed for target ${target.toISOString()}`);
     return {
       success: true,
@@ -221,7 +234,7 @@ const runSettlementSafe = async (trigger = 'cron') => {
   console.log('═══════════════════════════════════════════════════════');
 
   try {
-    const result = await weeklySettlementService.runSettlement();
+    const result = await weeklySettlementService.runSettlement(options);
 
     if (result.success) {
       await saveSettlementTime();
@@ -278,9 +291,16 @@ app.post('/api/admin/trigger-settlement', protect, adminOnly, async (req, res) =
   try {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Settlement confirmation is required.',
+      });
+    }
 
     console.log('🔧 Manual settlement trigger requested');
-    const result = await runSettlementSafe('manual');
+    const scope = normalizeSettlementScope(req.body || {});
+    const result = await runSettlementSafe('manual', scope);
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -310,7 +330,15 @@ app.get('/api/admin/settlement-status', protect, adminOnly, async (req, res) => 
 
 app.post('/api/web-admin/trigger-settlement', protect, adminOrSubBroker, async (req, res) => {
   try {
-    const result = await runSettlementSafe(`web-${req.user.role}`);
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Settlement confirmation is required.',
+      });
+    }
+
+    const scope = normalizeSettlementScope(req.body || {});
+    const result = await runSettlementSafe(`web-manual-${req.user.role}`, scope);
     res.json(result);
   } catch (err) {
     console.error('Web settlement trigger error:', err.message);

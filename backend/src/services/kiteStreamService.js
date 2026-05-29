@@ -138,6 +138,7 @@ class KiteStreamService {
 
     // Live price cache: symbol (uppercase) → priceData
     this.priceCache = new Map();
+    this.tokenPriceCache = new Map();
     this.lastEmitAt = new Map();
     this.underlyingCount = 0;
     this.mappedSymbolCount = 0;
@@ -162,17 +163,27 @@ class KiteStreamService {
     const lookupKey = normalizePriceLookupKey(raw);
     if (!lookupKey) return null;
 
+    const matches = [];
     for (const [cachedSymbol, price] of this.priceCache.entries()) {
       if (normalizePriceLookupKey(cachedSymbol) !== lookupKey) continue;
-      const cachedMonth = getContractMonthKey(cachedSymbol);
+      const cachedMonth = price.contractMonth || getContractMonthKey(cachedSymbol);
       if (requestedMonth && cachedMonth !== requestedMonth) continue;
-      return price;
+      matches.push(price);
     }
 
-    return null;
+    if (requestedMonth) return matches[0] || null;
+
+    const uniqueTokens = new Set(matches.map((price) => price.instrumentToken || '').filter(Boolean));
+    return uniqueTokens.size === 1 ? matches[0] : null;
   }
 
   getPriceForSymbolRow(row = {}) {
+    const token = Number(row.kite_instrument_token || 0);
+    if (token > 0) {
+      const tokenPrice = this.tokenPriceCache.get(token);
+      if (tokenPrice) return tokenPrice;
+    }
+
     const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
       .map((value) => String(value || '').toUpperCase())
       .filter(Boolean);
@@ -536,7 +547,11 @@ class KiteStreamService {
         changePct: parseFloat(chgPct.toFixed(2)),
         volume:    Number(t.volume_traded || t.volume || 0),
         timestamp: Date.now(),
+        instrumentToken: token,
+        contractMonth: entry.contractMonth || '',
       };
+
+      this.tokenPriceCache.set(token, priceData);
 
       // ── Emit to ALL alias symbols for this token ─────────────────────────
       for (const sym of entry.symbols) {
