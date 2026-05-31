@@ -624,6 +624,43 @@ button:disabled {
   padding-right: 4px;
 }
 
+.settlement-controls {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settlement-user-list {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.settlement-user-row {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 180px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settlement-user-row:last-child {
+  border-bottom: 0;
+}
+
+.settlement-user-row span {
+  font-weight: 800;
+}
+
+.settlement-user-row small {
+  color: var(--muted);
+}
+
 .row {
   min-width: 0;
   display: grid;

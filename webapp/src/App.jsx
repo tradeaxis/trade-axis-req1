@@ -250,6 +250,29 @@ const firstPositiveNumber = (...values) => {
   return 0;
 };
 
+const isMarketOpenNow = (symbol = '') => {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (330 + now.getTimezoneOffset()) * 60000);
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  const text = String(symbol || '').toUpperCase();
+  const isCommodity = /MCX|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/.test(text);
+  return isCommodity ? minutes >= 9 * 60 && minutes <= 23 * 60 + 30 : minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+};
+
+const isSettlementReopenPosition = (position = {}) => {
+  const comment = String(position.comment || position.remarks || '').toLowerCase();
+  return Boolean(position.settled_from_trade_id)
+    || Boolean(position.settlement_week)
+    || comment.includes('m2m reopen')
+    || comment.includes('settlement reopen')
+    || comment.includes('reopen repaired')
+    || comment.includes('reopen normalized')
+    || comment.includes('weekly settlement');
+};
+
 const normalizeLiveUnderlyingKey = (value = '') =>
   String(value || '')
     .toUpperCase()
@@ -333,6 +356,10 @@ const findSymbolByInput = (input, symbols = []) => {
 };
 
 const getLivePositionPrice = (position, symbols = []) => {
+  if (!isMarketOpenNow(position?.symbol) && isSettlementReopenPosition(position)) {
+    return firstPositiveNumber(position?.open_price, position?.current_price, position?.close_price);
+  }
+
   const symbol = findPositionSymbol(position, symbols);
 
   return firstPositiveNumber(
@@ -357,6 +384,8 @@ const getLivePositionPrice = (position, symbols = []) => {
 };
 
 const getPositionPnl = (position, symbols = []) => {
+  if (!isMarketOpenNow(position?.symbol) && isSettlementReopenPosition(position)) return 0;
+
   const currentPrice = getLivePositionPrice(position, symbols);
   const qty = Number(position.quantity || 0);
   const openPrice = Number(position.open_price || 0);
@@ -4946,10 +4975,20 @@ function QrDepositsPanel() {
 
 function SettlementPanel() {
   const [status, setStatus] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [settlementMode, setSettlementMode] = useState('all');
+  const [settlementUserId, setSettlementUserId] = useState('');
+  const [settlementUserIds, setSettlementUserIds] = useState([]);
+  const [busy, setBusy] = useState(false);
 
   const load = async () => {
-    const res = await api.get('/web-admin/settlement-status');
-    setStatus(res.data || {});
+    const [statusRes, usersRes] = await Promise.all([
+      api.get('/web-admin/settlement-status'),
+      api.get('/web-admin/users', { params: { role: 'user', limit: 5000 } }).catch(() => ({ data: { data: [] } })),
+    ]);
+    setStatus(statusRes.data || {});
+    const rows = usersRes.data?.data || usersRes.data?.users || [];
+    setUsers(rows.filter((user) => user.role !== 'sub_broker' && user.role !== 'admin'));
   };
 
   useEffect(() => {
@@ -4957,26 +4996,95 @@ function SettlementPanel() {
   }, []);
 
   const run = async () => {
-    if (!window.confirm('Run weekly settlement now?')) return;
+    const selectedUserIds = settlementMode === 'all'
+      ? []
+      : settlementMode === 'single'
+        ? [settlementUserId].filter(Boolean)
+        : settlementUserIds.filter(Boolean);
+
+    if (settlementMode !== 'all' && !selectedUserIds.length) {
+      toast.error('Select at least one user');
+      return;
+    }
+
+    const scopeLabel = settlementMode === 'all'
+      ? 'all users'
+      : `${selectedUserIds.length} selected user${selectedUserIds.length === 1 ? '' : 's'}`;
+
+    if (!window.confirm(`Run weekly settlement for ${scopeLabel}? This will close open positions and reopen them at the settlement price.`)) return;
+    setBusy(true);
     try {
-      const res = await api.post('/web-admin/trigger-settlement');
+      const res = await api.post('/web-admin/trigger-settlement', { confirm: true, userIds: selectedUserIds });
       toast.success(res.data?.message || 'Settlement completed');
       load();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Settlement failed');
+    } finally {
+      setBusy(false);
     }
+  };
+
+  const toggleSettlementUser = (userId) => {
+    setSettlementUserIds((prev) => (
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    ));
   };
 
   return (
     <div className="card pad">
       <div className="section-head">
         <div><h2>Weekly Settlement</h2><p>Manual fallback for the automatic settlement job.</p></div>
-        <button className="btn primary" onClick={run}>Run Settlement</button>
+        <div className="action-row">
+          <button className="btn" onClick={load} disabled={busy}><RefreshCw size={16} /> Refresh</button>
+          <button className="btn primary" onClick={run} disabled={busy}>Run Settlement</button>
+        </div>
       </div>
       <div className="grid-3">
         <Stat label="Last Run" value={formatDate(status?.lastRun)} />
         <Stat label="Next Scheduled" value={formatDate(status?.nextScheduled)} />
         <Stat label="Timezone" value={status?.timezone || 'Asia/Kolkata'} />
+      </div>
+      <div className="settlement-controls">
+        <div className="field">
+          <label>Settlement Scope</label>
+          <select className="select" value={settlementMode} onChange={(event) => setSettlementMode(event.target.value)}>
+            <option value="all">All users</option>
+            <option value="single">Select one user</option>
+            <option value="multiple">Select multiple users</option>
+          </select>
+        </div>
+
+        {settlementMode === 'single' && (
+          <div className="field">
+            <label>User</label>
+            <select className="select" value={settlementUserId} onChange={(event) => setSettlementUserId(event.target.value)}>
+              <option value="">Select user</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>{user.login_id || user.email || user.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {settlementMode === 'multiple' && (
+          <div className="field">
+            <label>Users</label>
+            <div className="settlement-user-list">
+              {users.map((user) => (
+                <label key={user.id} className="settlement-user-row">
+                  <input
+                    type="checkbox"
+                    checked={settlementUserIds.includes(user.id)}
+                    onChange={() => toggleSettlementUser(user.id)}
+                  />
+                  <span>{user.login_id || user.email || user.name}</span>
+                  <small>{user.name || user.email || ''}</small>
+                </label>
+              ))}
+              {!users.length && <div className="empty-state">No users found</div>}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
