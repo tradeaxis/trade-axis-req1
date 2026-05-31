@@ -3574,6 +3574,7 @@ function EditPositionModal({ trade, onClose, onSaved }) {
     takeProfit: trade.take_profit || '',
     openTime: toDateTimeLocal(trade.open_time),
     closeTime: toDateTimeLocal(trade.close_time),
+    applyBrokerage: Number(trade.buy_brokerage ?? trade.brokerage ?? 0) > 0,
   });
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -3615,6 +3616,10 @@ function EditPositionModal({ trade, onClose, onSaved }) {
               <input className={`input ${livePnl >= 0 ? 'positive-input' : 'negative-input'}`} readOnly value={livePnl.toFixed(2)} />
             </div>
           </div>
+          <label className="row">
+            <span>Apply brokerage</span>
+            <input type="checkbox" checked={form.applyBrokerage} onChange={(event) => update('applyBrokerage', event.target.checked)} />
+          </label>
           <div className="grid-2"><button className="btn primary" onClick={save}>Submit</button><button className="btn subtle" onClick={onClose}>Cancel</button></div>
         </div>
       </div>
@@ -3626,6 +3631,7 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
   const [mode, setMode] = useState('market');
   const [quantity, setQuantity] = useState(trade.quantity || '');
   const [closePrice, setClosePrice] = useState('');
+  const [applyBrokerage, setApplyBrokerage] = useState(Number(trade.buy_brokerage ?? trade.brokerage ?? 0) > 0);
 
   const close = async () => {
     try {
@@ -3633,6 +3639,7 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
         tradeId: trade.id,
         closeQuantity: Number(quantity),
         closePrice: mode === 'manual' ? Number(closePrice) : undefined,
+        applyBrokerage,
       });
       toast.success('Position closed');
       onSaved();
@@ -3653,6 +3660,10 @@ function ExitPositionModal({ trade, onClose, onSaved }) {
           </div>
           <div className="field"><label>Quantity</label><input className="input" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></div>
           {mode === 'manual' && <div className="field"><label>Close Price</label><input className="input" value={closePrice} onChange={(event) => setClosePrice(event.target.value)} /></div>}
+          <label className="row">
+            <span>Apply brokerage</span>
+            <input type="checkbox" checked={applyBrokerage} onChange={(event) => setApplyBrokerage(event.target.checked)} />
+          </label>
           <button className="btn danger block" onClick={close}>Close Position</button>
         </div>
       </div>
@@ -4221,29 +4232,39 @@ function getPeriodCutoff(period) {
 }
 
 function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = {}) {
-  return deals.reduce((summary, deal) => {
+  let hasSettlementRow = false;
+  const summary = deals.reduce((acc, deal) => {
     const type = String(deal.type || deal.transaction_type || deal.side || deal.trade_type || '').toLowerCase();
     const description = String(deal.description || deal.remarks || '').toLowerCase();
     const amount = Number(deal.amount ?? deal.profit ?? 0);
     const commission = Number(deal.commission ?? deal.brokerage ?? 0);
+    const isSettlement = description.includes('settlement') || type.includes('settlement');
 
-    if (type.includes('deposit') || description.includes('deposit')) summary.totalDeposits += Math.abs(amount);
-    else if (type.includes('withdraw') || description.includes('withdraw')) summary.totalWithdrawals += Math.abs(amount);
-    else if (amount >= 0) summary.totalProfit += amount;
-    else summary.totalLoss += Math.abs(amount);
+    if (isSettlement) {
+      hasSettlementRow = true;
+      acc.balanceSettled += amount;
+      return acc;
+    }
 
-    summary.totalCommission += commission;
-    if (description.includes('settlement') || type.includes('settlement')) summary.balanceSettled += amount;
-    return summary;
+    if (type.includes('deposit') || description.includes('deposit')) acc.totalDeposits += Math.abs(amount);
+    else if (type.includes('withdraw') || description.includes('withdraw')) acc.totalWithdrawals += Math.abs(amount);
+    else if (amount >= 0) acc.totalProfit += amount;
+    else acc.totalLoss += Math.abs(amount);
+
+    acc.totalCommission += commission;
+    return acc;
   }, {
     totalProfit: 0,
     totalLoss: 0,
     totalDeposits: 0,
     totalWithdrawals: 0,
     totalCommission: 0,
-    balanceSettled: Number(fallback?.balanceSettled || 0),
+    balanceSettled: 0,
     balance: Number(selectedAccount?.balance ?? fallback?.balance ?? 0),
   });
+
+  if (!hasSettlementRow) summary.balanceSettled = Number(fallback?.balanceSettled || 0);
+  return summary;
 }
 
 function TransactionsPanel({ type }) {
@@ -5033,7 +5054,7 @@ function SettlementPanel() {
   return (
     <div className="card pad">
       <div className="section-head">
-        <div><h2>Weekly Settlement</h2><p>Manual fallback for the automatic settlement job.</p></div>
+        <div><h2>Weekly Settlement</h2><p>Manual settlement only. Positions close and reopen at the latest market price.</p></div>
         <div className="action-row">
           <button className="btn" onClick={load} disabled={busy}><RefreshCw size={16} /> Refresh</button>
           <button className="btn primary" onClick={run} disabled={busy}>Run Settlement</button>
@@ -5041,7 +5062,7 @@ function SettlementPanel() {
       </div>
       <div className="grid-3">
         <Stat label="Last Run" value={formatDate(status?.lastRun)} />
-        <Stat label="Next Scheduled" value={formatDate(status?.nextScheduled)} />
+        <Stat label="Schedule" value={status?.cronExpression || 'Manual only'} />
         <Stat label="Timezone" value={status?.timezone || 'Asia/Kolkata'} />
       </div>
       <div className="settlement-controls">

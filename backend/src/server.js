@@ -319,8 +319,8 @@ app.get('/api/admin/settlement-status', protect, adminOnly, async (req, res) => 
     res.json({
       success:        true,
       lastRun:        lastRun ? lastRun.toISOString() : null,
-      nextScheduled:  nextSat.toISOString(),
-      cronExpression: process.env.SETTLEMENT_CRON || '0 1 * * 6',
+      nextScheduled:  null,
+      cronExpression: 'manual-only',
       timezone:       process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata',
     });
   } catch (err) {
@@ -363,9 +363,9 @@ app.get('/api/web-admin/settlement-status', protect, adminOrSubBroker, async (re
     res.json({
       success: true,
       lastRun: lastRun ? lastRun.toISOString() : null,
-      nextScheduled: nextScheduled.toISOString(),
+      nextScheduled: null,
       timezone: 'Asia/Kolkata',
-      cronExpression: 'Saturday 01:00 IST',
+      cronExpression: 'Manual only',
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -460,22 +460,11 @@ const startServer = async () => {
       return;
     }
 
-    // ✅ CATCHUP SETTLEMENT
-    const needsCatchup = await shouldRunCatchupSettlement();
-    if (needsCatchup) {
-      console.log('🔄 Running catchup settlement (missed scheduled run)...');
-      setTimeout(() => runSettlementSafe('catchup'), 10000);
-    } else {
-      const lastRun = await getLastSettlementTime();
-      console.log(`✅ Settlement up to date. Last run: ${lastRun ? lastRun.toISOString() : 'never'}`);
-    }
-
-    // ✅ SCHEDULED SETTLEMENT - Saturday 1:00 AM IST
-    const cronExpr = process.env.SETTLEMENT_CRON     || '0 1 * * 6';
+    const lastRun = await getLastSettlementTime();
     const tz       = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
 
-    nodeCron.schedule(cronExpr, async () => { await runSettlementSafe('cron'); }, { timezone: tz });
-    console.log(`⏰ Weekly settlement scheduled: "${cronExpr}" (${tz})`);
+    console.log(`Automatic weekly settlement disabled. Last manual run: ${lastRun ? lastRun.toISOString() : 'never'}`);
+    console.log(`Weekly settlement cron disabled (${tz}).`);
     console.log(`   Manual trigger: POST /api/admin/trigger-settlement`);
     console.log(`   Status check:   GET  /api/admin/settlement-status`);
 

@@ -1214,11 +1214,8 @@ class WeeklySettlementService {
   }
 
   async _getSettlementPrice(trade) {
-    // Settlement must match the open position current price shown to the user.
-    const positionCurrentPrice = Number(trade.current_price || 0);
-    if (positionCurrentPrice > 0) return positionCurrentPrice;
-
-    // If the trade row has no current price, use the live stream cache next.
+    // Settlement must use the current/last market price, not the trade entry price.
+    // Prefer stream and persisted symbol prices before falling back to the trade row.
     try {
       const kiteStreamService = require('./kiteStreamService');
       const livePrice = kiteStreamService.getPrice(trade.symbol);
@@ -1227,18 +1224,25 @@ class WeeklySettlementService {
       }
     } catch (_) {}
 
-    // Last fallback: persisted quote row, then the trade entry price.
     const { data: symRow } = await supabase
       .from('symbols')
-      .select('last_price, previous_close, bid, ask')
+      .select('last_price, current_price, previous_close, close_price, bid, ask')
       .eq('symbol', trade.symbol)
       .limit(1);
 
     const s = symRow?.[0];
     if (s) {
-      const p = Number(s.last_price || 0) || Number(s.previous_close || 0) || Number(s.bid || 0) || Number(s.ask || 0);
+      const p = Number(s.last_price || 0)
+        || Number(s.current_price || 0)
+        || Number(s.previous_close || 0)
+        || Number(s.close_price || 0)
+        || Number(s.bid || 0)
+        || Number(s.ask || 0);
       if (p > 0) return p;
     }
+
+    const positionCurrentPrice = Number(trade.current_price || trade.close_price || 0);
+    if (positionCurrentPrice > 0) return positionCurrentPrice;
 
     return Number(trade.open_price || 0);
   }

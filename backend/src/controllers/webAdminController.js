@@ -9,6 +9,7 @@ const {
 } = require('../utils/tradeCommentEvents');
 const kiteStreamService = require('../services/kiteStreamService');
 const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
+const { isMarketOpen } = require('../services/marketStatus');
 const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
@@ -239,6 +240,21 @@ const getEquivalentSymbols = async (symbolData = {}) => {
   }
 
   return [...symbols];
+};
+
+const getBestSymbolPrice = (symbolData = {}) => {
+  const live = kiteStreamService.getPrice(symbolData.symbol)
+    || kiteStreamService.getPrice(symbolData.kite_tradingsymbol)
+    || kiteStreamService.getPrice(symbolData.display_name);
+  const livePrice = toNumber(live?.last ?? live?.ltp ?? live?.price, 0);
+  if (livePrice > 0) return livePrice;
+
+  return toNumber(symbolData.last_price, 0)
+    || toNumber(symbolData.current_price, 0)
+    || toNumber(symbolData.previous_close, 0)
+    || toNumber(symbolData.close_price, 0)
+    || toNumber(symbolData.bid, 0)
+    || toNumber(symbolData.ask, 0);
 };
 
 const firstNonEmptyString = (...values) => {
@@ -1668,7 +1684,13 @@ exports.tradeOnBehalf = async (req, res) => {
       : new Date().toISOString();
     const accountEquity = Number(account.equity ?? (Number(account.balance || 0) + Number(account.credit || 0)));
     const accountNewMargin = Number(account.margin || 0) + marginRequired;
-    const current = Number(currentPrice || price);
+    const suppliedCurrent = Number(currentPrice || 0);
+    const quoteCurrent = getBestSymbolPrice(symbolData);
+    const marketOpen = isMarketOpen(symbolData.symbol, symbolData.exchange || 'NSE');
+    const current = marketOpen
+      ? (suppliedCurrent || quoteCurrent || price)
+      : (quoteCurrent || suppliedCurrent || price);
+    const direction = tradeType === 'sell' ? -1 : 1;
     const equivalentSymbols = await getEquivalentSymbols(symbolData);
     const { data: existingTrades, error: existingError } = await supabase
       .from('trades')
@@ -1692,7 +1714,6 @@ exports.tradeOnBehalf = async (req, res) => {
         : price;
       const mergedBrokerage = Number(existingTrade.buy_brokerage ?? existingTrade.brokerage ?? 0) + brokerage;
       const mergedMargin = Number(existingTrade.margin || 0) + marginRequired;
-      const direction = tradeType === 'sell' ? -1 : 1;
       const mergedProfit = ((current - mergedPrice) * direction * mergedQty * lotSize) - mergedBrokerage;
       const entryEvents = [
         ...ensureTradeEntryHistory(existingTrade),
@@ -1745,6 +1766,7 @@ exports.tradeOnBehalf = async (req, res) => {
       });
     }
 
+    const initialProfit = ((current - price) * direction * qty * lotSize) - brokerage;
     const tradeData = {
       user_id: userId,
       account_id: account.id,
@@ -1760,7 +1782,7 @@ exports.tradeOnBehalf = async (req, res) => {
       brokerage,
       buy_brokerage: brokerage,
       sell_brokerage: 0,
-      profit: -brokerage,
+      profit: initialProfit,
       status: 'open',
       comment: fitTradeComment(comment || `Trade opened on behalf by ${req.user.email || req.user.id}`),
       open_time: now,

@@ -1818,7 +1818,7 @@ exports.getMarketHoliday = async (req, res) => {
 // ============ ADMIN MANUAL CLOSE POSITION ============
 exports.adminClosePosition = async (req, res) => {
   try {
-    const { tradeId, closePrice: manualPrice, reason, closeQuantity } = req.body;
+    const { tradeId, closePrice: manualPrice, reason, closeQuantity, applyBrokerage = true } = req.body;
 
     if (!tradeId) {
       return res.status(400).json({ success: false, message: 'Trade ID is required' });
@@ -1849,6 +1849,7 @@ exports.adminClosePosition = async (req, res) => {
     const preview = await tradingService.previewClosePosition(trade, {
       quantity: requestedCloseQuantity,
       closePrice: manualPrice && Number(manualPrice) > 0 ? Number(manualPrice) : undefined,
+      applyBrokerage: applyBrokerage !== false,
     });
 
     if (!preview.success) {
@@ -2142,6 +2143,7 @@ exports.adminUpdatePosition = async (req, res) => {
       comment,
       openTime,
       closeTime,
+      applyBrokerage = true,
     } = req.body || {};
 
     if (!tradeId) {
@@ -2180,9 +2182,10 @@ exports.adminUpdatePosition = async (req, res) => {
 
     const lotSize = Number(trade.lot_size || 1) || 1;
     const leverage = Number(trade.accounts?.leverage || 5) || 5;
-    const brokerageRate = await tradingService.getBrokerageRate(trade.user_id);
+    const shouldApplyBrokerage = applyBrokerage !== false;
+    const brokerageRate = shouldApplyBrokerage ? await tradingService.getBrokerageRate(trade.user_id) : 0;
     const nextMargin = (nextOpenPrice * nextQuantity * lotSize) / leverage;
-    const nextBuyBrokerage = nextOpenPrice * nextQuantity * lotSize * brokerageRate;
+    const nextBuyBrokerage = shouldApplyBrokerage ? nextOpenPrice * nextQuantity * lotSize * brokerageRate : 0;
     const direction = trade.trade_type === 'buy' ? 1 : -1;
     const nextProfit = ((nextCurrentPrice - nextOpenPrice) * direction * nextQuantity * lotSize) - nextBuyBrokerage;
     const updatedAt = new Date().toISOString();

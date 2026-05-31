@@ -144,7 +144,8 @@ class TradingService {
       return { success: false, message: 'Invalid quantity' };
     }
 
-    const brokerageRate = options.brokerageRate ?? await this.getBrokerageRate(trade.user_id);
+    const applyBrokerage = options.applyBrokerage !== false;
+    const brokerageRate = applyBrokerage ? (options.brokerageRate ?? await this.getBrokerageRate(trade.user_id)) : 0;
     const { closePrice, lotSize, message } = await this.resolveCloseMarketData(trade, options.closePrice);
 
     if (!closePrice || Number.isNaN(closePrice) || closePrice <= 0) {
@@ -155,11 +156,13 @@ class TradingService {
     const direction = trade.trade_type === 'buy' ? 1 : -1;
     const openPrice = Number(trade.open_price || 0);
     const grossProfit = (closePrice - openPrice) * direction * quantity * lotSize;
-    const totalBuyBrokerage = Number(trade.buy_brokerage || trade.brokerage || 0);
-    const buyBrokerage = totalQuantity > 0 && quantity < totalQuantity
-      ? (totalBuyBrokerage / totalQuantity) * quantity
-      : totalBuyBrokerage;
-    const sellBrokerage = closePrice * quantity * lotSize * brokerageRate;
+    const totalBuyBrokerage = applyBrokerage ? Number(trade.buy_brokerage || trade.brokerage || 0) : 0;
+    const buyBrokerage = applyBrokerage
+      ? (totalQuantity > 0 && quantity < totalQuantity
+          ? (totalBuyBrokerage / totalQuantity) * quantity
+          : totalBuyBrokerage)
+      : 0;
+    const sellBrokerage = applyBrokerage ? closePrice * quantity * lotSize * brokerageRate : 0;
     const totalBrokerage = buyBrokerage + sellBrokerage;
     const netProfit = grossProfit - totalBrokerage;
     const totalMargin = Number(trade.margin || 0);
