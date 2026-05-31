@@ -1265,6 +1265,25 @@ const Dashboard = () => {
   const quoteSymbols = allFuturesSymbols.length > 0 ? allFuturesSymbols : symbols || [];
   const liveOpenTrades = useMemo(
     () => (openTrades || []).map((trade) => {
+      const marketClosed = Boolean(marketStatus?.isHoliday)
+        || marketStatus?.marketOpen === false
+        || !isMarketOpenNow(trade?.symbol);
+
+      if (marketClosed) {
+        const storedCurrentPrice = firstPositiveNumber(
+          trade?.current_price,
+          trade?.close_price,
+          trade?.open_price,
+        );
+        const storedProfit = Number(trade?.profit || 0);
+        return {
+          ...trade,
+          current_price: storedCurrentPrice,
+          profit: storedProfit,
+          live_profit: storedProfit,
+        };
+      }
+
       const currentPrice = getTradeQuotePrice(trade, quotes, quoteSymbols);
       const liveProfit = getTradeLivePnl(trade, currentPrice);
       return {
@@ -1274,7 +1293,7 @@ const Dashboard = () => {
         live_profit: liveProfit,
       };
     }),
-    [openTrades, quotes, quoteSymbols],
+    [openTrades, quotes, quoteSymbols, marketStatus],
   );
   const totalPnL = liveOpenTrades.reduce((sum, t) => sum + Number(t.live_profit ?? t.profit ?? 0), 0);
 

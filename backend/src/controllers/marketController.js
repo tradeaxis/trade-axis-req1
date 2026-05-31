@@ -98,10 +98,10 @@ const isVisibleContractRow = (symbol, referenceDate = getIstNow()) => {
 
 const withQuoteFallback = (symbol) => {
   const fallbackPrice = firstPositiveNumber(
-    symbol?.previous_close,
-    symbol?.close_price,
-    symbol?.last,
     symbol?.last_price,
+    symbol?.last,
+    symbol?.close_price,
+    symbol?.previous_close,
     symbol?.bid,
     symbol?.ask,
   );
@@ -269,10 +269,10 @@ exports.getQuote = async (req, res) => {
     const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
     const fallbackPrice = firstPositiveNumber(
-      dbSym.previous_close,
-      dbSym.close_price,
-      dbSym.last,
       dbSym.last_price,
+      dbSym.last,
+      dbSym.close_price,
+      dbSym.previous_close,
       dbSym.bid,
       dbSym.ask,
     );

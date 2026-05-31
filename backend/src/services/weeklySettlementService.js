@@ -522,16 +522,28 @@ class WeeklySettlementService {
   }
 
   // ── Get best available price ──
-  async repairSettlementState({ settlementDate } = {}) {
+  async repairSettlementState({ settlementDate, userIds, userId, accountIds: inputAccountIds, accountId } = {}) {
     const targetDate = settlementDate || await this._getLatestSettlementDate();
     if (!targetDate) {
       return { success: false, message: 'No weekly settlement rows found to repair.' };
     }
 
-    const { data: rows, error } = await supabase
+    const scopedUserIds = normalizeIdList(userIds || userId);
+    const scopedAccountIds = normalizeIdList(inputAccountIds || accountId);
+
+    let settlementQuery = supabase
       .from('weekly_settlements')
       .select('*')
       .eq('settlement_date', targetDate);
+
+    if (scopedUserIds.length > 0) {
+      settlementQuery = settlementQuery.in('user_id', scopedUserIds);
+    }
+    if (scopedAccountIds.length > 0) {
+      settlementQuery = settlementQuery.in('account_id', scopedAccountIds);
+    }
+
+    const { data: rows, error } = await settlementQuery;
 
     if (error) {
       return { success: false, message: error.message };
@@ -600,11 +612,13 @@ class WeeklySettlementService {
       }
     }
 
+    const forced = await this._forceSettlementOpenRowsFromWeeklyRows(targetDate, rows || [], accountIds, now, errors);
+    for (const accountId of forced.accountIds || []) accountIds.add(accountId);
     const normalized = await this._normalizeSettlementOpenRows(targetDate, accountIds, now, errors);
     for (const accountId of normalized.accountIds || []) accountIds.add(accountId);
     const staleRepair = await this._closeSupersededSettlementParents(targetDate, accountIds, now, errors);
     const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
-    const repairedAnything = fixedOld > 0 || fixedNew > 0 || normalized.staleRowsClosed > 0 || normalized.groupsNormalized > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
+    const repairedAnything = fixedOld > 0 || fixedNew > 0 || forced.openRowsReset > 0 || forced.openRowsCreated > 0 || forced.duplicateRowsClosed > 0 || normalized.staleRowsClosed > 0 || normalized.groupsNormalized > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
 
     return {
       success: repairedAnything && errors.length === 0,
@@ -617,6 +631,9 @@ class WeeklySettlementService {
       rows: rows?.length || 0,
       fixedOld,
       fixedNew,
+      openRowsReset: forced.openRowsReset,
+      openRowsCreated: forced.openRowsCreated,
+      duplicateRowsClosedFromHistory: forced.duplicateRowsClosed,
       settlementGroupsNormalized: normalized.groupsNormalized,
       duplicateSettlementRowsClosed: normalized.staleRowsClosed,
       staleParentsClosed: staleRepair.staleParentsClosed,
@@ -635,6 +652,195 @@ class WeeklySettlementService {
 
     if (error) throw new Error(error.message);
     return data?.[0]?.settlement_date || null;
+  }
+
+  async _forceSettlementOpenRowsFromWeeklyRows(targetDate, settlementRows, accountIds, now, errors) {
+    const rows = (settlementRows || []).filter((row) => (
+      row.account_id
+      && row.user_id
+      && row.symbol
+      && row.trade_type
+      && toNumber(row.quantity) > 0
+      && toNumber(row.close_price) > 0
+    ));
+
+    if (rows.length === 0) {
+      return { openRowsReset: 0, openRowsCreated: 0, duplicateRowsClosed: 0, accountIds: [] };
+    }
+
+    const touchedAccounts = new Set();
+    const accountIdList = [...new Set(rows.map((row) => row.account_id).filter(Boolean))];
+    const accountMap = new Map();
+    if (accountIdList.length > 0) {
+      const { data: accounts, error: accountErr } = await supabase
+        .from('accounts')
+        .select('id,leverage')
+        .in('id', accountIdList);
+
+      if (accountErr) {
+        errors.push({ repair: 'force-settlement-account-fetch', error: accountErr.message });
+      } else {
+        for (const account of accounts || []) {
+          accountMap.set(String(account.id), account);
+        }
+      }
+    }
+
+    const groups = new Map();
+    for (const row of rows) {
+      const key = settlementGroupKey(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+
+    let openRowsReset = 0;
+    let openRowsCreated = 0;
+    let duplicateRowsClosed = 0;
+
+    for (const groupRows of groups.values()) {
+      const first = groupRows[0];
+      const totalQuantity = roundMoney(groupRows.reduce((sum, row) => sum + toNumber(row.quantity), 0));
+      if (totalQuantity <= 0) continue;
+
+      const weightedCloseValue = groupRows.reduce((sum, row) => {
+        return sum + (toNumber(row.close_price) * toNumber(row.quantity));
+      }, 0);
+      const settlementPrice = roundMoney(weightedCloseValue / totalQuantity);
+      if (settlementPrice <= 0) continue;
+
+      const account = accountMap.get(String(first.account_id));
+      const leverage = toNumber(account?.leverage, 5) || 5;
+      const margin = roundMoney((settlementPrice * totalQuantity) / leverage);
+      const oldIds = new Set(groupRows.map((row) => row.old_trade_id).filter(Boolean).map(String));
+      const newIds = new Set(groupRows.map((row) => row.new_trade_id).filter(Boolean).map(String));
+
+      const { data: openRows, error: openErr } = await supabase
+        .from('trades')
+        .select('id,account_id,user_id,symbol,exchange,trade_type,quantity,open_price,current_price,profit,margin,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time,comment')
+        .eq('account_id', first.account_id)
+        .eq('symbol', first.symbol)
+        .eq('trade_type', first.trade_type)
+        .eq('status', 'open');
+
+      if (openErr) {
+        errors.push({ repair: 'force-settlement-open-fetch', accountId: first.account_id, symbol: first.symbol, error: openErr.message });
+        continue;
+      }
+
+      const relatedOpenRows = (openRows || []).filter((trade) => {
+        const comment = String(trade.comment || '').toLowerCase();
+        return newIds.has(String(trade.id))
+          || oldIds.has(String(trade.settled_from_trade_id || ''))
+          || String(trade.settlement_week || '') === String(targetDate)
+          || comment.includes('m2m reopen')
+          || comment.includes('settlement reopen')
+          || comment.includes('reopen normalized');
+      });
+
+      const keep = [...relatedOpenRows].sort((a, b) => {
+        const aNew = newIds.has(String(a.id)) ? 0 : 1;
+        const bNew = newIds.has(String(b.id)) ? 0 : 1;
+        if (aNew !== bNew) return aNew - bNew;
+        return String(a.open_time || a.created_at || '').localeCompare(String(b.open_time || b.created_at || ''));
+      })[0];
+
+      const openPayload = {
+        quantity: totalQuantity,
+        open_price: settlementPrice,
+        current_price: settlementPrice,
+        profit: 0,
+        margin,
+        brokerage: 0,
+        buy_brokerage: 0,
+        sell_brokerage: 0,
+        status: 'open',
+        updated_at: now,
+        settlement_week: targetDate,
+        is_settlement_close: false,
+        comment: `M2M reopen repaired for ${targetDate}`,
+      };
+
+      let keepId = keep?.id || null;
+      if (keepId) {
+        const { error: keepErr } = await supabase
+          .from('trades')
+          .update(openPayload)
+          .eq('id', keepId)
+          .eq('status', 'open');
+
+        if (keepErr) {
+          errors.push({ tradeId: keepId, error: keepErr.message });
+          continue;
+        }
+        openRowsReset++;
+      } else {
+        const insertPayload = {
+          user_id: first.user_id,
+          account_id: first.account_id,
+          symbol: first.symbol,
+          exchange: first.exchange || 'NSE',
+          trade_type: first.trade_type,
+          stop_loss: 0,
+          take_profit: 0,
+          open_time: now,
+          settled_from_trade_id: groupRows.find((row) => row.old_trade_id)?.old_trade_id || null,
+          ...openPayload,
+        };
+
+        const { data: inserted, error: insertErr } = await supabase
+          .from('trades')
+          .insert(insertPayload)
+          .select('id')
+          .single();
+
+        if (insertErr) {
+          errors.push({ repair: 'force-settlement-insert-open', accountId: first.account_id, symbol: first.symbol, error: insertErr.message });
+          continue;
+        }
+        keepId = inserted.id;
+        openRowsCreated++;
+      }
+
+      const duplicates = relatedOpenRows.filter((trade) => String(trade.id) !== String(keepId));
+      for (const duplicate of duplicates) {
+        const { error: closeErr } = await supabase
+          .from('trades')
+          .update({
+            close_price: settlementPrice,
+            current_price: settlementPrice,
+            profit: 0,
+            brokerage: 0,
+            buy_brokerage: 0,
+            sell_brokerage: 0,
+            status: 'closed',
+            close_time: now,
+            updated_at: now,
+            is_settlement_close: true,
+            settlement_week: targetDate,
+            comment: `Duplicate settlement reopen closed during repair for ${targetDate}`,
+          })
+          .eq('id', duplicate.id)
+          .eq('status', 'open');
+
+        if (closeErr) {
+          errors.push({ tradeId: duplicate.id, error: closeErr.message });
+        } else {
+          duplicateRowsClosed++;
+        }
+      }
+
+      if (first.account_id) {
+        touchedAccounts.add(first.account_id);
+        accountIds.add(first.account_id);
+      }
+    }
+
+    return {
+      openRowsReset,
+      openRowsCreated,
+      duplicateRowsClosed,
+      accountIds: [...touchedAccounts],
+    };
   }
 
   async _normalizeSettlementOpenRows(targetDate, accountIds, now, errors) {
@@ -718,10 +924,10 @@ class WeeklySettlementService {
       if (!keep) continue;
 
       const settlementPrice = [
-        keep.current_price,
-        ...children.map((trade) => trade.current_price),
         keep.open_price,
         ...children.map((trade) => trade.open_price),
+        keep.current_price,
+        ...children.map((trade) => trade.current_price),
       ].map((value) => toNumber(value)).find((value) => value > 0) || 0;
 
       if (settlementPrice <= 0) {

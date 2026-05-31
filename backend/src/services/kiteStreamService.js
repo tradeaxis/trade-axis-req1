@@ -275,8 +275,16 @@ class KiteStreamService {
         selectedTokens.add(Number(row.kite_instrument_token));
       }
     }
-
-    const map = new Map(); // token → { symbols: [], tickSize, exchange }
+    const aliasTokens = new Map();
+    for (const row of allowedRows) {
+      const token = Number(row.kite_instrument_token);
+      if (!selectedTokens.has(token)) continue;
+      for (const symbol of getRowPriceAliases(row)) {
+        if (!aliasTokens.has(symbol)) aliasTokens.set(symbol, new Set());
+        aliasTokens.get(symbol).add(token);
+      }
+    }
+    const map = new Map();
     for (const row of allowedRows) {
       const token    = Number(row.kite_instrument_token);
       if (!selectedTokens.has(token)) continue;
@@ -291,6 +299,7 @@ class KiteStreamService {
         map.get(token).contractMonth = contractMonth;
       }
       for (const symbol of getRowPriceAliases(row)) {
+        if ((aliasTokens.get(symbol)?.size || 0) > 1) continue;
         validCacheAliases.add(symbol);
         if (!map.get(token).symbols.includes(symbol)) {
           map.get(token).symbols.push(symbol);
@@ -302,6 +311,12 @@ class KiteStreamService {
       if (!validCacheAliases.has(cachedSymbol)) {
         this.priceCache.delete(cachedSymbol);
         this.lastEmitAt.delete(cachedSymbol);
+      }
+    }
+
+    for (const cachedToken of this.tokenPriceCache.keys()) {
+      if (!map.has(cachedToken)) {
+        this.tokenPriceCache.delete(cachedToken);
       }
     }
 
@@ -461,6 +476,7 @@ class KiteStreamService {
       this.running = false;
       // Clear all cached prices — they're stale now
       this.priceCache.clear();
+      this.tokenPriceCache.clear();
       this.dirtySymbols.clear();
       this.tokenToSymbols.clear();
       this.lastEmitAt.clear();
