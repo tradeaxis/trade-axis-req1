@@ -384,6 +384,16 @@ const getTradeLivePnl = (trade, currentPrice) => {
   return (currentPrice - openPrice) * quantity * lotSize * direction - brokerage;
 };
 
+const isSettlementReopenTrade = (trade = {}) => {
+  const comment = String(trade?.comment || '').toLowerCase();
+  return Boolean(trade?.settled_from_trade_id)
+    || Boolean(trade?.settlement_week)
+    || comment.includes('m2m reopen')
+    || comment.includes('settlement reopen')
+    || comment.includes('reopen repaired')
+    || comment.includes('reopen normalized');
+};
+
 const findScrollableParent = (element) => {
   let node = element;
 
@@ -1270,12 +1280,14 @@ const Dashboard = () => {
         || !isMarketOpenNow(trade?.symbol);
 
       if (marketClosed) {
+        const isSettlementReopen = isSettlementReopenTrade(trade);
         const storedCurrentPrice = firstPositiveNumber(
-          trade?.current_price,
+          isSettlementReopen ? trade?.open_price : null,
+          isSettlementReopen ? null : trade?.current_price,
           trade?.close_price,
           trade?.open_price,
         );
-        const storedProfit = Number(trade?.profit || 0);
+        const storedProfit = isSettlementReopen ? 0 : Number(trade?.profit || 0);
         return {
           ...trade,
           current_price: storedCurrentPrice,
