@@ -23,7 +23,14 @@ const getAgeMs = (value) => {
 };
 
 const getSidePrice = (quote, side = 'buy') => {
-  const last = toNumber(quote?.last ?? quote?.last_price ?? 0);
+  const last = toNumber(
+    quote?.last
+      ?? quote?.last_price
+      ?? quote?.current_price
+      ?? quote?.close_price
+      ?? quote?.previous_close
+      ?? 0,
+  );
   const bid = toNumber(quote?.bid ?? last);
   const ask = toNumber(quote?.ask ?? last);
 

@@ -223,13 +223,14 @@ const buildSettlementDeals = (settlements = []) => {
     if (!settlementDate) return;
 
     const accountId = row.account_id || 'unknown';
-    const key = `${accountId}::${settlementDate}`;
+    const executedAt = row.created_at || row.updated_at || null;
+    const key = `${accountId}::${settlementDate}::${executedAt || 'legacy'}`;
 
     if (!groups.has(key)) {
       groups.set(key, {
         key,
         settlementDate,
-        executedAt: row.created_at || row.updated_at || null,
+        executedAt,
         balanceBefore: row.balance_before ?? null,
         balanceAfter: row.balance_after ?? row.balance_before ?? null,
         creditBefore: Number(row.credit_before || 0),
@@ -261,7 +262,7 @@ const buildSettlementDeals = (settlements = []) => {
 
   return Array.from(groups.values())
     .map((group) => {
-      const amount = Number((group.creditBefore + group.totalProfitLoss).toFixed(2));
+      const amount = Number(group.creditBefore.toFixed(2));
       const symbolCount = group.symbols.size;
       const description = [
         `${group.tradeCount} trade${group.tradeCount === 1 ? '' : 's'} settled`,

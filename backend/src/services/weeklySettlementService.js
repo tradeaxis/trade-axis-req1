@@ -108,9 +108,9 @@ class WeeklySettlementService {
       };
     }
 
-    // Filter demo only if explicitly disabled, and never re-settle rows already opened for this settlement date.
-    const eligibleTrades = (settleDemo ? scopedTrades : scopedTrades.filter((t) => !t.accounts?.is_demo))
-      .filter((t) => String(t.settlement_week || '') !== settlementWeek);
+    // Filter demo only if explicitly disabled. Manual settlement can be run whenever admin needs it,
+    // including multiple times in the same week/day, so do not skip current settlement_week rows.
+    const eligibleTrades = settleDemo ? scopedTrades : scopedTrades.filter((t) => !t.accounts?.is_demo);
     const snapshotTrades = await buildOpenTradeSnapshots(eligibleTrades);
     const openTrades = filterSupersededSettlementTrades(snapshotTrades);
 
@@ -406,14 +406,22 @@ class WeeklySettlementService {
               credit_before: creditBefore,
               credit_after: 0,          // credit resets to 0
               settlement_type: 'auto_m2m',
+              created_at: closeTime,
+              updated_at: closeTime,
             };
 
             const { error: settlementInsertError } = await supabase
               .from('weekly_settlements')
               .insert(settlementRecord);
 
-            if (settlementInsertError && /old_trade_id|new_trade_id/i.test(settlementInsertError.message || '')) {
-              const { old_trade_id, new_trade_id, ...legacySettlementRecord } = settlementRecord;
+            if (settlementInsertError && /old_trade_id|new_trade_id|created_at|updated_at/i.test(settlementInsertError.message || '')) {
+              const {
+                old_trade_id,
+                new_trade_id,
+                created_at,
+                updated_at,
+                ...legacySettlementRecord
+              } = settlementRecord;
               const { error: legacyInsertError } = await supabase
                 .from('weekly_settlements')
                 .insert(legacySettlementRecord);
@@ -1234,8 +1242,8 @@ class WeeklySettlementService {
     if (s) {
       const p = Number(s.last_price || 0)
         || Number(s.current_price || 0)
-        || Number(s.previous_close || 0)
         || Number(s.close_price || 0)
+        || Number(s.previous_close || 0)
         || Number(s.bid || 0)
         || Number(s.ask || 0);
       if (p > 0) return p;

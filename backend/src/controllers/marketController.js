@@ -29,6 +29,8 @@ const SYMBOL_SELECT_FIELDS = [
   'bid',
   'ask',
   'last_price',
+  'current_price',
+  'close_price',
   'previous_close',
   'open_price',
   'high_price',
@@ -100,6 +102,7 @@ const withQuoteFallback = (symbol) => {
   const fallbackPrice = firstPositiveNumber(
     symbol?.last_price,
     symbol?.last,
+    symbol?.current_price,
     symbol?.close_price,
     symbol?.previous_close,
     symbol?.bid,
@@ -271,6 +274,7 @@ exports.getQuote = async (req, res) => {
     const fallbackPrice = firstPositiveNumber(
       dbSym.last_price,
       dbSym.last,
+      dbSym.current_price,
       dbSym.close_price,
       dbSym.previous_close,
       dbSym.bid,

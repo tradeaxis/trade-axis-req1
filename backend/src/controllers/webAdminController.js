@@ -321,12 +321,13 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
           row.created_at ? String(row.created_at).slice(0, 10) : '',
         );
         if (!row.account_id || !settlementDate) return;
-        const key = `${row.account_id}::${settlementDate}`;
+        const executedAt = row.created_at || row.updated_at || `${settlementDate}T01:00:00+05:30`;
+        const key = `${row.account_id}::${settlementDate}::${executedAt}`;
         if (!groups.has(key)) {
           groups.set(key, {
             accountId: row.account_id,
             settlementDate,
-            time: row.created_at || row.updated_at || `${settlementDate}T01:00:00+05:30`,
+            time: executedAt,
             creditBefore: toNumber(row.credit_before),
             profitLoss: 0,
           });
@@ -337,7 +338,7 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
       groups.forEach((group) => {
         if (!actualDatesByAccount.has(group.accountId)) actualDatesByAccount.set(group.accountId, new Set());
         actualDatesByAccount.get(group.accountId).add(group.settlementDate);
-        addDeal(group.accountId, group.settlementDate, group.creditBefore + group.profitLoss, group.time);
+        addDeal(group.accountId, group.settlementDate, group.creditBefore, group.time);
       });
     }
   } catch (_) {

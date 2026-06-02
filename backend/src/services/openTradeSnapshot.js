@@ -64,7 +64,7 @@ async function buildOpenTradeSnapshots(trades = []) {
     try {
       const { data: symbolRows, error } = await supabase
         .from('symbols')
-        .select('symbol, bid, ask, last_price, last_update')
+        .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
         .in('symbol', uniqueSymbols);
 
       if (error) {
@@ -93,14 +93,16 @@ async function buildOpenTradeSnapshots(trades = []) {
     let currentPrice = storedCurrentPrice;
     let profit = storedProfit;
 
-    if (openPrice > 0 && quantity > 0 && isMarketOpen(trade.symbol, trade.exchange)) {
+    if (openPrice > 0 && quantity > 0) {
+      const marketOpen = isMarketOpen(trade.symbol, trade.exchange);
       const priceState = resolveTradeablePrice({
         symbol: trade.symbol,
         side: direction === 1 ? 'sell' : 'buy',
         symbolRow: symbolMap.get(symbolKey) || null,
+        allowStaleDb: !marketOpen,
       });
 
-      if (!priceState.isOffQuotes && priceState.price > 0) {
+      if ((!priceState.isOffQuotes || !marketOpen) && priceState.price > 0) {
         currentPrice = toNumber(priceState.price, storedCurrentPrice);
         profit = ((currentPrice - openPrice) * direction * quantity) - entryBrokerage;
       }
