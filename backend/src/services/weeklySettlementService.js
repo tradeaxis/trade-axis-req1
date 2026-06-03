@@ -1298,7 +1298,7 @@ class WeeklySettlementService {
 
     const { data: symRow } = await supabase
       .from('symbols')
-      .select('last_price, current_price, previous_close, close_price, bid, ask')
+      .select('last_price, previous_close, close_price, bid, ask')
       .eq('symbol', trade.symbol)
       .limit(1);
 

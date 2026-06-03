@@ -29,7 +29,6 @@ const SYMBOL_SELECT_FIELDS = [
   'bid',
   'ask',
   'last_price',
-  'current_price',
   'close_price',
   'previous_close',
   'open_price',

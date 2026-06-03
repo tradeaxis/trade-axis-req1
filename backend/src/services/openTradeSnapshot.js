@@ -64,7 +64,7 @@ async function buildOpenTradeSnapshots(trades = []) {
     try {
       const { data: symbolRows, error } = await supabase
         .from('symbols')
-        .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
+        .select('symbol, bid, ask, last_price, close_price, previous_close, last_update')
         .in('symbol', uniqueSymbols);
 
       if (error) {

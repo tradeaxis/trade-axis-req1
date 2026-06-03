@@ -274,7 +274,7 @@ class SocketHandler {
       const { data: rows } = await queueDB(() =>
         supabase
           .from('symbols')
-          .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
+          .select('symbol, bid, ask, last_price, close_price, previous_close, last_update')
           .in('symbol', missing)
       );
 
