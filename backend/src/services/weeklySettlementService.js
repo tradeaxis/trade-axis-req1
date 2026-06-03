@@ -163,15 +163,19 @@ class WeeklySettlementService {
     for (const accId of Object.keys(byAccount)) {
       const { account, trades: accountTrades } = byAccount[accId];
       const balance = Number(account.balance || 0);
-      const creditBefore = Number(account.credit || 0);
+      const creditBefore = await this._getRealizedPnlSinceLastSettlement(
+        accId,
+        closeTime,
+        Number(account.credit || 0),
+      );
 
       // Calculate equity BEFORE settlement (for admin record)
       const floatingBefore = accountTrades.reduce(
         (sum, t) => sum + Number(t.profit || 0),
         0
       );
-      const equityBefore = balance + creditBefore + floatingBefore;
-      const weeklyPnL = equityBefore - balance; // = credit + floating = total week P&L
+      const weeklyPnL = roundMoney(creditBefore + floatingBefore);
+      const equityBefore = balance + weeklyPnL;
 
       let newMarginTotal = 0; // Sum of reopened trades' margins
       const reopenedMarginById = new Map();
@@ -1219,6 +1223,66 @@ class WeeklySettlementService {
     }
 
     return updated;
+  }
+
+  async _getLastSettlementTime(accountId, beforeIso) {
+    const before = new Date(beforeIso || Date.now()).toISOString();
+
+    const { data, error } = await supabase
+      .from('weekly_settlements')
+      .select('settlement_date, created_at, updated_at')
+      .eq('account_id', accountId)
+      .lt('created_at', before)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.warn(`Settlement lookup warning for account ${accountId}: ${error.message}`);
+      return null;
+    }
+
+    const row = data?.[0];
+    if (!row) return null;
+
+    const rawTime = row.created_at || row.updated_at || row.settlement_date;
+    const parsed = rawTime ? new Date(rawTime) : null;
+    return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+
+  async _getRealizedPnlSinceLastSettlement(accountId, beforeIso, fallbackCredit = 0) {
+    try {
+      const before = new Date(beforeIso || Date.now()).toISOString();
+      const lastSettlementTime = await this._getLastSettlementTime(accountId, before);
+
+      const { data, error } = await supabase
+        .from('trades')
+        .select('profit, close_time, updated_at, is_settlement_close')
+        .eq('account_id', accountId)
+        .eq('status', 'closed')
+        .limit(10000);
+
+      if (error) throw error;
+
+      const beforeMs = new Date(before).getTime();
+      const afterMs = lastSettlementTime ? new Date(lastSettlementTime).getTime() : 0;
+
+      return roundMoney((data || []).reduce((sum, trade) => {
+        if (trade.is_settlement_close === true) return sum;
+
+        const rawTime = trade.close_time || trade.updated_at;
+        if (!rawTime) return sum;
+        const closedMs = new Date(rawTime).getTime();
+        if (!Number.isFinite(closedMs)) return sum;
+        if (closedMs <= afterMs || closedMs > beforeMs) return sum;
+
+        return sum + Number(trade.profit || 0);
+      }, 0));
+    } catch (error) {
+      console.warn(
+        `Realized P&L lookup warning for account ${accountId}: ${error.message}. Falling back to account credit.`,
+      );
+      return roundMoney(fallbackCredit);
+    }
   }
 
   async _getSettlementPrice(trade) {

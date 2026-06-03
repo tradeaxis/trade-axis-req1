@@ -274,7 +274,7 @@ class SocketHandler {
       const { data: rows } = await queueDB(() =>
         supabase
           .from('symbols')
-          .select('symbol, bid, ask, last_price, last_update')
+          .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
           .in('symbol', missing)
       );
 
@@ -295,14 +295,12 @@ class SocketHandler {
     for (const trade of allTradesForDB) {
       const isTradeMarketOpen = isMarketOpen(trade.symbol, trade.exchange);
       const priceSource = priceSources[trade.symbol] || {};
-      const currentPriceState = isTradeMarketOpen
-        ? resolveTradeablePrice({
-          symbol: trade.symbol,
-          side: trade.trade_type === 'buy' ? 'sell' : 'buy',
-          liveQuote: priceSource.liveQuote || null,
-          symbolRow: priceSource.symbolRow || null,
-        })
-        : { price: 0, isOffQuotes: true };
+      const currentPriceState = resolveTradeablePrice({
+        symbol: trade.symbol,
+        side: trade.trade_type === 'buy' ? 'sell' : 'buy',
+        liveQuote: isTradeMarketOpen ? (priceSource.liveQuote || null) : null,
+        symbolRow: priceSource.symbolRow || null,
+      });
       const hasFreshTradablePrice =
         isTradeMarketOpen &&
         !currentPriceState.isOffQuotes &&
@@ -310,7 +308,12 @@ class SocketHandler {
 
       const currentPrice = hasFreshTradablePrice
         ? currentPriceState.price
-        : Number(trade.current_price || trade.open_price || 0);
+        : Number(
+          currentPriceState.price ||
+          trade.current_price ||
+          trade.open_price ||
+          0
+        );
 
       if (!currentPrice || currentPrice <= 0) continue;
 
@@ -318,7 +321,7 @@ class SocketHandler {
       const openPrice    = parseFloat(trade.open_price    || 0);
       const quantity     = parseFloat(trade.quantity      || 0);
       const buyBrokerage = parseFloat(trade.buy_brokerage || trade.brokerage || 0);
-      const floatingPnL  = hasFreshTradablePrice
+      const floatingPnL = currentPrice > 0
         ? (currentPrice - openPrice) * direction * quantity - buyBrokerage
         : Number(trade.profit || 0);
 

@@ -1281,13 +1281,14 @@ const Dashboard = () => {
 
       if (marketClosed) {
         const isSettlementReopen = isSettlementReopenTrade(trade);
+        const quotePrice = getTradeQuotePrice(trade, quotes, quoteSymbols);
         const storedCurrentPrice = firstPositiveNumber(
-          isSettlementReopen ? trade?.open_price : null,
+          quotePrice,
           isSettlementReopen ? null : trade?.current_price,
           trade?.close_price,
           trade?.open_price,
         );
-        const storedProfit = isSettlementReopen ? 0 : Number(trade?.profit || 0);
+        const storedProfit = getTradeLivePnl(trade, storedCurrentPrice);
         return {
           ...trade,
           current_price: storedCurrentPrice,
@@ -1525,16 +1526,17 @@ const accountStats = useMemo(() => {
       .filter(Boolean);
 
     if (watchlistSymbols.length === 0) {
-      return pickLiveContractRows(list).slice(0, 20);
+      return pickLiveContractRows(list).slice(0, 100);
     }
 
     const symbolsByKey = new Map(
       list.map((row) => [String(row.symbol || '').toUpperCase(), row]),
     );
 
-    return watchlistSymbols
+    const watchlistRows = watchlistSymbols
       .map((symbolKey) => symbolsByKey.get(symbolKey))
       .filter(Boolean);
+    return watchlistRows.length > 0 ? watchlistRows : pickLiveContractRows(list).slice(0, 100);
   }, [allFuturesSymbols, symbols, searchTerm, selectedCategory, activeSymbols, backendSearchResults]);
 
   const displayedQuoteSymbolSet = useMemo(

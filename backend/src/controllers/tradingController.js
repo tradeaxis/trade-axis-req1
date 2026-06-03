@@ -934,7 +934,7 @@ exports.closeAllPositions = async (req, res) => {
     const symbolsToResolve = [...new Set(tradesToClose.map((trade) => String(trade.symbol || '').toUpperCase()).filter(Boolean))];
     const { data: symbolRows, error: symbolRowsError } = await supabase
       .from('symbols')
-      .select('symbol, bid, ask, last_price, last_update')
+      .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
       .in('symbol', symbolsToResolve);
 
     if (symbolRowsError) throw symbolRowsError;
@@ -1028,7 +1028,7 @@ exports.modifyPendingOrder = async (req, res) => {
 
       const { data: symRows } = await supabase
         .from('symbols')
-        .select('symbol, bid, ask, last_price, last_update')
+        .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update')
         .eq('symbol', order.symbol)
         .limit(1);
       const symbolData = symRows?.[0];

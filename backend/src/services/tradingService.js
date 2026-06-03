@@ -106,7 +106,7 @@ class TradingService {
 
     const { data: symbolData, error } = await supabase
       .from('symbols')
-      .select('symbol, bid, ask, last_price, last_update, lot_size')
+      .select('symbol, bid, ask, last_price, current_price, close_price, previous_close, last_update, lot_size')
       .eq('symbol', trade.symbol)
       .single();
 
@@ -598,7 +598,7 @@ class TradingService {
       )];
       const { data: symbolRows } = await supabase
         .from('symbols')
-        .select('symbol, exchange, bid, ask, last_price, last_update, lot_size, tick_size, display_name')
+        .select('symbol, exchange, bid, ask, last_price, current_price, close_price, previous_close, last_update, lot_size, tick_size, display_name')
         .in('symbol', symbolsToResolve);
 
       const symbolMap = new Map((symbolRows || []).map((row) => [String(row.symbol || '').toUpperCase(), row]));
@@ -763,7 +763,7 @@ class TradingService {
       )];
       const { data: symbolRows } = await supabase
         .from('symbols')
-        .select('symbol, exchange, bid, ask, last_price, last_update')
+        .select('symbol, exchange, bid, ask, last_price, current_price, close_price, previous_close, last_update')
         .in('symbol', symbolsToResolve);
 
       const symbolMap = new Map((symbolRows || []).map((row) => [String(row.symbol || '').toUpperCase(), row]));
