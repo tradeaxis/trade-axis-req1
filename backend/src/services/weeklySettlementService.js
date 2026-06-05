@@ -15,6 +15,7 @@ const {
   buildOpenTradeSnapshots,
   filterSupersededSettlementTrades,
 } = require('./openTradeSnapshot');
+const { isMarketOpen } = require('./marketStatus');
 
 const SETTLEMENT_TIMEZONE = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
 
@@ -1037,10 +1038,17 @@ class WeeklySettlementService {
   }
 
   async _closeSupersededSettlementParents(targetDate, accountIds, now, errors) {
-    const { data: openTrades, error } = await supabase
+    const scopedAccountIds = [...(accountIds || [])].filter(Boolean);
+    let openTradeQuery = supabase
       .from('trades')
       .select('id,account_id,user_id,symbol,trade_type,quantity,open_price,current_price,profit,margin,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time')
       .eq('status', 'open');
+
+    if (scopedAccountIds.length > 0) {
+      openTradeQuery = openTradeQuery.in('account_id', scopedAccountIds);
+    }
+
+    const { data: openTrades, error } = await openTradeQuery;
 
     if (error) {
       errors.push({ repair: 'superseded-settlement-parent', error: error.message });
@@ -1126,11 +1134,17 @@ class WeeklySettlementService {
       }
     }
 
-    const { data: flaggedRows, error: flaggedErr } = await supabase
+    let flaggedQuery = supabase
       .from('trades')
       .select('id,account_id,current_price,open_price,profit')
       .eq('status', 'open')
       .eq('is_settlement_close', true);
+
+    if (scopedAccountIds.length > 0) {
+      flaggedQuery = flaggedQuery.in('account_id', scopedAccountIds);
+    }
+
+    const { data: flaggedRows, error: flaggedErr } = await flaggedQuery;
 
     if (flaggedErr) {
       errors.push({ repair: 'open-settlement-close-flagged', error: flaggedErr.message });
@@ -1287,14 +1301,8 @@ class WeeklySettlementService {
 
   async _getSettlementPrice(trade) {
     // Settlement must use the current/last market price, not the trade entry price.
-    // Prefer stream and persisted symbol prices before falling back to the trade row.
-    try {
-      const kiteStreamService = require('./kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
-      if (livePrice && livePrice.last > 0) {
-        return Number(livePrice.last);
-      }
-    } catch (_) {}
+    // During closed hours, prefer the persisted close/last row over any stale live cache.
+    const marketOpen = isMarketOpen(trade.symbol, trade.exchange);
 
     const { data: symRow } = await supabase
       .from('symbols')
@@ -1303,9 +1311,28 @@ class WeeklySettlementService {
       .limit(1);
 
     const s = symRow?.[0];
+    const dbPrice = s
+      ? Number(s.last_price || 0)
+        || Number(s.close_price || 0)
+        || Number(s.previous_close || 0)
+        || Number(s.bid || 0)
+        || Number(s.ask || 0)
+      : 0;
+
+    if (!marketOpen && dbPrice > 0) {
+      return dbPrice;
+    }
+
+    try {
+      const kiteStreamService = require('./kiteStreamService');
+      const livePrice = kiteStreamService.getPrice(trade.symbol);
+      if (livePrice && livePrice.last > 0) {
+        return Number(livePrice.last);
+      }
+    } catch (_) {}
+
     if (s) {
       const p = Number(s.last_price || 0)
-        || Number(s.current_price || 0)
         || Number(s.close_price || 0)
         || Number(s.previous_close || 0)
         || Number(s.bid || 0)

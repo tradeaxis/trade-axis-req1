@@ -67,6 +67,18 @@ const resolveTradeablePrice = ({
   const dbPrice = getSidePrice(symbolRow, side);
   const hasUsableDb = dbPrice > 0 && (allowStaleDb || dbFreshness.isFresh);
 
+  if (allowStaleDb && hasUsableDb) {
+    return {
+      symbol: normalizedSymbol,
+      price: dbPrice,
+      source: 'database',
+      liveAgeMs,
+      dbAgeMs: dbFreshness.ageMs,
+      isFresh: dbFreshness.isFresh,
+      isOffQuotes: !dbFreshness.isFresh,
+    };
+  }
+
   if (hasFreshLive) {
     return {
       symbol: normalizedSymbol,

@@ -6,7 +6,10 @@ const marketDataService  = require('../services/marketDataService');
 const kiteStreamService  = require('../services/kiteStreamService');
 const tradingService     = require('../services/tradingService');
 const { isMarketOpen, isAnyMarketOpen } = require('../services/marketStatus');
-const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
+const {
+  buildOpenTradeSnapshots,
+  filterSupersededSettlementTrades,
+} = require('../services/openTradeSnapshot');
 const {
   QUOTE_FRESHNESS_MS,
   getAgeMs,
@@ -125,8 +128,10 @@ class SocketHandler {
         , 8),
       ]);
 
+      const openTradeSnapshots = await buildOpenTradeSnapshots(tradesResult?.data || []);
+
       socket.emit('accounts:update', accountsResult?.data || []);
-      socket.emit('trades:update',   filterSupersededSettlementTrades(tradesResult?.data || []));
+      socket.emit('trades:update',   openTradeSnapshots);
     } catch (err) {
       console.error('Initial data error:', err.message);
     }
