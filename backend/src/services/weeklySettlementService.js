@@ -408,7 +408,7 @@ class WeeklySettlementService {
               commission: 0,           // no brokerage on settlement
               balance_before: balance,
               balance_after: balance,   // balance NEVER changes
-              credit_before: creditBefore,
+              credit_before: weeklyPnL,
               credit_after: 0,          // credit resets to 0
               settlement_type: 'auto_m2m',
               created_at: closeTime,

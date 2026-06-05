@@ -4060,30 +4060,85 @@ function SegmentSettingsEditor({ user }) {
 function ScriptSettingsEditor({ user }) {
   const [symbols, setSymbols] = useState([]);
   const [symbolSearch, setSymbolSearch] = useState('');
+  const [settings, setSettings] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    segment: 'NSE',
+    symbol: '',
+    settingType: 'Value Settings',
+    perOrderValue: '',
+    maxValueHolding: '',
+    fixOptSellHo: '0',
+    fixOptSellInt: '0',
+  });
   const filtered = symbols.filter((row) => String(row.symbol || '').toLowerCase().includes(symbolSearch.toLowerCase())).slice(0, 8);
 
   useEffect(() => {
-    loadTradableSymbols({ limit: 5000 }).then(setSymbols).catch(() => {});
-  }, []);
+    loadTradableSymbols({ limit: 5000 }).then((rows) => {
+      setSymbols(rows);
+      if (!form.symbol && rows[0]?.symbol) {
+        setForm((prev) => ({ ...prev, symbol: rows[0].symbol }));
+      }
+    }).catch(() => {});
+    api.get(`/web-admin/users/${user.id}/script-settings`)
+      .then((res) => setSettings(res.data?.data || []))
+      .catch(() => {});
+  }, [user.id]);
+
+  useEffect(() => {
+    if (!form.symbol && filtered[0]?.symbol) {
+      setForm((prev) => ({ ...prev, symbol: filtered[0].symbol }));
+    }
+  }, [filtered, form.symbol]);
+
+  const submit = async () => {
+    if (!form.symbol) return toast.error('Select symbol');
+    setSaving(true);
+    try {
+      const res = await api.post(`/web-admin/users/${user.id}/script-settings`, form);
+      setSettings(res.data?.data || []);
+      toast.success(res.data?.message || 'Script settings saved');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Script settings save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="admin-dark-panel">
       <div className="section-head"><div><h2>Create New Setting</h2><p>Custom symbol-level rule for {user.login_id}.</p></div></div>
       <div className="update-grid">
-        <div className="field"><label>Type Select</label><select className="select" defaultValue="NSE"><option>NSE</option><option>MCX</option><option>NSEOPT</option><option>MCXOPT</option><option>Crypto</option></select></div>
+        <div className="field"><label>Type Select</label><select className="select" value={form.segment} onChange={(event) => setForm((prev) => ({ ...prev, segment: event.target.value }))}><option>NSE</option><option>MCX</option><option>NSEOPT</option><option>MCXOPT</option><option>Crypto</option></select></div>
         <div className="field"><label>Symbol ({symbols.length} available)</label><input className="input" placeholder="Search symbol" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} /></div>
-        <div className="field"><label>Type Select</label><select className="select" defaultValue="Value Settings"><option>Value Settings</option><option>Quantity Settings</option><option>Block Settings</option></select></div>
-        <div className="field"><label>Select Symbol</label><select className="select">{filtered.map((row) => <option key={row.symbol}>{row.symbol}</option>)}</select></div>
-        <div className="field"><label>Per Order Value</label><input className="input" placeholder="Per Order Value" /></div>
-        <div className="field"><label>Max Value Holding</label><input className="input" placeholder="Max Value Holding" /></div>
-        <div className="field"><label>Fix OPTSELL HO</label><input className="input" defaultValue="0" /></div>
-        <div className="field"><label>Fix OPTSELL INT</label><input className="input" defaultValue="0" /></div>
+        <div className="field"><label>Type Select</label><select className="select" value={form.settingType} onChange={(event) => setForm((prev) => ({ ...prev, settingType: event.target.value }))}><option>Value Settings</option><option>Quantity Settings</option><option>Block Settings</option></select></div>
+        <div className="field"><label>Select Symbol</label><select className="select" value={form.symbol} onChange={(event) => setForm((prev) => ({ ...prev, symbol: event.target.value }))}>{filtered.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}</select></div>
+        <div className="field"><label>Per Order Value</label><input className="input" placeholder="Per Order Value" value={form.perOrderValue} onChange={(event) => setForm((prev) => ({ ...prev, perOrderValue: event.target.value }))} /></div>
+        <div className="field"><label>Max Value Holding</label><input className="input" placeholder="Max Value Holding" value={form.maxValueHolding} onChange={(event) => setForm((prev) => ({ ...prev, maxValueHolding: event.target.value }))} /></div>
+        <div className="field"><label>Fix OPTSELL HO</label><input className="input" value={form.fixOptSellHo} onChange={(event) => setForm((prev) => ({ ...prev, fixOptSellHo: event.target.value }))} /></div>
+        <div className="field"><label>Fix OPTSELL INT</label><input className="input" value={form.fixOptSellInt} onChange={(event) => setForm((prev) => ({ ...prev, fixOptSellInt: event.target.value }))} /></div>
       </div>
-      <button className="btn primary block" onClick={() => toast.error('Script settings endpoint is not enabled yet')}>Submit</button>
+      <button className="btn primary block" onClick={submit} disabled={saving}>{saving ? 'Saving...' : 'Submit'}</button>
       <div className="table-wrap update-table">
         <table>
           <thead><tr><th>Symbol</th><th>Max/Order/Min Lot</th><th>Max/Order Qty</th><th>Max/Order Value</th><th>Fix INT/HO</th><th>Per Crore/Lot</th><th>Spread</th><th>Limit Point</th><th>Block</th><th>OPT Block</th></tr></thead>
-          <tbody><tr><td colSpan="10">No settings configured yet</td></tr></tbody>
+          <tbody>
+            {settings.map((row) => (
+              <tr key={row.id || row.symbol}>
+                <td>{row.symbol}</td>
+                <td>{row.segment || '-'}</td>
+                <td>{row.settingType || '-'}</td>
+                <td>{row.maxValueHolding || 0}</td>
+                <td>{row.fixOptSellInt || 0}/{row.fixOptSellHo || 0}</td>
+                <td>{row.perOrderValue || 0}</td>
+                <td>-</td>
+                <td>-</td>
+                <td>{row.settingType === 'Block Settings' ? 'YES' : '-'}</td>
+                <td>-</td>
+              </tr>
+            ))}
+            {!settings.length && <tr><td colSpan="10">No settings configured yet</td></tr>}
+          </tbody>
         </table>
       </div>
     </div>
@@ -4093,6 +4148,7 @@ function ScriptSettingsEditor({ user }) {
 function CopySettingsEditor({ user, users, brokers, isBrokerUpdate, onSaved }) {
   const [copyFrom, setCopyFrom] = useState('');
   const [brokerId, setBrokerId] = useState(user.created_by || '');
+  const [copying, setCopying] = useState(false);
 
   const transfer = async () => {
     try {
@@ -4104,13 +4160,27 @@ function CopySettingsEditor({ user, users, brokers, isBrokerUpdate, onSaved }) {
     }
   };
 
+  const copySettings = async () => {
+    if (!copyFrom) return toast.error('Select user to copy from');
+    setCopying(true);
+    try {
+      const res = await api.post(`/web-admin/users/${user.id}/copy-settings`, { sourceUserId: copyFrom });
+      toast.success(res.data?.message || 'Copy settings saved');
+      onSaved?.();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Copy settings failed');
+    } finally {
+      setCopying(false);
+    }
+  };
+
   return (
     <div className="update-grid">
       <div className="admin-dark-panel">
         <div className="section-head"><div><h2>Transfer Settings</h2><p>Copy trading controls from another client.</p></div></div>
         <div className="field"><label>UserId</label><input className="input" readOnly value={user.email || user.login_id || ''} /></div>
         <div className="field"><label>User to Copy From</label><select className="select" value={copyFrom} onChange={(event) => setCopyFrom(event.target.value)}><option value="">Select or search a user</option>{users.filter((row) => row.id !== user.id && row.role !== 'admin').map((row) => <option key={row.id} value={row.id}>{row.login_id} - {getUserName(row)}</option>)}</select></div>
-        <button className="btn primary block" onClick={() => toast.error('Copy settings endpoint is not enabled yet')}>Copy User</button>
+        <button className="btn primary block" onClick={copySettings} disabled={copying}>{copying ? 'Copying...' : 'Copy User'}</button>
       </div>
       <div className="admin-dark-panel">
         <div className="section-head"><div><h2>{isBrokerUpdate ? 'Broker Client Scope' : 'Link User to Broker'}</h2><p>{isBrokerUpdate ? 'Use Sub Broker Management to assign clients under this broker.' : 'Move this client under a selected broker.'}</p></div></div>

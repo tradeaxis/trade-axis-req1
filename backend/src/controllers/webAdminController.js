@@ -1156,6 +1156,110 @@ exports.saveUserSegmentSettings = async (req, res) => {
   }
 };
 
+exports.getUserScriptSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await assertManagedUser(req, id);
+    const settings = await readJsonSetting('web_user_script_settings', {});
+    res.json({ success: true, data: settings[id] || [] });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.saveUserScriptSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await assertManagedUser(req, id);
+    const payload = req.body || {};
+    const symbol = String(payload.symbol || '').trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ success: false, message: 'Symbol is required' });
+
+    const settings = await readJsonSetting('web_user_script_settings', {});
+    const currentRows = Array.isArray(settings[id]) ? settings[id] : [];
+    const row = {
+      id: payload.id || `${symbol}:${Date.now()}`,
+      segment: payload.segment || 'NSE',
+      symbol,
+      settingType: payload.settingType || 'Value Settings',
+      perOrderValue: Number(payload.perOrderValue || 0),
+      maxValueHolding: Number(payload.maxValueHolding || 0),
+      fixOptSellHo: Number(payload.fixOptSellHo || 0),
+      fixOptSellInt: Number(payload.fixOptSellInt || 0),
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user.id,
+    };
+
+    const existingIndex = currentRows.findIndex((item) => String(item.id) === String(row.id) || String(item.symbol).toUpperCase() === symbol);
+    const nextRows = [...currentRows];
+    if (existingIndex >= 0) nextRows[existingIndex] = { ...nextRows[existingIndex], ...row };
+    else nextRows.push(row);
+
+    settings[id] = nextRows;
+    await writeJsonSetting('web_user_script_settings', settings);
+    res.json({ success: true, data: nextRows, message: 'Script settings saved' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.copyUserSettings = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await assertManagedUser(req, id);
+    const { sourceUserId } = req.body || {};
+    if (!sourceUserId) return res.status(400).json({ success: false, message: 'User to copy from is required' });
+    await assertManagedUser(req, sourceUserId);
+    if (String(sourceUserId) === String(id)) {
+      return res.status(400).json({ success: false, message: 'Select a different user to copy from' });
+    }
+
+    const segmentSettings = await readJsonSetting('web_user_segment_settings', {});
+    const scriptSettings = await readJsonSetting('web_user_script_settings', {});
+
+    segmentSettings[id] = segmentSettings[sourceUserId] || {};
+    scriptSettings[id] = Array.isArray(scriptSettings[sourceUserId])
+      ? scriptSettings[sourceUserId].map((item) => ({
+        ...item,
+        id: `${item.symbol || 'script'}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`,
+        copiedFrom: sourceUserId,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.user.id,
+      }))
+      : [];
+
+    await writeJsonSetting('web_user_segment_settings', segmentSettings);
+    await writeJsonSetting('web_user_script_settings', scriptSettings);
+
+    const { data: sourceUser, error: sourceError } = await supabase
+      .from('users')
+      .select('leverage, brokerage_rate, max_saved_accounts, closing_mode, liquidation_type')
+      .eq('id', sourceUserId)
+      .maybeSingle();
+    if (sourceError) throw sourceError;
+
+    if (sourceUser) {
+      const { error: updateError } = await supabase
+        .from('users')
+        .update({
+          leverage: sourceUser.leverage,
+          brokerage_rate: sourceUser.brokerage_rate,
+          max_saved_accounts: sourceUser.max_saved_accounts,
+          closing_mode: sourceUser.closing_mode,
+          liquidation_type: sourceUser.liquidation_type,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+
+      if (updateError) throw updateError;
+    }
+
+    res.json({ success: true, message: 'Copy settings saved' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getGlobalLeverageMarginSettings = async (req, res) => {
   try {
     const data = await readJsonSetting('web_global_leverage_margin_settings', {});

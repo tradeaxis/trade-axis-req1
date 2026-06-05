@@ -29,6 +29,9 @@ router.get('/sub-broker-permissions', webAdminAuth, webAdminController.getSubBro
 router.post('/sub-broker-permissions', protect, adminOnly, webAdminController.saveSubBrokerFeaturePermissions);
 router.get('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.getUserSegmentSettings);
 router.post('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.saveUserSegmentSettings);
+router.get('/users/:id/script-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.getUserScriptSettings);
+router.post('/users/:id/script-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.saveUserScriptSettings);
+router.post('/users/:id/copy-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.copyUserSettings);
 router.get('/leverage-margin-settings', webAdminAuth, webAdminController.getGlobalLeverageMarginSettings);
 router.post('/leverage-margin-settings', webAdminAuth, webAdminController.saveGlobalLeverageMarginSettings);
 
