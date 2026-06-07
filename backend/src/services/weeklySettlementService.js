@@ -16,8 +16,27 @@ const {
   filterSupersededSettlementTrades,
 } = require('./openTradeSnapshot');
 const { isMarketOpen } = require('./marketStatus');
+const kiteService = require('./kiteService');
 
 const SETTLEMENT_TIMEZONE = process.env.SETTLEMENT_TIMEZONE || 'Asia/Kolkata';
+const SETTLEMENT_REQUIRE_KITE_QUOTE = String(process.env.SETTLEMENT_REQUIRE_KITE_QUOTE || 'true').toLowerCase() !== 'false';
+const CONTRACT_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const SETTLEMENT_SYMBOL_FIELDS = [
+  'id',
+  'symbol',
+  'display_name',
+  'underlying',
+  'exchange',
+  'kite_exchange',
+  'kite_tradingsymbol',
+  'kite_instrument_token',
+  'expiry_date',
+  'bid',
+  'ask',
+  'last_price',
+  'previous_close',
+  'close_price',
+].join(', ');
 
 const formatDateInTimezone = (date, timeZone = SETTLEMENT_TIMEZONE) => {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -44,6 +63,96 @@ const roundMoney = (value) => {
   return Number.isFinite(numeric) ? Number(numeric.toFixed(2)) : 0;
 };
 
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return 0;
+};
+
+const parseContractMonth = (value = '') => {
+  const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
+  if (!raw) return '';
+
+  const monthPattern = CONTRACT_MONTHS.join('|');
+  const labelMatch = raw.match(new RegExp(`[-_](${monthPattern})$`, 'i'));
+  if (labelMatch) return labelMatch[1].toUpperCase();
+
+  const compact = raw.replace(/[-_]/g, '');
+  const kiteMatch = compact.match(new RegExp(`\\d{2}(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  if (kiteMatch) return kiteMatch[1].toUpperCase();
+
+  const displayMatch = compact.match(new RegExp(`(${monthPattern})(\\d{2})?FUT$`, 'i'));
+  return displayMatch ? displayMatch[1].toUpperCase() : '';
+};
+
+const normalizeUnderlyingKey = (value = '') =>
+  String(value || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[-_](JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$/i, '')
+    .replace(/[-_][IVX]+$/i, '')
+    .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
+    .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(/FUT$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+const getRowContractMonth = (row = {}) => {
+  const parsed = parseContractMonth(row.symbol)
+    || parseContractMonth(row.kite_tradingsymbol)
+    || parseContractMonth(row.display_name);
+  if (parsed) return parsed;
+
+  const expiry = row.expiry_date ? new Date(row.expiry_date) : null;
+  if (expiry && !Number.isNaN(expiry.getTime())) {
+    return CONTRACT_MONTHS[expiry.getMonth()] || '';
+  }
+  return '';
+};
+
+const getSymbolExactKeys = (row = {}) => (
+  [row.symbol, row.kite_tradingsymbol, row.display_name]
+    .map((value) => String(value || '').toUpperCase().replace(/\s+/g, ''))
+    .filter(Boolean)
+);
+
+const scoreSettlementSymbolRow = (trade, row) => {
+  const requested = String(trade?.symbol || '').toUpperCase().replace(/\s+/g, '');
+  const requestedMonth = parseContractMonth(requested);
+  const requestedBase = normalizeUnderlyingKey(requested);
+  const rowMonth = getRowContractMonth(row);
+  const exactMatch = getSymbolExactKeys(row).includes(requested);
+  const rowBases = [
+    row.underlying,
+    row.display_name,
+    row.symbol,
+    row.kite_tradingsymbol,
+  ].map(normalizeUnderlyingKey).filter(Boolean);
+  const baseMatch = requestedBase && rowBases.includes(requestedBase);
+
+  if (requestedMonth && rowMonth && rowMonth !== requestedMonth) return -1;
+  if (requestedBase && !baseMatch && !exactMatch) return -1;
+
+  let score = 0;
+  if (Number(row.kite_instrument_token || 0) > 0) score += 100;
+  if (row.kite_tradingsymbol) score += 40;
+  if (exactMatch) score += 40;
+  if (baseMatch) score += 30;
+  if (requestedMonth && rowMonth === requestedMonth) score += 30;
+  if (row.expiry_date) score += 5;
+  return score;
+};
+
+const inferKiteExchange = (row = {}) => {
+  const direct = String(row.kite_exchange || row.exchange || '').toUpperCase();
+  if (['NFO', 'MCX', 'BFO'].includes(direct)) return direct;
+
+  const text = String(`${row.symbol || ''} ${row.display_name || ''} ${row.underlying || ''}`).toUpperCase();
+  if (/CRUDE|NATURALGAS|GOLD|SILVER|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL/.test(text)) return 'MCX';
+  return 'NFO';
+};
+
 const settlementGroupKey = (trade) => [
   trade?.account_id || '',
   String(trade?.symbol || '').toUpperCase(),
@@ -61,12 +170,19 @@ const normalizeIdList = (value) => {
 };
 
 class WeeklySettlementService {
+  constructor() {
+    this._settlementSymbolCache = new Map();
+    this._settlementKitePriceCache = new Map();
+  }
+
   async runSettlement(options = {}) {
     const now = new Date();
     const settlementWeek = formatDateInTimezone(now);
     const closeTime = now.toISOString();
     const scopedUserIds = new Set(normalizeIdList(options.userIds));
     const scopedAccountIds = new Set(normalizeIdList(options.accountIds));
+    this._settlementSymbolCache.clear();
+    this._settlementKitePriceCache.clear();
 
     console.log('');
     console.log('═══════════════════════════════════════════════════════');
@@ -535,11 +651,14 @@ class WeeklySettlementService {
   }
 
   // ── Get best available price ──
-  async repairSettlementState({ settlementDate, userIds, userId, accountIds: inputAccountIds, accountId } = {}) {
+  async repairSettlementState({ settlementDate, userIds, userId, accountIds: inputAccountIds, accountId, reprice = false } = {}) {
     const targetDate = settlementDate || await this._getLatestSettlementDate();
     if (!targetDate) {
       return { success: false, message: 'No weekly settlement rows found to repair.' };
     }
+    this._settlementSymbolCache.clear();
+    this._settlementKitePriceCache.clear();
+    const shouldReprice = reprice === true || String(reprice).toLowerCase() === 'true';
 
     const scopedUserIds = normalizeIdList(userIds || userId);
     const scopedAccountIds = normalizeIdList(inputAccountIds || accountId);
@@ -567,9 +686,68 @@ class WeeklySettlementService {
     const errors = [];
     let fixedOld = 0;
     let fixedNew = 0;
+    let repricedRows = 0;
+    let repricedCreditRows = 0;
+    const repriceGroups = new Map();
 
     for (const row of rows || []) {
-      const closePrice = Number(row.close_price || 0);
+      let closePrice = Number(row.close_price || 0);
+      let profitLoss = Number(row.profit_loss || 0);
+
+      if (shouldReprice) {
+        const resolvedPrice = await this._getSettlementPrice({
+          symbol: row.symbol,
+          exchange: row.exchange,
+          open_price: row.open_price,
+          close_price: row.close_price,
+          current_price: row.close_price,
+        });
+
+        if (resolvedPrice > 0) {
+          const oldProfitLoss = Number(row.profit_loss || 0);
+          closePrice = resolvedPrice;
+          const qty = toNumber(row.quantity);
+          const openPrice = toNumber(row.open_price);
+          profitLoss = qty > 0 && openPrice > 0
+            ? roundMoney((closePrice - openPrice) * tradeDirection(row) * qty)
+            : roundMoney(oldProfitLoss);
+
+          row.close_price = closePrice;
+          row.profit_loss = profitLoss;
+
+          const groupKey = `${row.account_id || 'unknown'}::${row.settlement_date || targetDate}::${row.created_at || row.updated_at || 'legacy'}`;
+          if (!repriceGroups.has(groupKey)) {
+            repriceGroups.set(groupKey, {
+              ids: [],
+              oldCreditBefore: Number(row.credit_before || 0),
+              oldProfitTotal: 0,
+              newProfitTotal: 0,
+            });
+          }
+          const group = repriceGroups.get(groupKey);
+          if (row.id) group.ids.push(row.id);
+          group.oldProfitTotal += oldProfitLoss;
+          group.newProfitTotal += profitLoss;
+
+          if (row.id) {
+            const { error: repriceErr } = await supabase
+              .from('weekly_settlements')
+              .update({
+                close_price: closePrice,
+                profit_loss: profitLoss,
+                updated_at: now,
+              })
+              .eq('id', row.id);
+
+            if (repriceErr) {
+              errors.push({ settlementId: row.id, error: repriceErr.message });
+            } else {
+              repricedRows++;
+            }
+          }
+        }
+      }
+
       if (!closePrice || closePrice <= 0) {
         errors.push({ settlementId: row.id, error: 'Missing close price' });
         continue;
@@ -583,7 +761,7 @@ class WeeklySettlementService {
           .update({
             close_price: closePrice,
             current_price: closePrice,
-            profit: Number(row.profit_loss || 0),
+            profit: profitLoss,
             sell_brokerage: 0,
             brokerage: 0,
             status: 'closed',
@@ -625,13 +803,35 @@ class WeeklySettlementService {
       }
     }
 
+    if (shouldReprice) {
+      for (const group of repriceGroups.values()) {
+        const ids = [...new Set(group.ids.filter(Boolean))];
+        if (ids.length === 0) continue;
+
+        const nextCreditBefore = roundMoney(
+          group.oldCreditBefore - group.oldProfitTotal + group.newProfitTotal,
+        );
+
+        const { error: creditErr } = await supabase
+          .from('weekly_settlements')
+          .update({ credit_before: nextCreditBefore, updated_at: now })
+          .in('id', ids);
+
+        if (creditErr) {
+          errors.push({ repair: 'reprice-settlement-credit-before', error: creditErr.message });
+        } else {
+          repricedCreditRows += ids.length;
+        }
+      }
+    }
+
     const forced = await this._forceSettlementOpenRowsFromWeeklyRows(targetDate, rows || [], accountIds, now, errors);
     for (const accountId of forced.accountIds || []) accountIds.add(accountId);
     const normalized = await this._normalizeSettlementOpenRows(targetDate, accountIds, now, errors);
     for (const accountId of normalized.accountIds || []) accountIds.add(accountId);
     const staleRepair = await this._closeSupersededSettlementParents(targetDate, accountIds, now, errors);
     const accountsRecalculated = await this._recalculateAccounts([...accountIds], now, errors);
-    const repairedAnything = fixedOld > 0 || fixedNew > 0 || forced.openRowsReset > 0 || forced.openRowsCreated > 0 || forced.duplicateRowsClosed > 0 || normalized.staleRowsClosed > 0 || normalized.groupsNormalized > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
+    const repairedAnything = fixedOld > 0 || fixedNew > 0 || repricedRows > 0 || repricedCreditRows > 0 || forced.openRowsReset > 0 || forced.openRowsCreated > 0 || forced.duplicateRowsClosed > 0 || normalized.staleRowsClosed > 0 || normalized.groupsNormalized > 0 || staleRepair.staleParentsClosed > 0 || staleRepair.reopenedNormalized > 0 || accountsRecalculated > 0;
 
     return {
       success: repairedAnything && errors.length === 0,
@@ -644,6 +844,8 @@ class WeeklySettlementService {
       rows: rows?.length || 0,
       fixedOld,
       fixedNew,
+      repricedRows,
+      repricedCreditRows,
       openRowsReset: forced.openRowsReset,
       openRowsCreated: forced.openRowsCreated,
       duplicateRowsClosedFromHistory: forced.duplicateRowsClosed,
@@ -1299,51 +1501,153 @@ class WeeklySettlementService {
     }
   }
 
-  async _getSettlementPrice(trade) {
-    // Settlement must use the current/last market price, not the trade entry price.
-    // During closed hours, prefer the persisted close/last row over any stale live cache.
-    const marketOpen = isMarketOpen(trade.symbol, trade.exchange);
+  async _getSettlementSymbolRow(trade) {
+    const requested = String(trade?.symbol || '').trim().toUpperCase();
+    if (!requested) return null;
 
-    const { data: symRow } = await supabase
-      .from('symbols')
-      .select('last_price, previous_close, close_price, bid, ask')
-      .eq('symbol', trade.symbol)
-      .limit(1);
+    const cacheKey = `${requested}|${String(trade?.exchange || '').toUpperCase()}`;
+    if (this._settlementSymbolCache.has(cacheKey)) {
+      return this._settlementSymbolCache.get(cacheKey);
+    }
 
-    const s = symRow?.[0];
-    const dbPrice = s
-      ? Number(s.last_price || 0)
-        || Number(s.close_price || 0)
-        || Number(s.previous_close || 0)
-        || Number(s.bid || 0)
-        || Number(s.ask || 0)
-      : 0;
+    const rowsByKey = new Map();
+    const addRows = (rows = []) => {
+      for (const row of rows || []) {
+        const key = row.id || row.kite_instrument_token || `${row.symbol}:${row.kite_tradingsymbol}`;
+        if (key) rowsByKey.set(String(key), row);
+      }
+    };
 
-    if (!marketOpen && dbPrice > 0) {
-      return dbPrice;
+    const exactCandidates = [...new Set([
+      requested,
+      requested.replace(/\s+/g, ''),
+    ].filter(Boolean))];
+
+    for (const candidate of exactCandidates) {
+      const { data, error } = await supabase
+        .from('symbols')
+        .select(SETTLEMENT_SYMBOL_FIELDS)
+        .or(`symbol.eq.${candidate},kite_tradingsymbol.eq.${candidate},display_name.eq.${candidate}`)
+        .order('expiry_date', { ascending: true })
+        .limit(25);
+
+      if (error) throw error;
+      addRows(data);
+    }
+
+    const baseKey = normalizeUnderlyingKey(requested);
+    if (baseKey) {
+      const { data, error } = await supabase
+        .from('symbols')
+        .select(SETTLEMENT_SYMBOL_FIELDS)
+        .or(`symbol.ilike.%${baseKey}%,kite_tradingsymbol.ilike.%${baseKey}%,display_name.ilike.%${baseKey}%,underlying.ilike.%${baseKey}%`)
+        .order('expiry_date', { ascending: true })
+        .limit(500);
+
+      if (error) throw error;
+      addRows(data);
+    }
+
+    const candidates = [...rowsByKey.values()]
+      .map((row) => ({ row, score: scoreSettlementSymbolRow(trade, row) }))
+      .filter((item) => item.score >= 0)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return String(a.row.expiry_date || '9999-12-31').localeCompare(String(b.row.expiry_date || '9999-12-31'));
+      });
+
+    const best = candidates[0]?.row || null;
+    this._settlementSymbolCache.set(cacheKey, best);
+    return best;
+  }
+
+  async _getKiteSettlementPrice(symbolRow) {
+    if (!symbolRow?.kite_tradingsymbol) return 0;
+
+    const exchange = inferKiteExchange(symbolRow);
+    const tradingsymbol = String(symbolRow.kite_tradingsymbol || '').toUpperCase();
+    const quoteKey = `${exchange}:${tradingsymbol}`;
+    const cacheKey = String(symbolRow.kite_instrument_token || quoteKey);
+    if (this._settlementKitePriceCache.has(cacheKey)) {
+      return this._settlementKitePriceCache.get(cacheKey);
     }
 
     try {
-      const kiteStreamService = require('./kiteStreamService');
-      const livePrice = kiteStreamService.getPrice(trade.symbol);
-      if (livePrice && livePrice.last > 0) {
-        return Number(livePrice.last);
-      }
-    } catch (_) {}
+      await kiteService.init();
+      if (!kiteService.isSessionReady()) return 0;
 
-    if (s) {
-      const p = Number(s.last_price || 0)
-        || Number(s.close_price || 0)
-        || Number(s.previous_close || 0)
-        || Number(s.bid || 0)
-        || Number(s.ask || 0);
-      if (p > 0) return p;
+      const kite = kiteService.getKiteInstance();
+      if (!kite || typeof kite.getQuote !== 'function') return 0;
+
+      const quotes = await kite.getQuote([quoteKey]);
+      const quote = quotes?.[quoteKey] || quotes?.[tradingsymbol];
+      const price = firstPositiveNumber(
+        quote?.last_price,
+        quote?.lastPrice,
+        quote?.last_traded_price,
+        quote?.ltp,
+        quote?.depth?.buy?.[0]?.price,
+        quote?.depth?.sell?.[0]?.price,
+        quote?.ohlc?.close,
+      );
+
+      if (price > 0) {
+        const rounded = roundMoney(price);
+        this._settlementKitePriceCache.set(cacheKey, rounded);
+        return rounded;
+      }
+    } catch (error) {
+      console.warn(`Settlement Kite quote warning for ${quoteKey}: ${error.message}`);
     }
 
-    const positionCurrentPrice = Number(trade.current_price || trade.close_price || 0);
-    if (positionCurrentPrice > 0) return positionCurrentPrice;
+    return 0;
+  }
 
-    return Number(trade.open_price || 0);
+  _getDbSettlementPrice(symbolRow) {
+    return firstPositiveNumber(
+      symbolRow?.last_price,
+      symbolRow?.current_price,
+      symbolRow?.close_price,
+      symbolRow?.previous_close,
+      symbolRow?.bid,
+      symbolRow?.ask,
+    );
+  }
+
+  async _getSettlementPrice(trade) {
+    // Settlement must use the exact contract's current/last market price.
+    // Kite direct quote is preferred because DB aliases can hold stale prices after token expiry.
+    const symbolRow = await this._getSettlementSymbolRow(trade);
+    const kitePrice = await this._getKiteSettlementPrice(symbolRow);
+    if (kitePrice > 0) return kitePrice;
+
+    if (SETTLEMENT_REQUIRE_KITE_QUOTE && symbolRow?.kite_tradingsymbol) {
+      console.warn(
+        `Settlement price missing exact Kite quote for ${trade.symbol} (${inferKiteExchange(symbolRow)}:${symbolRow.kite_tradingsymbol}).`,
+      );
+      return 0;
+    }
+
+    const marketOpen = isMarketOpen(trade.symbol, trade.exchange);
+    if (marketOpen) {
+      try {
+        const kiteStreamService = require('./kiteStreamService');
+        const livePrice = symbolRow
+          ? kiteStreamService.getPriceForSymbolRow(symbolRow)
+          : kiteStreamService.getPrice(trade.symbol);
+        if (livePrice && Number(livePrice.last || 0) > 0) {
+          return roundMoney(livePrice.last);
+        }
+      } catch (_) {}
+    }
+
+    const dbPrice = this._getDbSettlementPrice(symbolRow);
+    if (dbPrice > 0) return roundMoney(dbPrice);
+
+    const positionCurrentPrice = firstPositiveNumber(trade.current_price, trade.close_price);
+    if (positionCurrentPrice > 0) return roundMoney(positionCurrentPrice);
+
+    return roundMoney(trade.open_price || 0);
   }
 }
 
