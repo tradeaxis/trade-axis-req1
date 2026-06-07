@@ -5075,6 +5075,11 @@ function SettlementPanel() {
   const [settlementUserId, setSettlementUserId] = useState('');
   const [settlementUserIds, setSettlementUserIds] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [editUserId, setEditUserId] = useState('');
+  const [editAccountId, setEditAccountId] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [editAmount, setEditAmount] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
 
   const load = async () => {
     const [statusRes, usersRes] = await Promise.all([
@@ -5089,6 +5094,27 @@ function SettlementPanel() {
   useEffect(() => {
     load().catch(() => {});
   }, []);
+
+  const selectedEditUser = useMemo(
+    () => users.find((user) => user.id === editUserId) || null,
+    [editUserId, users]
+  );
+  const editAccounts = selectedEditUser?.accounts || [];
+  const selectedEditAccount = editAccounts.find((account) => account.id === editAccountId) || editAccounts[0] || null;
+
+  const selectSettlementEditUser = (userId) => {
+    const nextUser = users.find((user) => user.id === userId) || null;
+    const nextAccount = nextUser?.accounts?.[0] || null;
+    setEditUserId(userId);
+    setEditAccountId(nextAccount?.id || '');
+    setEditAmount(nextAccount ? String(Number(nextAccount.settlement_balance || 0)) : '');
+  };
+
+  const selectSettlementEditAccount = (accountId) => {
+    const nextAccount = editAccounts.find((account) => account.id === accountId) || null;
+    setEditAccountId(accountId);
+    setEditAmount(nextAccount ? String(Number(nextAccount.settlement_balance || 0)) : '');
+  };
 
   const run = async () => {
     const selectedUserIds = settlementMode === 'all'
@@ -5116,6 +5142,37 @@ function SettlementPanel() {
       toast.error(error.response?.data?.message || 'Settlement failed');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveSettlementBalance = async () => {
+    const amount = Number(editAmount);
+    if (!editUserId || !editAccountId) {
+      toast.error('Select a user and account');
+      return;
+    }
+    if (!Number.isFinite(amount)) {
+      toast.error('Enter a valid balance settled value');
+      return;
+    }
+
+    const accountLabel = selectedEditAccount?.account_number || selectedEditUser?.login_id || 'selected account';
+    if (!window.confirm(`Update balance settled for ${accountLabel} to ${formatMoney(amount)}?`)) return;
+
+    setEditBusy(true);
+    try {
+      const res = await api.post('/web-admin/settlement-balance', {
+        accountId: editAccountId,
+        settlementDate: editDate || undefined,
+        amount,
+      });
+      toast.success(res.data?.message || 'Balance settled updated');
+      await load();
+      setEditAmount(String(amount));
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Update failed');
+    } finally {
+      setEditBusy(false);
     }
   };
 
@@ -5180,6 +5237,53 @@ function SettlementPanel() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="settlement-edit-card">
+        <div className="section-head compact">
+          <div>
+            <h2>Edit Balance Settled</h2>
+            <p>Correct the latest settlement value shown in user History. Date is optional.</p>
+          </div>
+          {selectedEditAccount && (
+            <span className="pill blue">Current {formatMoney(selectedEditAccount.settlement_balance || 0)}</span>
+          )}
+        </div>
+        <div className="grid-4 settlement-edit-grid">
+          <div className="field">
+            <label>User</label>
+            <select className="select" value={editUserId} onChange={(event) => selectSettlementEditUser(event.target.value)}>
+              <option value="">Select user</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>{user.login_id || user.email || getUserName(user)}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Account</label>
+            <select className="select" value={editAccountId} onChange={(event) => selectSettlementEditAccount(event.target.value)} disabled={!editAccounts.length}>
+              {!editAccounts.length && <option value="">No active account</option>}
+              {editAccounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.account_number || account.id} - {account.is_demo ? 'Demo' : 'Live'}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Settlement Date</label>
+            <input className="input" type="date" value={editDate} onChange={(event) => setEditDate(event.target.value)} />
+          </div>
+          <div className="field">
+            <label>Balance Settled</label>
+            <input className="input" type="number" step="0.01" value={editAmount} onChange={(event) => setEditAmount(event.target.value)} placeholder="0.00" />
+          </div>
+        </div>
+        <div className="action-row">
+          <button className="btn primary" onClick={saveSettlementBalance} disabled={editBusy || !editAccountId}>
+            Save Balance Settled
+          </button>
+        </div>
       </div>
     </div>
   );

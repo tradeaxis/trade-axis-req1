@@ -598,6 +598,13 @@ button:disabled {
   gap: 16px;
 }
 
+.grid-4 {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .trade-layout {
   min-width: 0;
   display: grid;
@@ -659,6 +666,20 @@ button:disabled {
 
 .settlement-user-row small {
   color: var(--muted);
+}
+
+.settlement-edit-card {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.section-head.compact {
+  margin-bottom: 12px;
+}
+
+.settlement-edit-grid {
+  align-items: end;
 }
 
 .row {
@@ -1797,7 +1818,8 @@ tr:last-child td {
 
 @media (max-width: 1180px) {
   .stats-grid,
-  .grid-3 {
+  .grid-3,
+  .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2003,6 +2025,7 @@ tr:last-child td {
 
   .grid-2,
   .grid-3,
+  .grid-4,
   .trade-layout {
     grid-template-columns: 1fr;
   }

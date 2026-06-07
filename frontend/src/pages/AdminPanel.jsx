@@ -27,6 +27,11 @@ export default function AdminPanel() {
   const [settlementMode, setSettlementMode] = useState('all');
   const [settlementSingleUserId, setSettlementSingleUserId] = useState('');
   const [settlementUserIds, setSettlementUserIds] = useState([]);
+  const [settlementEditUserId, setSettlementEditUserId] = useState('');
+  const [settlementEditAccountId, setSettlementEditAccountId] = useState('');
+  const [settlementEditDate, setSettlementEditDate] = useState('');
+  const [settlementEditAmount, setSettlementEditAmount] = useState('');
+  const [settlementEditLoading, setSettlementEditLoading] = useState(false);
 
   const [manualTradeId, setManualTradeId]   = useState('');
   const [manualPrice,   setManualPrice]     = useState('');
@@ -167,6 +172,46 @@ export default function AdminPanel() {
     }
   };
 
+  const selectSettlementEditUser = (userId) => {
+    const user = adminUsers.find((row) => row.id === userId);
+    const account = user?.accounts?.[0];
+    setSettlementEditUserId(userId);
+    setSettlementEditAccountId(account?.id || '');
+  };
+
+  const updateSettlementBalance = async () => {
+    const amount = Number(settlementEditAmount);
+    if (!settlementEditUserId || !settlementEditAccountId) {
+      toast.error('Select a user and account');
+      return;
+    }
+    if (!Number.isFinite(amount)) {
+      toast.error('Enter a valid balance settled value');
+      return;
+    }
+
+    if (!window.confirm(`Update balance settled to ${amount.toFixed(2)}?`)) return;
+
+    setSettlementEditLoading(true);
+    try {
+      const res = await api.post('/admin/settlement-balance', {
+        accountId: settlementEditAccountId,
+        settlementDate: settlementEditDate || undefined,
+        amount,
+      });
+      if (res.data?.success) {
+        toast.success(res.data.message || 'Balance settled updated');
+        await fetchAdminUsers();
+      } else {
+        toast.error(res.data?.message || 'Update failed');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.message || 'Update failed');
+    } finally {
+      setSettlementEditLoading(false);
+    }
+  };
+
   const fetchSelectedUserPositions = async (userId) => {
     if (!userId) return;
     setLoadingSelectedUserPositions(true);
@@ -293,6 +338,8 @@ export default function AdminPanel() {
       String(p.user_login_id || '').toLowerCase().includes(term)
     );
   });
+  const settlementEditUser = adminUsers.find((row) => row.id === settlementEditUserId);
+  const settlementEditAccounts = settlementEditUser?.accounts || [];
 
   // ── Tabs — includes new Script Ban tab ──────────────────────────────────
   const tabs = [
@@ -460,6 +507,64 @@ export default function AdminPanel() {
               >
                 {settlementTriggering ? 'Running Settlement...' : 'Run Settlement Now'}
               </button>
+
+              <div className="p-3 rounded-lg mt-4" style={{ background: '#1e222d', border: '1px solid #363a45' }}>
+                <div className="text-sm font-semibold mb-1" style={{ color: '#d1d4dc' }}>Edit Balance Settled</div>
+                <div className="text-xs mb-3" style={{ color: '#9ca3af' }}>
+                  Correct the latest settlement value shown in History. Date is optional.
+                </div>
+                <select
+                  value={settlementEditUserId}
+                  onChange={(e) => selectSettlementEditUser(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg mb-2"
+                  style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  <option value="">Select user</option>
+                  {adminUsers.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.login_id || user.email || user.id} - {[user.first_name, user.last_name].filter(Boolean).join(' ')}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={settlementEditAccountId}
+                  onChange={(e) => setSettlementEditAccountId(e.target.value)}
+                  disabled={!settlementEditAccounts.length}
+                  className="w-full px-3 py-2 rounded-lg mb-2 disabled:opacity-60"
+                  style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  {!settlementEditAccounts.length && <option value="">No active account</option>}
+                  {settlementEditAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.account_number || account.id} - {account.is_demo ? 'Demo' : 'Live'}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="date"
+                  value={settlementEditDate}
+                  onChange={(e) => setSettlementEditDate(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg mb-2"
+                  style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                />
+                <input
+                  type="number"
+                  step="0.01"
+                  value={settlementEditAmount}
+                  onChange={(e) => setSettlementEditAmount(e.target.value)}
+                  placeholder="Balance settled value"
+                  className="w-full px-3 py-2 rounded-lg mb-3"
+                  style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #363a45' }}
+                />
+                <button
+                  onClick={updateSettlementBalance}
+                  disabled={settlementEditLoading || !settlementEditAccountId}
+                  className="w-full py-3 rounded-lg font-semibold text-white disabled:opacity-50"
+                  style={{ background: '#26a69a' }}
+                >
+                  {settlementEditLoading ? 'Saving...' : 'Save Balance Settled'}
+                </button>
+              </div>
             </div>
           </div>
         )}

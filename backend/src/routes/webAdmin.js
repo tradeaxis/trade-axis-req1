@@ -27,6 +27,7 @@ router.get('/auto-close-settings', webAdminAuth, webAdminController.getAutoClose
 router.post('/auto-close-settings', webAdminAuth, webAdminController.saveAutoCloseSettings);
 router.get('/sub-broker-permissions', webAdminAuth, webAdminController.getSubBrokerFeaturePermissions);
 router.post('/sub-broker-permissions', protect, adminOnly, webAdminController.saveSubBrokerFeaturePermissions);
+router.post('/settlement-balance', protect, adminOnly, webAdminController.updateSettlementBalance);
 router.get('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.getUserSegmentSettings);
 router.post('/users/:id/segment-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.saveUserSegmentSettings);
 router.get('/users/:id/script-settings', webAdminAuth, webAdminController.userWriteAccess, webAdminController.getUserScriptSettings);

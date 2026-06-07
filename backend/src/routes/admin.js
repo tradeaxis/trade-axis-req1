@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
+const webAdminController = require('../controllers/webAdminController');
 const { protect, adminOnly } = require('../middleware/auth');
 
 // ✅ Combined admin middleware
@@ -66,5 +67,6 @@ router.get('/market-holiday', adminAuth, adminController.getMarketHoliday);
 router.post('/market-holiday', adminAuth, adminController.setMarketHoliday);
 router.post('/close-position', adminAuth, adminController.adminClosePosition);
 router.post('/symbol-ban', adminAuth, adminController.toggleSymbolBan);
+router.post('/settlement-balance', adminAuth, webAdminController.updateSettlementBalance);
 
 module.exports = router;

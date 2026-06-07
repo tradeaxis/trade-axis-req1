@@ -399,6 +399,123 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
   return balances;
 };
 
+exports.updateSettlementBalance = async (req, res) => {
+  try {
+    const { accountId = '', userId = '', settlementDate = '', amount } = req.body || {};
+    const nextAmount = Number(amount);
+
+    if (!Number.isFinite(nextAmount)) {
+      return res.status(400).json({ success: false, message: 'Balance settled value is required' });
+    }
+
+    let accountQuery = supabase
+      .from('accounts')
+      .select('id, user_id, account_number, is_demo, is_active')
+      .limit(1);
+
+    if (accountId) {
+      accountQuery = accountQuery.eq('id', accountId);
+    } else if (userId) {
+      accountQuery = accountQuery
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .order('is_demo', { ascending: true });
+    } else {
+      return res.status(400).json({ success: false, message: 'Select a user or account' });
+    }
+
+    const { data: accountRows, error: accountError } = await accountQuery;
+    if (accountError) throw accountError;
+
+    const account = Array.isArray(accountRows) ? accountRows[0] : accountRows;
+    if (!account) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+
+    const cleanSettlementDate = String(settlementDate || '').trim();
+    let settlementQuery = supabase
+      .from('weekly_settlements')
+      .select('id, account_id, user_id, settlement_date, created_at, updated_at, credit_before')
+      .eq('account_id', account.id)
+      .order('settlement_date', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (cleanSettlementDate) {
+      settlementQuery = settlementQuery.eq('settlement_date', cleanSettlementDate);
+    }
+
+    const { data: rows, error: rowsError } = await settlementQuery;
+    if (rowsError) throw rowsError;
+
+    if (!rows?.length) {
+      return res.status(404).json({
+        success: false,
+        message: cleanSettlementDate
+          ? 'No settlement rows found for selected date'
+          : 'No settlement rows found for selected account',
+      });
+    }
+
+    const groups = new Map();
+    rows.forEach((row) => {
+      const date = firstNonEmptyString(
+        row.settlement_date,
+        row.created_at ? String(row.created_at).slice(0, 10) : '',
+      );
+      const executedAt = row.created_at || row.updated_at || `${date}T01:00:00+05:30`;
+      const key = `${row.account_id}::${date}::${executedAt}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          accountId: row.account_id,
+          settlementDate: date,
+          executedAt,
+          previousAmount: toNumber(row.credit_before),
+          ids: [],
+        });
+      }
+      groups.get(key).ids.push(row.id);
+    });
+
+    const latestGroup = [...groups.values()]
+      .filter((group) => group.ids.length)
+      .sort((a, b) => {
+        const dateDiff = new Date(b.settlementDate || 0) - new Date(a.settlementDate || 0);
+        if (dateDiff) return dateDiff;
+        return new Date(b.executedAt || 0) - new Date(a.executedAt || 0);
+      })[0];
+
+    if (!latestGroup) {
+      return res.status(404).json({ success: false, message: 'Settlement group not found' });
+    }
+
+    const now = new Date().toISOString();
+    const { data: updatedRows, error: updateError } = await supabase
+      .from('weekly_settlements')
+      .update({ credit_before: nextAmount, updated_at: now })
+      .in('id', latestGroup.ids)
+      .select('id, credit_before');
+
+    if (updateError) throw updateError;
+
+    res.json({
+      success: true,
+      data: {
+        accountId: account.id,
+        accountNumber: account.account_number,
+        settlementDate: latestGroup.settlementDate,
+        executedAt: latestGroup.executedAt,
+        previousAmount: latestGroup.previousAmount,
+        amount: nextAmount,
+        rows: updatedRows?.length || 0,
+      },
+      message: 'Balance settled value updated',
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 const getManagedUserIds = async (req) => {
   if (isAdmin(req)) return null;
 
