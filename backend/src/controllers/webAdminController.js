@@ -10,6 +10,7 @@ const {
 const kiteStreamService = require('../services/kiteStreamService');
 const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
 const { isMarketOpen } = require('../services/marketStatus');
+const { QUOTE_FRESHNESS_MS, getAgeMs } = require('../services/quoteGuard');
 const {
   getAllowedLeverageOptions,
   isAllowedLeverage,
@@ -103,7 +104,8 @@ const calculateLiveTradeValues = (row) => {
   if (!row || row.status !== 'open') return row;
 
   const cached = kiteStreamService.getPrice(row.symbol);
-  const livePrice = Number(cached?.last || cached?.ltp || cached?.price || 0);
+  const liveFresh = isMarketOpen(row.symbol, row.exchange) && getAgeMs(cached?.timestamp) <= QUOTE_FRESHNESS_MS;
+  const livePrice = liveFresh ? Number(cached?.last || cached?.ltp || cached?.price || 0) : 0;
   const currentPrice = livePrice > 0
     ? livePrice
     : Number(row.current_price || row.close_price || row.open_price || 0);
@@ -246,7 +248,8 @@ const getBestSymbolPrice = (symbolData = {}) => {
   const live = kiteStreamService.getPrice(symbolData.symbol)
     || kiteStreamService.getPrice(symbolData.kite_tradingsymbol)
     || kiteStreamService.getPrice(symbolData.display_name);
-  const livePrice = toNumber(live?.last ?? live?.ltp ?? live?.price, 0);
+  const liveFresh = isMarketOpen(symbolData.symbol, symbolData.exchange) && getAgeMs(live?.timestamp) <= QUOTE_FRESHNESS_MS;
+  const livePrice = liveFresh ? toNumber(live?.last ?? live?.ltp ?? live?.price, 0) : 0;
   if (livePrice > 0) return livePrice;
 
   return toNumber(symbolData.last_price, 0)
@@ -570,7 +573,8 @@ exports.listSymbols = async (req, res) => {
 
     const symbols = (data || []).map((symbol) => {
       const live = kiteStreamService.getPriceForSymbolRow(symbol);
-      if (!live || !toNumber(live.last)) return symbol;
+      const liveFresh = isMarketOpen(symbol.symbol, symbol.exchange) && getAgeMs(live?.timestamp) <= QUOTE_FRESHNESS_MS;
+      if (!liveFresh || !live || !toNumber(live.last)) return symbol;
       return {
         ...symbol,
         last_price: toNumber(live.last, symbol.last_price),
@@ -1233,28 +1237,56 @@ exports.copyUserSettings = async (req, res) => {
 
     const { data: sourceUser, error: sourceError } = await supabase
       .from('users')
-      .select('leverage, brokerage_rate, max_saved_accounts, closing_mode, liquidation_type')
+      .select('*')
       .eq('id', sourceUserId)
       .maybeSingle();
     if (sourceError) throw sourceError;
 
+    const copiedColumns = [];
+    const skippedColumns = [];
     if (sourceUser) {
-      const { error: updateError } = await supabase
-        .from('users')
-        .update({
-          leverage: sourceUser.leverage,
-          brokerage_rate: sourceUser.brokerage_rate,
-          max_saved_accounts: sourceUser.max_saved_accounts,
-          closing_mode: sourceUser.closing_mode,
-          liquidation_type: sourceUser.liquidation_type,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', id);
+      const columnsToCopy = [
+        'leverage',
+        'brokerage_rate',
+        'max_saved_accounts',
+        'closing_mode',
+        'liquidation_type',
+      ];
 
-      if (updateError) throw updateError;
+      for (const column of columnsToCopy) {
+        if (sourceUser[column] === undefined) continue;
+        const { error: columnError } = await supabase
+          .from('users')
+          .update({ [column]: sourceUser[column] })
+          .eq('id', id);
+
+        if (columnError) {
+          const message = `${columnError.message || ''} ${columnError.details || ''}`;
+          if (/column|schema cache|does not exist/i.test(message)) {
+            skippedColumns.push(column);
+            console.warn(`copy settings skipped ${column}:`, columnError.message);
+            continue;
+          }
+          throw columnError;
+        }
+
+        copiedColumns.push(column);
+      }
+
+      const { error: touchError } = await supabase
+        .from('users')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (touchError && !/updated_at|column|schema cache|does not exist/i.test(`${touchError.message || ''} ${touchError.details || ''}`)) {
+        throw touchError;
+      }
     }
 
-    res.json({ success: true, message: 'Copy settings saved' });
+    res.json({
+      success: true,
+      data: { copiedColumns, skippedColumns },
+      message: 'Copy settings saved',
+    });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }

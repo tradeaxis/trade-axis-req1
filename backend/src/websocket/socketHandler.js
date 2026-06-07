@@ -261,15 +261,22 @@ class SocketHandler {
 
     // ── 3. Resolve prices ─────────────────────────────────────────────────────
     const uniqueSymbols = [...new Set(allTradesForDB.map((t) => t.symbol))];
+    const tradeBySymbol = new Map();
+    for (const trade of allTradesForDB) {
+      const sym = String(trade.symbol || '').toUpperCase();
+      if (sym && !tradeBySymbol.has(sym)) tradeBySymbol.set(sym, trade);
+    }
     const priceSources  = {};
     const missing       = [];
 
     for (const sym of uniqueSymbols) {
+      const tradeForSymbol = tradeBySymbol.get(String(sym || '').toUpperCase());
+      const marketOpen = isMarketOpen(sym, tradeForSymbol?.exchange);
       const c = kiteStreamService.getPrice(sym);
       if (c) {
         priceSources[sym] = { liveQuote: c, symbolRow: null };
       }
-      if (!c || getAgeMs(c.timestamp) > QUOTE_FRESHNESS_MS) {
+      if (!marketOpen || !c || getAgeMs(c.timestamp) > QUOTE_FRESHNESS_MS) {
         missing.push(sym);
       }
     }
@@ -305,6 +312,7 @@ class SocketHandler {
         side: trade.trade_type === 'buy' ? 'sell' : 'buy',
         liveQuote: isTradeMarketOpen ? (priceSource.liveQuote || null) : null,
         symbolRow: priceSource.symbolRow || null,
+        allowStaleDb: !isTradeMarketOpen,
       });
       const hasFreshTradablePrice =
         isTradeMarketOpen &&
@@ -330,8 +338,8 @@ class SocketHandler {
         ? (currentPrice - openPrice) * direction * quantity - buyBrokerage
         : Number(trade.profit || 0);
 
-      // Always add to DB update list
-      if (hasFreshTradablePrice) {
+      // Always add to DB update list for live ticks and for closed-market DB close refreshes.
+      if (hasFreshTradablePrice || (!isTradeMarketOpen && currentPriceState.price > 0)) {
         allTradeUpdates.push({
           id:           trade.id,
           currentPrice,

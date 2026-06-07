@@ -8,6 +8,8 @@
 const { supabase } = require('../config/supabase');
 const kiteService      = require('./kiteService');
 const kiteStreamService= require('./kiteStreamService');
+const { isMarketOpen } = require('./marketStatus');
+const { QUOTE_FRESHNESS_MS, getAgeMs } = require('./quoteGuard');
 
 const firstPositiveNumber = (...values) => {
   for (const value of values) {
@@ -31,7 +33,9 @@ class MarketDataService {
     const sym = String(symbol || '').toUpperCase();
     if (!sym) return null;
 
-    // 1. Live price from kiteStreamService memory (instant)
+    // 1. Live price from kiteStreamService memory (instant).
+    // Use it only while the market is open and the tick is fresh; after close
+    // the persisted DB row is the trusted closing/last price until next open.
     let live = kiteStreamService.getPrice(sym);
 
     // 2. Static metadata (lot_size, tick_size, display_name, etc.)
@@ -50,6 +54,9 @@ class MarketDataService {
 
     const d = meta.d;
     live = live || kiteStreamService.getPriceForSymbolRow(d);
+    const marketOpen = isMarketOpen(d.symbol, d.exchange);
+    const liveFresh = !!live && Number(live.last || 0) > 0 && getAgeMs(live.timestamp) <= QUOTE_FRESHNESS_MS;
+    const usableLive = marketOpen && liveFresh ? live : null;
 
     // ── Resolve prices ────────────────────────────────────────────────────
     // DB columns: last_price, bid, ask, open_price, high_price, low_price,
@@ -63,15 +70,15 @@ class MarketDataService {
       d.bid,
       d.ask,
     );
-    const lastPrice  = live ? live.last      : fallbackPrice;
-    const bidPrice   = live ? live.bid       : firstPositiveNumber(d.bid, fallbackPrice);
-    const askPrice   = live ? live.ask       : firstPositiveNumber(d.ask, fallbackPrice);
-    const openPrice  = live ? live.open      : Number(d.open_price    || 0);
-    const highPrice  = live ? live.high      : Number(d.high_price    || 0);
-    const lowPrice   = live ? live.low       : Number(d.low_price     || 0);
-    const prevClose  = live ? live.prevClose : firstPositiveNumber(d.previous_close, fallbackPrice);
-    const changeVal  = live ? live.change    : Number(d.change_value  || 0);
-    const changePct  = live ? live.changePct : Number(d.change_percent|| 0);
+    const lastPrice  = usableLive ? usableLive.last      : fallbackPrice;
+    const bidPrice   = usableLive ? usableLive.bid       : firstPositiveNumber(d.bid, fallbackPrice);
+    const askPrice   = usableLive ? usableLive.ask       : firstPositiveNumber(d.ask, fallbackPrice);
+    const openPrice  = usableLive ? usableLive.open      : Number(d.open_price    || 0);
+    const highPrice  = usableLive ? usableLive.high      : Number(d.high_price    || 0);
+    const lowPrice   = usableLive ? usableLive.low       : Number(d.low_price     || 0);
+    const prevClose  = usableLive ? usableLive.prevClose : firstPositiveNumber(d.previous_close, fallbackPrice);
+    const changeVal  = usableLive ? usableLive.change    : Number(d.change_value  || 0);
+    const changePct  = usableLive ? usableLive.changePct : Number(d.change_percent|| 0);
     const dbLastUpdate = d.last_update ? new Date(d.last_update).getTime() : 0;
     const isDbStale = !dbLastUpdate || (Date.now() - dbLastUpdate > 30 * 60 * 1000);
 
@@ -110,16 +117,16 @@ class MarketDataService {
       change_percent: changePct,
 
       // ── Volume & contract info ──
-      volume:   live ? live.volume : Number(d.volume   || 0),
+      volume:   usableLive ? usableLive.volume : Number(d.volume   || 0),
       lotSize:  Number(d.lot_size  || 1),
       lot_size: Number(d.lot_size  || 1),
       tickSize: Number(d.tick_size || 0.05),
       tick_size:Number(d.tick_size || 0.05),
 
       // ── Meta ──
-      timestamp:  live ? live.timestamp : (dbLastUpdate || Date.now()),
-      source:     live ? 'kite' : 'db',
-      off_quotes: !live && (!fallbackPrice || fallbackPrice <= 0 || isDbStale),
+      timestamp:  usableLive ? usableLive.timestamp : (dbLastUpdate || Date.now()),
+      source:     usableLive ? 'kite' : 'db',
+      off_quotes: !usableLive && (!fallbackPrice || fallbackPrice <= 0 || isDbStale),
     };
   }
 

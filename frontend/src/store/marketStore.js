@@ -7,6 +7,22 @@ import api from '../services/api';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
 const MARKET_CACHE_KEY = 'trade_axis_market_cache';
+const isMarketOpenNow = (symbol = null) => {
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utcMs + 5.5 * 3600000);
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  const sym = String(symbol || '').toUpperCase();
+  const isCommodity =
+    /GOLD|SILVER|SILVERM|SILVERMIC|GOLDM|GOLDGUINEA|GOLDPETAL|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MCX/i.test(sym);
+
+  if (isCommodity) return mins >= 9 * 60 && mins <= 23 * 60 + 30;
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+};
+
 const readMarketCache = () => {
   try {
     return JSON.parse(localStorage.getItem(MARKET_CACHE_KEY) || 'null');
@@ -131,6 +147,7 @@ const useMarketStore = create((set, get) => ({
 
           // Always update if source is 'kite' (live tick); skip if same values < 60s
           const isLive = item.source === 'kite' || item.source === 'socket';
+          if (isLive && !isMarketOpenNow(sym)) continue;
           if (
             !isLive &&
             existing.last === newLast &&
@@ -173,6 +190,7 @@ const useMarketStore = create((set, get) => ({
     if (typeof data === 'object' && data.symbol) {
       const sym      = String(data.symbol).toUpperCase();
       const isLive   = data.source === 'kite' || data.source === 'socket';
+      if (isLive && !isMarketOpenNow(sym)) return;
 
       set(state => {
         const existing = state.quotes[sym] || {};

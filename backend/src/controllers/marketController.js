@@ -2,9 +2,9 @@
 const { supabase } = require('../config/supabase');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
-const { getHolidayStatus, isAnyMarketOpen } = require('../services/marketStatus');
+const { getHolidayStatus, isAnyMarketOpen, isMarketOpen } = require('../services/marketStatus');
 const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
-const { QUOTE_FRESHNESS_MS, getDbFreshness } = require('../services/quoteGuard');
+const { QUOTE_FRESHNESS_MS, getAgeMs, getDbFreshness } = require('../services/quoteGuard');
 
 const ALLOWED_CATEGORIES = [
   'index_futures',
@@ -118,7 +118,8 @@ const withQuoteFallback = (symbol) => {
 
 const withLiveQuote = (symbol) => {
   const live = kiteStreamService.getPriceForSymbolRow(symbol);
-  if (!live?.last || Number(live.last) <= 0) return withQuoteFallback(symbol);
+  const liveFresh = !!live && Number(live.last || 0) > 0 && getAgeMs(live.timestamp) <= QUOTE_FRESHNESS_MS;
+  if (!isMarketOpen(symbol?.symbol, symbol?.exchange) || !liveFresh) return withQuoteFallback(symbol);
 
   return {
     ...symbol,
@@ -268,7 +269,7 @@ exports.getQuote = async (req, res) => {
 
     const live = kiteStreamService.getPriceForSymbolRow(dbSym) || kiteStreamService.getPrice(sym);
     const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
-    const hasLive = !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
+    const hasLive = isMarketOpen(dbSym.symbol, dbSym.exchange) && !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
     const fallbackPrice = firstPositiveNumber(
       dbSym.last_price,

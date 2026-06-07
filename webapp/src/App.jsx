@@ -151,6 +151,7 @@ const getUserName = (user) => {
 const getLoginId = (user) => user?.login_id || user?.loginId || '';
 
 const monthAbbrs = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const QUOTE_FRESHNESS_MS = 15000;
 
 const parseContractMonth = (value = '') => {
   const raw = String(value || '').toUpperCase().trim();
@@ -286,7 +287,10 @@ const normalizeLiveUnderlyingKey = (value = '') =>
     .replace(/[^A-Z0-9]/g, '');
 
 const getSymbolPrice = (symbol) => {
-  const isLive = String(symbol?.source || '').includes('kite_live') || symbol?.timestamp;
+  const isLive =
+    isMarketOpenNow(symbol?.symbol || symbol?.display_name || symbol?.underlying) &&
+    getQuoteAgeMs(symbol) <= QUOTE_FRESHNESS_MS &&
+    (String(symbol?.source || '').includes('kite_live') || symbol?.source === 'kite' || symbol?.source === 'socket' || symbol?.timestamp);
   if (isLive) {
     return firstPositiveNumber(
       symbol?.last,
