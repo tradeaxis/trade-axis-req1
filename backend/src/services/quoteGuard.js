@@ -41,6 +41,33 @@ const getSidePrice = (quote, side = 'buy') => {
   return ask || last || bid;
 };
 
+const getClosedMarketPrice = (quote, side = 'buy') => {
+  const last = toNumber(
+    quote?.last
+      ?? quote?.last_price
+      ?? quote?.lastPrice
+      ?? quote?.current_price
+      ?? quote?.currentPrice
+      ?? 0,
+  );
+  const close = toNumber(
+    quote?.close_price
+      ?? quote?.closePrice
+      ?? quote?.ohlc?.close
+      ?? quote?.previous_close
+      ?? quote?.previousClose
+      ?? 0,
+  );
+  const bid = toNumber(quote?.bid ?? 0);
+  const ask = toNumber(quote?.ask ?? 0);
+
+  if (side === 'sell') {
+    return last || close || bid || ask;
+  }
+
+  return last || close || ask || bid;
+};
+
 const getDbFreshness = (symbolRow, maxAgeMs = QUOTE_FRESHNESS_MS) => {
   const ageMs = getAgeMs(symbolRow?.last_update);
   return {
@@ -64,7 +91,9 @@ const resolveTradeablePrice = ({
   const hasFreshLive = livePrice > 0 && liveAgeMs <= maxAgeMs;
 
   const dbFreshness = getDbFreshness(symbolRow, maxAgeMs);
-  const dbPrice = getSidePrice(symbolRow, side);
+  const dbPrice = allowStaleDb
+    ? getClosedMarketPrice(symbolRow, side)
+    : getSidePrice(symbolRow, side);
   const hasUsableDb = dbPrice > 0 && (allowStaleDb || dbFreshness.isFresh);
 
   if (allowStaleDb && hasUsableDb) {
@@ -137,6 +166,7 @@ module.exports = {
   buildOffQuotesMessage,
   getAgeMs,
   getDbFreshness,
+  getClosedMarketPrice,
   getSidePrice,
   resolveTradeablePrice,
 };

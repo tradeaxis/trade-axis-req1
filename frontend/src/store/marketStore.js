@@ -66,13 +66,16 @@ const useMarketStore = create((set, get) => ({
 
         const quotes = {};
         symbols.forEach(s => {
+          const marketOpen = isMarketOpenNow(s.symbol || s.display_name || s.underlying);
           const fallbackPrice = Number(
-            s.last_price || s.current_price || s.close_price || s.previous_close || s.bid || s.ask || 0
+            marketOpen
+              ? (s.last_price || s.current_price || s.close_price || s.previous_close || s.bid || s.ask || 0)
+              : (s.last_price || s.close_price || s.previous_close || s.current_price || s.bid || s.ask || 0)
           );
           quotes[s.symbol] = {
             symbol:         s.symbol,
-            bid:            Number(s.bid || fallbackPrice || 0),
-            ask:            Number(s.ask || fallbackPrice || 0),
+            bid:            marketOpen ? Number(s.bid || fallbackPrice || 0) : fallbackPrice,
+            ask:            marketOpen ? Number(s.ask || fallbackPrice || 0) : fallbackPrice,
             last:           fallbackPrice,
             open:           Number(s.open_price   || s.open  || 0),
             high:           Number(s.high_price   || s.high  || 0),
@@ -141,13 +144,17 @@ const useMarketStore = create((set, get) => ({
           const sym      = String(item.symbol).toUpperCase();
           const existing = newQuotes[sym] || {};
 
-          const newLast = Number(item.last ?? item.last_price ?? item.current_price ?? item.close_price ?? item.previous_close ?? existing.last ?? 0);
-          const newBid  = Number(item.bid  ?? newLast ?? existing.bid  ?? 0);
-          const newAsk  = Number(item.ask  ?? newLast ?? existing.ask  ?? 0);
-
           // Always update if source is 'kite' (live tick); skip if same values < 60s
           const isLive = item.source === 'kite' || item.source === 'socket';
           if (isLive && !isMarketOpenNow(sym)) continue;
+          const marketOpen = isMarketOpenNow(sym);
+          const newLast = Number(
+            marketOpen
+              ? (item.last ?? item.last_price ?? item.current_price ?? item.close_price ?? item.previous_close ?? existing.last ?? 0)
+              : (item.last ?? item.last_price ?? item.close_price ?? item.previous_close ?? item.current_price ?? existing.last ?? 0)
+          );
+          const newBid  = marketOpen ? Number(item.bid  ?? newLast ?? existing.bid  ?? 0) : newLast;
+          const newAsk  = marketOpen ? Number(item.ask  ?? newLast ?? existing.ask  ?? 0) : newLast;
           if (
             !isLive &&
             existing.last === newLast &&
@@ -194,9 +201,14 @@ const useMarketStore = create((set, get) => ({
 
       set(state => {
         const existing = state.quotes[sym] || {};
-        const newLast  = Number(data.last ?? data.last_price ?? data.current_price ?? data.close_price ?? data.previous_close ?? existing.last ?? 0);
-        const newBid   = Number(data.bid  ?? newLast ?? existing.bid  ?? 0);
-        const newAsk   = Number(data.ask  ?? newLast ?? existing.ask  ?? 0);
+        const marketOpen = isMarketOpenNow(sym);
+        const newLast  = Number(
+          marketOpen
+            ? (data.last ?? data.last_price ?? data.current_price ?? data.close_price ?? data.previous_close ?? existing.last ?? 0)
+            : (data.last ?? data.last_price ?? data.close_price ?? data.previous_close ?? data.current_price ?? existing.last ?? 0)
+        );
+        const newBid   = marketOpen ? Number(data.bid  ?? newLast ?? existing.bid  ?? 0) : newLast;
+        const newAsk   = marketOpen ? Number(data.ask  ?? newLast ?? existing.ask  ?? 0) : newLast;
 
         if (
           !isLive &&
@@ -252,9 +264,11 @@ const useMarketStore = create((set, get) => ({
           : (q.last_update ? new Date(q.last_update).getTime() : Date.now());
         const quote = {
           symbol:         sym,
-          bid:            Number(q.bid || q.lastPrice || q.last_price || q.current_price || q.close_price || q.previous_close || 0),
-          ask:            Number(q.ask || q.lastPrice || q.last_price || q.current_price || q.close_price || q.previous_close || 0),
-          last:           Number(q.lastPrice || q.last_price || q.last || q.current_price || q.close_price || q.previous_close || 0),
+          bid:            isMarketOpenNow(sym) ? Number(q.bid || q.lastPrice || q.last_price || q.current_price || q.close_price || q.previous_close || 0) : Number(q.lastPrice || q.last_price || q.last || q.close_price || q.previous_close || q.current_price || 0),
+          ask:            isMarketOpenNow(sym) ? Number(q.ask || q.lastPrice || q.last_price || q.current_price || q.close_price || q.previous_close || 0) : Number(q.lastPrice || q.last_price || q.last || q.close_price || q.previous_close || q.current_price || 0),
+          last:           Number(isMarketOpenNow(sym)
+            ? (q.lastPrice || q.last_price || q.last || q.current_price || q.close_price || q.previous_close || 0)
+            : (q.lastPrice || q.last_price || q.last || q.close_price || q.previous_close || q.current_price || 0)),
           open:           Number(q.open       || q.open_price || 0),
           high:           Number(q.high       || q.high_price || 0),
           low:            Number(q.low        || q.low_price  || 0),

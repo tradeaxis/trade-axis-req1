@@ -61,18 +61,28 @@ class MarketDataService {
     // ── Resolve prices ────────────────────────────────────────────────────
     // DB columns: last_price, bid, ask, open_price, high_price, low_price,
     //             previous_close, change_value, change_percent
-    const fallbackPrice = firstPositiveNumber(
-      d.last,
-      d.last_price,
-      d.current_price,
-      d.close_price,
-      d.previous_close,
-      d.bid,
-      d.ask,
-    );
+    const fallbackPrice = marketOpen
+      ? firstPositiveNumber(
+        d.last,
+        d.last_price,
+        d.current_price,
+        d.close_price,
+        d.previous_close,
+        d.bid,
+        d.ask,
+      )
+      : firstPositiveNumber(
+        d.last,
+        d.last_price,
+        d.close_price,
+        d.previous_close,
+        d.current_price,
+        d.bid,
+        d.ask,
+      );
     const lastPrice  = usableLive ? usableLive.last      : fallbackPrice;
-    const bidPrice   = usableLive ? usableLive.bid       : firstPositiveNumber(d.bid, fallbackPrice);
-    const askPrice   = usableLive ? usableLive.ask       : firstPositiveNumber(d.ask, fallbackPrice);
+    const bidPrice   = usableLive ? usableLive.bid       : (marketOpen ? firstPositiveNumber(d.bid, fallbackPrice) : fallbackPrice);
+    const askPrice   = usableLive ? usableLive.ask       : (marketOpen ? firstPositiveNumber(d.ask, fallbackPrice) : fallbackPrice);
     const openPrice  = usableLive ? usableLive.open      : Number(d.open_price    || 0);
     const highPrice  = usableLive ? usableLive.high      : Number(d.high_price    || 0);
     const lowPrice   = usableLive ? usableLive.low       : Number(d.low_price     || 0);

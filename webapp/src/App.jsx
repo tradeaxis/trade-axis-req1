@@ -309,13 +309,13 @@ const getSymbolPrice = (symbol) => {
   }
 
   return firstPositiveNumber(
-    symbol?.previous_close,
-    symbol?.previousClose,
-    symbol?.close_price,
-    symbol?.closePrice,
     symbol?.last,
     symbol?.last_price,
     symbol?.lastPrice,
+    symbol?.close_price,
+    symbol?.closePrice,
+    symbol?.previous_close,
+    symbol?.previousClose,
     symbol?.current_price,
     symbol?.currentPrice,
     symbol?.ohlc?.close,
@@ -324,9 +324,17 @@ const getSymbolPrice = (symbol) => {
   );
 };
 
-const getSymbolBid = (symbol) => firstPositiveNumber(symbol?.bid, symbol?.bidPrice, getSymbolPrice(symbol));
+const getSymbolBid = (symbol) => (
+  isMarketOpenNow(symbol?.symbol || symbol?.display_name || symbol?.underlying)
+    ? firstPositiveNumber(symbol?.bid, symbol?.bidPrice, getSymbolPrice(symbol))
+    : getSymbolPrice(symbol)
+);
 
-const getSymbolAsk = (symbol) => firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol));
+const getSymbolAsk = (symbol) => (
+  isMarketOpenNow(symbol?.symbol || symbol?.display_name || symbol?.underlying)
+    ? firstPositiveNumber(symbol?.ask, symbol?.askPrice, getSymbolPrice(symbol))
+    : getSymbolPrice(symbol)
+);
 
 const findPositionSymbol = (position, symbols = []) => {
   return findSymbolByInput(position?.symbol, symbols);
@@ -360,11 +368,39 @@ const findSymbolByInput = (input, symbols = []) => {
 };
 
 const getLivePositionPrice = (position, symbols = []) => {
-  if (!isMarketOpenNow(position?.symbol) && isSettlementReopenPosition(position)) {
-    return firstPositiveNumber(position?.open_price, position?.current_price, position?.close_price);
+  const marketOpen = isMarketOpenNow(position?.symbol);
+  const symbol = findPositionSymbol(position, symbols);
+
+  if (!marketOpen && isSettlementReopenPosition(position)) {
+    return firstPositiveNumber(
+      position?.open_price,
+      symbol?.last,
+      symbol?.last_price,
+      symbol?.lastPrice,
+      symbol?.close_price,
+      symbol?.closePrice,
+      position?.current_price,
+      position?.close_price,
+    );
   }
 
-  const symbol = findPositionSymbol(position, symbols);
+  if (!marketOpen) {
+    return firstPositiveNumber(
+      symbol?.last,
+      symbol?.last_price,
+      symbol?.lastPrice,
+      symbol?.close_price,
+      symbol?.closePrice,
+      symbol?.previous_close,
+      symbol?.previousClose,
+      symbol?.current_price,
+      symbol?.currentPrice,
+      symbol?.ohlc?.close,
+      position?.close_price,
+      position?.current_price,
+      position?.open_price,
+    );
+  }
 
   return firstPositiveNumber(
     symbol?.last,

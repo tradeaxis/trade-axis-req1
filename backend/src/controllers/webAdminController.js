@@ -103,12 +103,16 @@ const rememberPlainPassword = async (userId, plainPassword) => {
 const calculateLiveTradeValues = (row) => {
   if (!row || row.status !== 'open') return row;
 
+  const marketOpen = isMarketOpen(row.symbol, row.exchange);
   const cached = kiteStreamService.getPrice(row.symbol);
-  const liveFresh = isMarketOpen(row.symbol, row.exchange) && getAgeMs(cached?.timestamp) <= QUOTE_FRESHNESS_MS;
+  const liveFresh = marketOpen && getAgeMs(cached?.timestamp) <= QUOTE_FRESHNESS_MS;
   const livePrice = liveFresh ? Number(cached?.last || cached?.ltp || cached?.price || 0) : 0;
+  const visiblePrice = toNumber(row._visible_price);
   const currentPrice = livePrice > 0
     ? livePrice
-    : Number(row.current_price || row.close_price || row.open_price || 0);
+    : (marketOpen
+      ? firstPositiveNumber(row.current_price, visiblePrice, row.close_price, row.open_price)
+      : firstPositiveNumber(visiblePrice, row.close_price, row.current_price, row.open_price));
   const quantity = Number(row.quantity || 0);
   const openPrice = Number(row.open_price || 0);
   const lotSize = Number(row.lot_size || 1) || 1;
@@ -120,9 +124,62 @@ const calculateLiveTradeValues = (row) => {
 
   return {
     ...row,
+    _visible_price: undefined,
     current_price: currentPrice,
     profit,
   };
+};
+
+const getVisibleSymbolPrice = (symbolData = {}) => {
+  const marketOpen = isMarketOpen(symbolData.symbol, symbolData.exchange);
+  const live = kiteStreamService.getPrice(symbolData.symbol)
+    || kiteStreamService.getPrice(symbolData.kite_tradingsymbol)
+    || kiteStreamService.getPrice(symbolData.display_name);
+  const liveFresh = marketOpen && getAgeMs(live?.timestamp) <= QUOTE_FRESHNESS_MS;
+  const livePrice = liveFresh ? toNumber(live?.last ?? live?.ltp ?? live?.price, 0) : 0;
+  if (livePrice > 0) return livePrice;
+
+  return marketOpen
+    ? firstPositiveNumber(
+      symbolData.last_price,
+      symbolData.current_price,
+      symbolData.close_price,
+      symbolData.previous_close,
+      symbolData.bid,
+      symbolData.ask,
+    )
+    : firstPositiveNumber(
+      symbolData.last_price,
+      symbolData.close_price,
+      symbolData.previous_close,
+      symbolData.current_price,
+      symbolData.bid,
+      symbolData.ask,
+    );
+};
+
+const attachVisibleSymbolPrices = async (rows = []) => {
+  const symbols = [...new Set(
+    (rows || [])
+      .map((row) => String(row?.symbol || '').toUpperCase())
+      .filter(Boolean),
+  )];
+  if (symbols.length === 0) return rows || [];
+
+  const { data, error } = await supabase
+    .from('symbols')
+    .select('symbol, display_name, kite_tradingsymbol, exchange, last_price, close_price, previous_close, bid, ask, last_update')
+    .in('symbol', symbols);
+
+  if (error) throw error;
+  const priceBySymbol = new Map(
+    (data || []).map((row) => [String(row.symbol || '').toUpperCase(), getVisibleSymbolPrice(row)]),
+  );
+
+  return (rows || []).map((row) => ({
+    ...row,
+    _visible_price: priceBySymbol.get(String(row?.symbol || '').toUpperCase()) || 0,
+  }));
 };
 
 const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toISOString()) => {
@@ -167,6 +224,14 @@ const normalizeRole = (role) => {
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
 };
 
 const normalizeSymbolLookupKey = (value) =>
@@ -245,19 +310,31 @@ const getEquivalentSymbols = async (symbolData = {}) => {
 };
 
 const getBestSymbolPrice = (symbolData = {}) => {
+  const marketOpen = isMarketOpen(symbolData.symbol, symbolData.exchange);
   const live = kiteStreamService.getPrice(symbolData.symbol)
     || kiteStreamService.getPrice(symbolData.kite_tradingsymbol)
     || kiteStreamService.getPrice(symbolData.display_name);
-  const liveFresh = isMarketOpen(symbolData.symbol, symbolData.exchange) && getAgeMs(live?.timestamp) <= QUOTE_FRESHNESS_MS;
+  const liveFresh = marketOpen && getAgeMs(live?.timestamp) <= QUOTE_FRESHNESS_MS;
   const livePrice = liveFresh ? toNumber(live?.last ?? live?.ltp ?? live?.price, 0) : 0;
   if (livePrice > 0) return livePrice;
 
-  return toNumber(symbolData.last_price, 0)
-    || toNumber(symbolData.current_price, 0)
-    || toNumber(symbolData.previous_close, 0)
-    || toNumber(symbolData.close_price, 0)
-    || toNumber(symbolData.bid, 0)
-    || toNumber(symbolData.ask, 0);
+  return marketOpen
+    ? firstPositiveNumber(
+      symbolData.last_price,
+      symbolData.current_price,
+      symbolData.close_price,
+      symbolData.previous_close,
+      symbolData.bid,
+      symbolData.ask,
+    )
+    : firstPositiveNumber(
+      symbolData.last_price,
+      symbolData.close_price,
+      symbolData.previous_close,
+      symbolData.current_price,
+      symbolData.bid,
+      symbolData.ask,
+    );
 };
 
 const firstNonEmptyString = (...values) => {
@@ -918,7 +995,8 @@ exports.listUsers = async (req, res) => {
         .eq('status', 'open');
 
       if (tradesError) throw tradesError;
-      liveTrades = filterSupersededSettlementTrades(tradeRows || []).map(calculateLiveTradeValues);
+      liveTrades = (await attachVisibleSymbolPrices(filterSupersededSettlementTrades(tradeRows || [])))
+        .map(calculateLiveTradeValues);
 
       const pnlByAccount = new Map();
       const marginByAccount = new Map();
@@ -1634,7 +1712,9 @@ exports.openPositions = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ success: true, data: filterSupersededSettlementTrades(data || []) });
+    const liveRows = (await attachVisibleSymbolPrices(filterSupersededSettlementTrades(data || [])))
+      .map(calculateLiveTradeValues);
+    res.json({ success: true, data: liveRows });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }
@@ -1678,7 +1758,7 @@ exports.positions = async (req, res) => {
     const visibleRows = status === 'open'
       ? filterSupersededSettlementTrades(data || [])
       : (data || []);
-    const liveRows = visibleRows.map(calculateLiveTradeValues);
+    const liveRows = (await attachVisibleSymbolPrices(visibleRows)).map(calculateLiveTradeValues);
     res.json({ success: true, data: await attachUserAndAccountInfo(liveRows) });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });

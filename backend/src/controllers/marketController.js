@@ -98,21 +98,33 @@ const isVisibleContractRow = (symbol, referenceDate = getIstNow()) => {
 };
 
 const withQuoteFallback = (symbol) => {
-  const fallbackPrice = firstPositiveNumber(
-    symbol?.last_price,
-    symbol?.last,
-    symbol?.current_price,
-    symbol?.close_price,
-    symbol?.previous_close,
-    symbol?.bid,
-    symbol?.ask,
-  );
+  const marketOpen = isMarketOpen(symbol?.symbol, symbol?.exchange);
+  const fallbackPrice = marketOpen
+    ? firstPositiveNumber(
+      symbol?.last_price,
+      symbol?.last,
+      symbol?.current_price,
+      symbol?.close_price,
+      symbol?.previous_close,
+      symbol?.bid,
+      symbol?.ask,
+    )
+    : firstPositiveNumber(
+      symbol?.last_price,
+      symbol?.last,
+      symbol?.close_price,
+      symbol?.previous_close,
+      symbol?.current_price,
+      symbol?.bid,
+      symbol?.ask,
+    );
 
   return {
     ...symbol,
     last_price: fallbackPrice,
-    bid: firstPositiveNumber(symbol?.bid, fallbackPrice),
-    ask: firstPositiveNumber(symbol?.ask, fallbackPrice),
+    bid: marketOpen ? firstPositiveNumber(symbol?.bid, fallbackPrice) : fallbackPrice,
+    ask: marketOpen ? firstPositiveNumber(symbol?.ask, fallbackPrice) : fallbackPrice,
+    source: marketOpen ? symbol?.source : 'database',
   };
 };
 
@@ -271,22 +283,33 @@ exports.getQuote = async (req, res) => {
     const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
     const hasLive = isMarketOpen(dbSym.symbol, dbSym.exchange) && !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
-    const fallbackPrice = firstPositiveNumber(
-      dbSym.last_price,
-      dbSym.last,
-      dbSym.current_price,
-      dbSym.close_price,
-      dbSym.previous_close,
-      dbSym.bid,
-      dbSym.ask,
-    );
+    const marketOpen = isMarketOpen(dbSym.symbol, dbSym.exchange);
+    const fallbackPrice = marketOpen
+      ? firstPositiveNumber(
+        dbSym.last_price,
+        dbSym.last,
+        dbSym.current_price,
+        dbSym.close_price,
+        dbSym.previous_close,
+        dbSym.bid,
+        dbSym.ask,
+      )
+      : firstPositiveNumber(
+        dbSym.last_price,
+        dbSym.last,
+        dbSym.close_price,
+        dbSym.previous_close,
+        dbSym.current_price,
+        dbSym.bid,
+        dbSym.ask,
+      );
 
     const quote = {
       ...dbSym,
       last_price: hasLive ? live.last : fallbackPrice,
       previous_close: Number(dbSym.previous_close || 0),
-      bid: hasLive ? live.bid : firstPositiveNumber(dbSym.bid, fallbackPrice),
-      ask: hasLive ? live.ask : firstPositiveNumber(dbSym.ask, fallbackPrice),
+      bid: hasLive ? live.bid : (marketOpen ? firstPositiveNumber(dbSym.bid, fallbackPrice) : fallbackPrice),
+      ask: hasLive ? live.ask : (marketOpen ? firstPositiveNumber(dbSym.ask, fallbackPrice) : fallbackPrice),
       open_price: hasLive ? live.open : Number(dbSym.open_price || 0),
       high_price: hasLive ? live.high : Number(dbSym.high_price || 0),
       low_price: hasLive ? live.low : Number(dbSym.low_price || 0),

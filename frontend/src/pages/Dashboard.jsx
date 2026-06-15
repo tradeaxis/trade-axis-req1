@@ -353,6 +353,37 @@ const findTradeQuote = (trade, quotes = {}, symbols = []) => {
 const getTradeQuotePrice = (trade, quotes = {}, symbols = []) => {
   const quote = findTradeQuote(trade, quotes, symbols);
 
+  if (!isMarketOpenNow(trade?.symbol)) {
+    if (isSettlementReopenTrade(trade)) {
+      return firstPositiveNumber(
+        trade?.open_price,
+        quote?.last,
+        quote?.last_price,
+        quote?.lastPrice,
+        quote?.close_price,
+        quote?.closePrice,
+        trade?.current_price,
+        trade?.close_price,
+      );
+    }
+
+    return firstPositiveNumber(
+      quote?.last,
+      quote?.last_price,
+      quote?.lastPrice,
+      quote?.close_price,
+      quote?.closePrice,
+      quote?.previous_close,
+      quote?.previousClose,
+      quote?.current_price,
+      quote?.currentPrice,
+      quote?.ohlc?.close,
+      trade?.close_price,
+      trade?.current_price,
+      trade?.open_price,
+    );
+  }
+
   return firstPositiveNumber(
     quote?.last,
     quote?.last_price,
