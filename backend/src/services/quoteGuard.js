@@ -62,10 +62,10 @@ const getClosedMarketPrice = (quote, side = 'buy') => {
   const ask = toNumber(quote?.ask ?? 0);
 
   if (side === 'sell') {
-    return last || close || bid || ask;
+    return close || last || bid || ask;
   }
 
-  return last || close || ask || bid;
+  return close || last || ask || bid;
 };
 
 const getDbFreshness = (symbolRow, maxAgeMs = QUOTE_FRESHNESS_MS) => {

@@ -227,18 +227,22 @@ class SocketHandler {
     );
   }
 
-  async _runPnLCycle() {
+  async refreshClosedPrices() {
+    return this._runPnLCycle({ forceClosed: true });
+  }
+
+  async _runPnLCycle({ forceClosed = false } = {}) {
     this.pnlDbCounter++;
 
     // ── Pending order check every 30s ─────────────────────────────────────────
-    if (this.pnlDbCounter % PENDING_CHECK_EVERY === 0) {
+    if (!forceClosed && this.pnlDbCounter % PENDING_CHECK_EVERY === 0) {
       tradingService
         .checkPendingOrders()
         .catch((e) => console.error('Pending order check error:', e.message));
     }
 
     // ── Skip live P&L when all markets closed ─────────────────────────────────
-    if (!isAnyMarketOpen()) return;
+    if (!forceClosed && !isAnyMarketOpen()) return;
 
     // ── 1. Fetch all open trades (ONE query) ──────────────────────────────────
     const { data: openTrades, error } = await queueDB(() =>
@@ -318,6 +322,9 @@ class SocketHandler {
         isTradeMarketOpen &&
         !currentPriceState.isOffQuotes &&
         currentPriceState.price > 0;
+      const hasDisplayPrice =
+        hasFreshTradablePrice ||
+        (!isTradeMarketOpen && currentPriceState.price > 0);
 
       const currentPrice = hasFreshTradablePrice
         ? currentPriceState.price
@@ -354,7 +361,7 @@ class SocketHandler {
       }
 
       // Only add to emit list if user is connected
-      if (hasFreshTradablePrice && connectedUserIds.has(trade.accounts.user_id)) {
+      if (hasDisplayPrice && connectedUserIds.has(trade.accounts.user_id)) {
         // ── Smart emit: only send if value changed by > ₹0.01 ─────────────
         const lastPnL  = this._lastEmittedPnL.get(trade.id) ?? null;
         const changed  = lastPnL === null || Math.abs(floatingPnL - lastPnL) >= 0.01;
@@ -474,8 +481,8 @@ class SocketHandler {
     }
 
     // ── 7. Batch DB write every 20s (Pro plan can handle 20s cadence) ─────────
-    if (this.pnlDbCounter % PNL_DB_WRITE_EVERY === 0 && allTradeUpdates.length > 0) {
-      this._batchWritePnL(allTradeUpdates, accountPnL);
+    if ((forceClosed || this.pnlDbCounter % PNL_DB_WRITE_EVERY === 0) && allTradeUpdates.length > 0) {
+      await this._batchWritePnL(allTradeUpdates, accountPnL);
     }
 
     // ── 8. SL/TP closures ─────────────────────────────────────────────────────
@@ -503,7 +510,7 @@ class SocketHandler {
     }
 
     // ── 9. Stop-out check every 20s ───────────────────────────────────────────
-    if (this.pnlDbCounter % STOPOUT_CHECK_EVERY === 0) {
+    if (!forceClosed && this.pnlDbCounter % STOPOUT_CHECK_EVERY === 0) {
       this.checkStopOut(accountPnL).catch((e) =>
         console.error('Stop-out check error:', e.message)
       );

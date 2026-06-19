@@ -528,7 +528,6 @@ class WeeklySettlementService {
               credit_after: 0,          // credit resets to 0
               settlement_type: 'auto_m2m',
               created_at: closeTime,
-              updated_at: closeTime,
             };
 
             const { error: settlementInsertError } = await supabase
@@ -540,7 +539,6 @@ class WeeklySettlementService {
                 old_trade_id,
                 new_trade_id,
                 created_at,
-                updated_at,
                 ...legacySettlementRecord
               } = settlementRecord;
               const { error: legacyInsertError } = await supabase
@@ -735,7 +733,6 @@ class WeeklySettlementService {
               .update({
                 close_price: closePrice,
                 profit_loss: profitLoss,
-                updated_at: now,
               })
               .eq('id', row.id);
 
@@ -814,7 +811,7 @@ class WeeklySettlementService {
 
         const { error: creditErr } = await supabase
           .from('weekly_settlements')
-          .update({ credit_before: nextCreditBefore, updated_at: now })
+          .update({ credit_before: nextCreditBefore })
           .in('id', ids);
 
         if (creditErr) {
@@ -1446,7 +1443,7 @@ class WeeklySettlementService {
 
     const { data, error } = await supabase
       .from('weekly_settlements')
-      .select('settlement_date, created_at, updated_at')
+      .select('settlement_date, created_at')
       .eq('account_id', accountId)
       .lt('created_at', before)
       .order('created_at', { ascending: false })
@@ -1460,7 +1457,7 @@ class WeeklySettlementService {
     const row = data?.[0];
     if (!row) return null;
 
-    const rawTime = row.created_at || row.updated_at || row.settlement_date;
+    const rawTime = row.created_at || row.settlement_date;
     const parsed = rawTime ? new Date(rawTime) : null;
     return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
   }

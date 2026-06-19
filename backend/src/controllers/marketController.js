@@ -110,9 +110,9 @@ const withQuoteFallback = (symbol) => {
       symbol?.ask,
     )
     : firstPositiveNumber(
+      symbol?.close_price,
       symbol?.last_price,
       symbol?.last,
-      symbol?.close_price,
       symbol?.previous_close,
       symbol?.current_price,
       symbol?.bid,
@@ -153,7 +153,7 @@ const withLiveQuote = (symbol) => {
 // In-memory symbol list cache — avoids repeated full-table scans
 let _symbolCache     = null;
 let _symbolCacheTime = 0;
-const SYMBOL_CACHE_TTL_MS = 60_000; // refresh every 60 seconds
+const SYMBOL_CACHE_TTL_MS = 10_000;
 
 /** Get all futures symbols */
 exports.getSymbols = async (req, res) => {
@@ -295,9 +295,9 @@ exports.getQuote = async (req, res) => {
         dbSym.ask,
       )
       : firstPositiveNumber(
+        dbSym.close_price,
         dbSym.last_price,
         dbSym.last,
-        dbSym.close_price,
         dbSym.previous_close,
         dbSym.current_price,
         dbSym.bid,

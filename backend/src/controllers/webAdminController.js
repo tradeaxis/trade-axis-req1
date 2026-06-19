@@ -149,8 +149,8 @@ const getVisibleSymbolPrice = (symbolData = {}) => {
       symbolData.ask,
     )
     : firstPositiveNumber(
-      symbolData.last_price,
       symbolData.close_price,
+      symbolData.last_price,
       symbolData.previous_close,
       symbolData.current_price,
       symbolData.bid,
@@ -328,8 +328,8 @@ const getBestSymbolPrice = (symbolData = {}) => {
       symbolData.ask,
     )
     : firstPositiveNumber(
-      symbolData.last_price,
       symbolData.close_price,
+      symbolData.last_price,
       symbolData.previous_close,
       symbolData.current_price,
       symbolData.bid,
@@ -388,7 +388,7 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
   try {
     const { data: settlements, error } = await supabase
       .from('weekly_settlements')
-      .select('account_id, settlement_date, created_at, updated_at, credit_before, profit_loss')
+      .select('account_id, settlement_date, created_at, credit_before, profit_loss')
       .in('account_id', ids)
       .order('settlement_date', { ascending: false })
       .limit(10000);
@@ -401,7 +401,7 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
           row.created_at ? String(row.created_at).slice(0, 10) : '',
         );
         if (!row.account_id || !settlementDate) return;
-        const executedAt = row.created_at || row.updated_at || `${settlementDate}T01:00:00+05:30`;
+        const executedAt = row.created_at || `${settlementDate}T01:00:00+05:30`;
         const key = `${row.account_id}::${settlementDate}::${executedAt}`;
         if (!groups.has(key)) {
           groups.set(key, {
@@ -512,7 +512,7 @@ exports.updateSettlementBalance = async (req, res) => {
     const cleanSettlementDate = String(settlementDate || '').trim();
     let settlementQuery = supabase
       .from('weekly_settlements')
-      .select('id, account_id, user_id, settlement_date, created_at, updated_at, credit_before')
+      .select('id, account_id, user_id, settlement_date, created_at, credit_before')
       .eq('account_id', account.id)
       .order('settlement_date', { ascending: false })
       .order('created_at', { ascending: false })
@@ -540,7 +540,7 @@ exports.updateSettlementBalance = async (req, res) => {
         row.settlement_date,
         row.created_at ? String(row.created_at).slice(0, 10) : '',
       );
-      const executedAt = row.created_at || row.updated_at || `${date}T01:00:00+05:30`;
+      const executedAt = row.created_at || `${date}T01:00:00+05:30`;
       const key = `${row.account_id}::${date}::${executedAt}`;
       if (!groups.has(key)) {
         groups.set(key, {
@@ -566,10 +566,9 @@ exports.updateSettlementBalance = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Settlement group not found' });
     }
 
-    const now = new Date().toISOString();
     const { data: updatedRows, error: updateError } = await supabase
       .from('weekly_settlements')
-      .update({ credit_before: nextAmount, updated_at: now })
+      .update({ credit_before: nextAmount })
       .in('id', latestGroup.ids)
       .select('id, credit_before');
 
@@ -920,9 +919,11 @@ exports.summary = async (req, res) => {
 
     const users = usersRes.data || [];
     const accounts = accountsRes.data || [];
-    const trades = filterSupersededSettlementTrades(tradesRes.data || []).map(calculateLiveTradeValues);
+    const trades = (await attachVisibleSymbolPrices(filterSupersededSettlementTrades(tradesRes.data || [])))
+      .map(calculateLiveTradeValues);
     const liveOpenPnL = trades.reduce((sum, row) => sum + toNumber(row.profit), 0);
     const liveMargin = trades.reduce((sum, row) => sum + toNumber(row.margin), 0);
+    const totalBalance = accounts.reduce((sum, row) => sum + toNumber(row.balance), 0);
     const balanceAndCredit = accounts.reduce((sum, row) => sum + toNumber(row.balance) + toNumber(row.credit), 0);
     const liveEquity = balanceAndCredit + liveOpenPnL;
     const txns = txnsRes.data || [];
@@ -939,7 +940,7 @@ exports.summary = async (req, res) => {
         marginLevel: liveMargin > 0 ? (liveEquity / liveMargin) * 100 : 0,
         openTrades: trades.length,
         openPnL: liveOpenPnL,
-        totalDrCr: liveOpenPnL,
+        totalDrCr: liveEquity - totalBalance,
         pendingWithdrawals: txns.filter((txn) =>
           String(txn.status).toLowerCase() === 'pending' &&
           [txn.type, txn.transaction_type].includes('withdrawal')
@@ -1000,13 +1001,11 @@ exports.listUsers = async (req, res) => {
 
       const pnlByAccount = new Map();
       const marginByAccount = new Map();
-      const pnlByUser = new Map();
       liveTrades.forEach((trade) => {
         const pnl = toNumber(trade.profit);
         const margin = toNumber(trade.margin);
         pnlByAccount.set(trade.account_id, toNumber(pnlByAccount.get(trade.account_id)) + pnl);
         marginByAccount.set(trade.account_id, toNumber(marginByAccount.get(trade.account_id)) + margin);
-        pnlByUser.set(trade.user_id, toNumber(pnlByUser.get(trade.user_id)) + pnl);
       });
 
       accountsByUserId = activeAccounts.reduce((map, account) => {
@@ -1020,7 +1019,7 @@ exports.listUsers = async (req, res) => {
         const dashboardFreeMargin = dashboardEquity - liveMargin;
         const enrichedAccount = {
           ...account,
-          total_dr_cr: livePnL,
+          total_dr_cr: dashboardEquity - balance,
           open_pnl: livePnL,
           dashboard_equity: dashboardEquity,
           dashboard_margin: liveMargin,
@@ -1034,7 +1033,8 @@ exports.listUsers = async (req, res) => {
       }, new Map());
 
       (users || []).forEach((user) => {
-        user.total_dr_cr = toNumber(pnlByUser.get(user.id));
+        user.total_dr_cr = (accountsByUserId.get(user.id) || [])
+          .reduce((sum, account) => sum + toNumber(account.total_dr_cr), 0);
       });
     }
 

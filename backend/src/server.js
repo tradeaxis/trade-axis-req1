@@ -39,6 +39,7 @@ const SocketHandler       = require('./websocket/socketHandler');
 const kiteService         = require('./services/kiteService');
 const kiteStreamService   = require('./services/kiteStreamService');
 const weeklySettlementService = require('./services/weeklySettlementService');
+const closePriceSnapshotService = require('./services/closePriceSnapshotService');
 
 // ✅ ISSUE 1 FIXED: declare at top of module scope BEFORE any callbacks use it
 let _keepAliveTimer = null;
@@ -468,6 +469,44 @@ const startServer = async () => {
     console.log(`   Manual trigger: POST /api/admin/trigger-settlement`);
     console.log(`   Status check:   GET  /api/admin/settlement-status`);
 
+    const captureClosePrices = async (segment) => {
+      try {
+        const result = await closePriceSnapshotService.capture(segment);
+        if (!result.success) {
+          console.warn(`Closing price snapshot (${segment}) skipped: ${result.message}`);
+        } else {
+          if (result.quotes?.length) {
+            io.emit('prices:snapshot', result.quotes);
+          }
+          await socketHandler.refreshClosedPrices();
+        }
+      } catch (error) {
+        console.error(`Closing price snapshot (${segment}) failed:`, error.message);
+      }
+    };
+
+    nodeCron.schedule(
+      '20 30 15 * * 1-5',
+      () => captureClosePrices('equity'),
+      { timezone: tz },
+    );
+    nodeCron.schedule(
+      '31,34 15 * * 1-5',
+      () => captureClosePrices('equity'),
+      { timezone: tz },
+    );
+    nodeCron.schedule(
+      '20 30 23 * * 1-5',
+      () => captureClosePrices('commodity'),
+      { timezone: tz },
+    );
+    nodeCron.schedule(
+      '31,34 23 * * 1-5',
+      () => captureClosePrices('commodity'),
+      { timezone: tz },
+    );
+    console.log('Closing price snapshots scheduled: 15:30:20/15:31/15:34 and 23:30:20/23:31/23:34 IST');
+
     // ── AUTO-DELETE expired Kite token at 6:05 AM IST daily ──────────────────
     nodeCron.schedule(
       '5 6 * * *',
@@ -578,6 +617,20 @@ const startServer = async () => {
           if (sessionValid) {
             const result = await kiteStreamService.start(io);
             console.log('✅ Kite stream auto-start result:', result);
+            closePriceSnapshotService.captureClosedSegmentsNow()
+              .then((results) => {
+                const quotes = (results || []).flatMap((item) => item?.quotes || []);
+                if (quotes.length) {
+                  io.emit('prices:snapshot', quotes);
+                }
+                if ((results || []).some((item) => item?.success)) {
+                  return socketHandler.refreshClosedPrices();
+                }
+                return null;
+              })
+              .catch((snapshotError) => {
+                console.warn('Closing price catch-up skipped:', snapshotError.message);
+              });
             try {
               const { syncKiteInstruments } = require('./utils/syncKiteInstruments');
               const syncResult = await syncKiteInstruments();

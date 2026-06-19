@@ -309,11 +309,11 @@ const getSymbolPrice = (symbol) => {
   }
 
   return firstPositiveNumber(
+    symbol?.close_price,
+    symbol?.closePrice,
     symbol?.last,
     symbol?.last_price,
     symbol?.lastPrice,
-    symbol?.close_price,
-    symbol?.closePrice,
     symbol?.previous_close,
     symbol?.previousClose,
     symbol?.current_price,
@@ -386,11 +386,11 @@ const getLivePositionPrice = (position, symbols = []) => {
 
   if (!marketOpen) {
     return firstPositiveNumber(
+      symbol?.close_price,
+      symbol?.closePrice,
       symbol?.last,
       symbol?.last_price,
       symbol?.lastPrice,
-      symbol?.close_price,
-      symbol?.closePrice,
       symbol?.previous_close,
       symbol?.previousClose,
       symbol?.current_price,
@@ -4347,7 +4347,6 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
     const type = String(deal.type || deal.transaction_type || deal.side || deal.trade_type || '').toLowerCase();
     const description = String(deal.description || deal.remarks || '').toLowerCase();
     const amount = Number(deal.amount ?? deal.profit ?? 0);
-    const commission = Number(deal.commission ?? deal.brokerage ?? 0);
     const isSettlement = description.includes('settlement') || type.includes('settlement');
 
     if (isSettlement) {
@@ -4358,10 +4357,8 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
 
     if (type.includes('deposit') || description.includes('deposit')) acc.totalDeposits += Math.abs(amount);
     else if (type.includes('withdraw') || description.includes('withdraw')) acc.totalWithdrawals += Math.abs(amount);
-    else if (amount >= 0) acc.totalProfit += amount;
-    else acc.totalLoss += Math.abs(amount);
-
-    acc.totalCommission += commission;
+    else if (deal.source === 'trade' && deal.side === 'exit' && amount >= 0) acc.totalProfit += amount;
+    else if (deal.source === 'trade' && deal.side === 'exit') acc.totalLoss += Math.abs(amount);
     return acc;
   }, {
     totalProfit: 0,
@@ -4373,7 +4370,19 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
     balance: Number(selectedAccount?.balance ?? fallback?.balance ?? 0),
   });
 
-  if (!hasSettlementRow) summary.balanceSettled = Number(fallback?.balanceSettled || 0);
+  summary.totalProfit = Number(fallback?.totalProfit ?? summary.totalProfit);
+  summary.totalLoss = Number(fallback?.totalLoss ?? summary.totalLoss);
+  summary.totalDeposits = Number(fallback?.totalDeposits ?? summary.totalDeposits);
+  summary.totalWithdrawals = Number(fallback?.totalWithdrawals ?? summary.totalWithdrawals);
+  summary.totalCommission = Number(
+    fallback?.openPositionCommission ?? fallback?.totalCommission ?? 0,
+  );
+  const calculatedBalanceSettled =
+    summary.totalProfit - summary.totalLoss - summary.totalCommission;
+  summary.balanceSettled = Number(
+    fallback?.balanceSettled ??
+    (hasSettlementRow ? summary.balanceSettled : calculatedBalanceSettled),
+  );
   return summary;
 }
 
@@ -5199,6 +5208,7 @@ function SettlementPanel() {
     try {
       const res = await api.post('/web-admin/settlement-balance', {
         accountId: editAccountId,
+        userId: editUserId,
         settlementDate: editDate || undefined,
         amount,
       });

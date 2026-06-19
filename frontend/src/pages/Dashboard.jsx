@@ -368,11 +368,11 @@ const getTradeQuotePrice = (trade, quotes = {}, symbols = []) => {
     }
 
     return firstPositiveNumber(
+      quote?.close_price,
+      quote?.closePrice,
       quote?.last,
       quote?.last_price,
       quote?.lastPrice,
-      quote?.close_price,
-      quote?.closePrice,
       quote?.previous_close,
       quote?.previousClose,
       quote?.current_price,
@@ -3423,26 +3423,31 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     }
 
     const exitDeals = filteredDeals.filter((deal) => deal.source === 'trade' && deal.side === 'exit');
+    const openPositionCommission = liveOpenTrades
+      .filter((trade) => String(trade.symbol || '').toUpperCase() === String(dealsSymbolFilter || '').toUpperCase())
+      .reduce(
+        (sum, trade) => sum + Number(trade.buy_brokerage ?? trade.brokerage ?? 0),
+        0,
+      );
+    const totalProfit = exitDeals
+      .filter((deal) => Number(deal.amount || 0) > 0)
+      .reduce((sum, deal) => sum + Number(deal.amount || 0), 0);
+    const totalLoss = Math.abs(
+      exitDeals
+        .filter((deal) => Number(deal.amount || 0) < 0)
+        .reduce((sum, deal) => sum + Number(deal.amount || 0), 0),
+    );
 
     return {
-      totalProfit: exitDeals
-        .filter((deal) => Number(deal.amount || 0) > 0)
-        .reduce((sum, deal) => sum + Number(deal.amount || 0), 0),
-      totalLoss: Math.abs(
-        exitDeals
-          .filter((deal) => Number(deal.amount || 0) < 0)
-          .reduce((sum, deal) => sum + Number(deal.amount || 0), 0),
-      ),
+      totalProfit,
+      totalLoss,
       totalDeposits: 0,
       totalWithdrawals: 0,
-      totalCommission: filteredDeals.reduce(
-        (sum, deal) => sum + Number(deal.commission || deal.brokerage || 0),
-        0,
-      ),
-      balanceSettled: Number(dealsSummary.balanceSettled || 0),
+      totalCommission: openPositionCommission,
+      balanceSettled: totalProfit - totalLoss - openPositionCommission,
       currentBalance: Number(dealsSummary.currentBalance || 0),
     };
-  }, [dealsSummary, filteredDeals, dealsSymbolFilter]);
+  }, [dealsSummary, filteredDeals, dealsSymbolFilter, liveOpenTrades]);
 
   const formatPdfCurrency = (value) => {
     const numericValue = Number(value || 0);

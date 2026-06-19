@@ -196,6 +196,7 @@ export default function AdminPanel() {
     try {
       const res = await api.post('/admin/settlement-balance', {
         accountId: settlementEditAccountId,
+        userId: settlementEditUserId,
         settlementDate: settlementEditDate || undefined,
         amount,
       });

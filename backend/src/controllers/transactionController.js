@@ -2,6 +2,7 @@
 const { supabase } = require('../config/supabase');
 const paymentService = require('../services/paymentService');
 const { getTradeEntryEvents } = require('../utils/tradeCommentEvents');
+const { filterSupersededSettlementTrades } = require('../services/openTradeSnapshot');
 
 const QR_SETTINGS_KEYS = ['qr_deposit_settings', 'qr_settings'];
 const QR_DEPOSIT_REFERENCE_PREFIX = 'QRD';
@@ -1092,14 +1093,35 @@ const getDeals = async (req, res) => {
     const exitDeals = allDeals.filter((d) => d.source === 'trade' && d.side === 'exit');
     const settlementSummaryDeal = currentWindowSettlementDeal || allSettlementDeals[0] || null;
 
+    const netExitAmounts = exitDeals.map((deal) => Number(deal.amount || 0));
+    const totalProfit = netExitAmounts
+      .filter((amount) => amount > 0)
+      .reduce((sum, amount) => sum + amount, 0);
+    const totalLoss = Math.abs(
+      netExitAmounts
+        .filter((amount) => amount < 0)
+        .reduce((sum, amount) => sum + amount, 0)
+    );
+    const openPositionCommission = filterSupersededSettlementTrades(
+      (trades || []).filter((trade) => trade.status === 'open'),
+    ).reduce(
+      (sum, trade) => sum + inferEntryCommission(trade),
+      0,
+    );
+    const calculatedBalanceSettled =
+      totalProfit - totalLoss - openPositionCommission;
+
     const summary = {
-      totalProfit: exitDeals.filter((d) => d.amount > 0).reduce((s, d) => s + d.amount, 0),
-      totalLoss: Math.abs(exitDeals.filter((d) => d.amount < 0).reduce((s, d) => s + d.amount, 0)),
+      totalProfit,
+      totalLoss,
       totalDeposits: allDeals.filter((d) => d.type === 'deposit').reduce((s, d) => s + d.amount, 0),
       totalWithdrawals: Math.abs(allDeals.filter((d) => d.type === 'withdrawal').reduce((s, d) => s + d.amount, 0)),
-      totalCommission: allDeals.reduce((s, d) => s + Number(d.commission || 0), 0),
-      balanceSettled: Number(settlementSummaryDeal?.amount || 0),
-      netPnL: exitDeals.reduce((s, d) => s + d.amount, 0),
+      totalCommission: openPositionCommission,
+      openPositionCommission,
+      balanceSettled: settlementSummaryDeal
+        ? Number(settlementSummaryDeal.amount || 0)
+        : Number(calculatedBalanceSettled.toFixed(2)),
+      netPnL: Number(calculatedBalanceSettled.toFixed(2)),
       currentBalance: Number(account?.balance || 0),
     };
 

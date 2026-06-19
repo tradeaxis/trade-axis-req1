@@ -72,9 +72,9 @@ class MarketDataService {
         d.ask,
       )
       : firstPositiveNumber(
+        d.close_price,
         d.last,
         d.last_price,
-        d.close_price,
         d.previous_close,
         d.current_price,
         d.bid,
