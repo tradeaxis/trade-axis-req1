@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
+const closePriceSnapshotService = require('../services/closePriceSnapshotService');
 const tradingService = require('../services/tradingService');
 const { fetchHolidaysFromKite } = require('../services/marketStatus');
 const {
@@ -1616,6 +1617,23 @@ exports.createKiteSession = async (req, res) => {
       console.warn('⚠️ Stream restart failed:', streamErr.message);
     }
 
+    let closingPriceRepair = [];
+    try {
+      closingPriceRepair = await closePriceSnapshotService.captureClosedSegmentsNow();
+      const repairedQuotes = closingPriceRepair.flatMap((item) => item?.quotes || []);
+      const io = req.app.get('io');
+      if (io && repairedQuotes.length > 0) {
+        io.emit('prices:snapshot', repairedQuotes);
+      }
+
+      if (closingPriceRepair.some((item) => item?.success)) {
+        const socketHandler = req.app.get('socketHandler');
+        await socketHandler?.refreshClosedPrices?.();
+      }
+    } catch (snapshotErr) {
+      console.warn('Closing price repair after Kite login failed:', snapshotErr.message);
+    }
+
     let holidayResult = null;
     try {
       const holidays = await fetchHolidaysFromKite();
@@ -1634,6 +1652,7 @@ exports.createKiteSession = async (req, res) => {
       createdAt: session.createdAt,
       stream: streamResult,
       sync: syncResult,
+      closingPriceRepair,
       holidays: holidayResult,
       authSettings: kiteAuthSettings,
     });

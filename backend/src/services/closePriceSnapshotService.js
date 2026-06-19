@@ -56,15 +56,21 @@ class ClosePriceSnapshotService {
 
     const { data: symbolRows, error } = await supabase
       .from('symbols')
-      .select('symbol, display_name, kite_tradingsymbol, kite_exchange, exchange')
+      .select('*')
       .eq('is_active', true)
       .eq('instrument_type', 'FUT')
+      .not('kite_instrument_token', 'is', null)
       .limit(10000);
 
     if (error) throw error;
 
     const rows = (symbolRows || []).filter(
-      (row) => row.symbol && row.kite_tradingsymbol && isRequestedSegment(row, normalizedSegment),
+      (row) => (
+        row.symbol
+        && row.kite_tradingsymbol
+        && Number(row.kite_instrument_token || 0) > 0
+        && isRequestedSegment(row, normalizedSegment)
+      ),
     );
     const rowByQuoteKey = new Map();
 
@@ -76,6 +82,7 @@ class ClosePriceSnapshotService {
 
     const quoteKeys = [...rowByQuoteKey.keys()];
     const updates = [];
+    let rejectedMismatches = 0;
 
     for (let index = 0; index < quoteKeys.length; index += QUOTE_BATCH_SIZE) {
       const batch = quoteKeys.slice(index, index + QUOTE_BATCH_SIZE);
@@ -89,7 +96,11 @@ class ClosePriceSnapshotService {
       }
 
       batch.forEach((quoteKey) => {
-        const quote = quotes?.[quoteKey] || quotes?.[quoteKey.split(':')[1]];
+        // Kite keys quote responses by EXCHANGE:TRADINGSYMBOL. Do not fall
+        // back to a bare symbol because that can attach another contract's
+        // quote to this row when multiple expiries share an underlying.
+        const quote = quotes?.[quoteKey];
+        const quoteToken = Number(quote?.instrument_token || 0);
         const closePrice = firstPositiveNumber(
           quote?.last_price,
           quote?.lastPrice,
@@ -99,8 +110,17 @@ class ClosePriceSnapshotService {
         if (closePrice <= 0) return;
 
         (rowByQuoteKey.get(quoteKey) || []).forEach((row) => {
+          const rowToken = Number(row.kite_instrument_token || 0);
+          if (!quoteToken || quoteToken !== rowToken) {
+            rejectedMismatches++;
+            console.warn(
+              `Rejected closing price mismatch for ${row.symbol}: expected token ${rowToken}, received ${quoteToken || 'none'}`,
+            );
+            return;
+          }
+
           updates.push({
-            symbol: row.symbol,
+            ...row,
             last_price: closePrice,
             close_price: closePrice,
             bid: closePrice,
@@ -134,6 +154,7 @@ class ClosePriceSnapshotService {
       segment: normalizedSegment,
       updated: updates.length,
       requested: rows.length,
+      rejectedMismatches,
       quotes: updates.map((row) => ({
         symbol: row.symbol,
         last: row.close_price,
@@ -152,15 +173,16 @@ class ClosePriceSnapshotService {
     const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
     const ist = new Date(utcMs + 5.5 * 3600000);
     const day = ist.getDay();
-    if (day === 0 || day === 6) return [];
-
     const minutes = ist.getHours() * 60 + ist.getMinutes();
     const results = [];
 
-    if (minutes > 15 * 60 + 30) {
+    // On weekends every segment is closed, so a backend restart can repair
+    // stale stored prices from Kite's exact last quote without waiting for
+    // Monday. This is especially useful after a deployment or failed snapshot.
+    if (day === 0 || day === 6 || minutes > 15 * 60 + 30) {
       results.push(await this.capture('equity'));
     }
-    if (minutes > 23 * 60 + 30) {
+    if (day === 0 || day === 6 || minutes > 23 * 60 + 30) {
       results.push(await this.capture('commodity'));
     }
 

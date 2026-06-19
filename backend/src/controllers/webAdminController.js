@@ -487,7 +487,7 @@ exports.updateSettlementBalance = async (req, res) => {
 
     let accountQuery = supabase
       .from('accounts')
-      .select('id, user_id, account_number, is_demo, is_active')
+      .select('id, user_id, account_number, is_demo, is_active, balance')
       .limit(1);
 
     if (accountId) {
@@ -510,27 +510,127 @@ exports.updateSettlementBalance = async (req, res) => {
     }
 
     const cleanSettlementDate = String(settlementDate || '').trim();
-    let settlementQuery = supabase
-      .from('weekly_settlements')
-      .select('id, account_id, user_id, settlement_date, created_at, credit_before')
-      .eq('account_id', account.id)
-      .order('settlement_date', { ascending: false })
-      .order('created_at', { ascending: false })
-      .limit(500);
+    const fetchSettlementRows = async (date = '') => {
+      let query = supabase
+        .from('weekly_settlements')
+        .select('id, account_id, user_id, settlement_date, created_at, credit_before')
+        .eq('account_id', account.id)
+        .order('settlement_date', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(500);
 
-    if (cleanSettlementDate) {
-      settlementQuery = settlementQuery.eq('settlement_date', cleanSettlementDate);
+      if (date) query = query.eq('settlement_date', date);
+      return query;
+    };
+
+    let { data: rows, error: rowsError } = await fetchSettlementRows(cleanSettlementDate);
+    if (rowsError) throw rowsError;
+
+    // The calendar date chosen by the admin may be the execution date while
+    // older rows use settlement_week/settlement_date. Treat it as a preferred
+    // date and safely fall back to this account's latest settlement group.
+    const usedLatestFallback = !!cleanSettlementDate && !rows?.length;
+    if (usedLatestFallback) {
+      const latestResult = await fetchSettlementRows();
+      rows = latestResult.data;
+      rowsError = latestResult.error;
+      if (rowsError) throw rowsError;
     }
 
-    const { data: rows, error: rowsError } = await settlementQuery;
-    if (rowsError) throw rowsError;
+    let reconstructedRows = false;
+    if (!rows?.length) {
+      const { data: closedTrades, error: closedTradesError } = await supabase
+        .from('trades')
+        .select('id, user_id, account_id, symbol, trade_type, quantity, open_price, close_price, current_price, profit, brokerage, buy_brokerage, sell_brokerage, close_time, settlement_week, is_settlement_close, comment')
+        .eq('account_id', account.id)
+        .eq('status', 'closed')
+        .order('close_time', { ascending: false })
+        .limit(5000);
+
+      if (closedTradesError) throw closedTradesError;
+
+      const settlementTrades = (closedTrades || []).filter((trade) => (
+        trade.is_settlement_close
+        || /(?:weekly\s+)?settlement\s+close/i.test(String(trade.comment || ''))
+      ));
+
+      const tradeSettlementDate = (trade) => firstNonEmptyString(
+        trade.settlement_week,
+        trade.close_time ? String(trade.close_time).slice(0, 10) : '',
+      );
+
+      let targetTrades = cleanSettlementDate
+        ? settlementTrades.filter((trade) => tradeSettlementDate(trade) === cleanSettlementDate)
+        : [];
+
+      if (!targetTrades.length && settlementTrades.length) {
+        const latestDate = tradeSettlementDate(settlementTrades[0]);
+        targetTrades = settlementTrades.filter((trade) => tradeSettlementDate(trade) === latestDate);
+      }
+
+      if (targetTrades.length) {
+        const targetDate = tradeSettlementDate(targetTrades[0]) || cleanSettlementDate || formatDateInIst(new Date());
+        const createdAt = targetTrades[0].close_time || `${targetDate}T01:00:00+05:30`;
+        const balance = toNumber(account.balance);
+        const records = targetTrades.map((trade) => ({
+          user_id: trade.user_id || account.user_id,
+          account_id: account.id,
+          old_trade_id: trade.id,
+          new_trade_id: null,
+          settlement_date: targetDate,
+          symbol: trade.symbol,
+          trade_type: trade.trade_type,
+          quantity: toNumber(trade.quantity),
+          open_price: toNumber(trade.open_price),
+          close_price: toNumber(trade.close_price || trade.current_price || trade.open_price),
+          profit_loss: toNumber(trade.profit),
+          commission: toNumber(trade.sell_brokerage || trade.brokerage || 0),
+          balance_before: balance,
+          balance_after: balance,
+          credit_before: nextAmount,
+          credit_after: 0,
+          settlement_type: 'manual_balance_repair',
+          created_at: createdAt,
+        }));
+
+        let insertResult = await supabase
+          .from('weekly_settlements')
+          .insert(records)
+          .select('id, account_id, user_id, settlement_date, created_at, credit_before');
+
+        if (
+          insertResult.error
+          && /old_trade_id|new_trade_id|created_at|settlement_type|credit_after/i.test(
+            insertResult.error.message || '',
+          )
+        ) {
+          const legacyRecords = records.map((record) => {
+            const {
+              old_trade_id,
+              new_trade_id,
+              created_at,
+              settlement_type,
+              credit_after,
+              ...legacyRecord
+            } = record;
+            return legacyRecord;
+          });
+          insertResult = await supabase
+            .from('weekly_settlements')
+            .insert(legacyRecords)
+            .select('id, account_id, user_id, settlement_date, created_at, credit_before');
+        }
+
+        if (insertResult.error) throw insertResult.error;
+        rows = insertResult.data || [];
+        reconstructedRows = rows.length > 0;
+      }
+    }
 
     if (!rows?.length) {
       return res.status(404).json({
         success: false,
-        message: cleanSettlementDate
-          ? 'No settlement rows found for selected date'
-          : 'No settlement rows found for selected account',
+        message: 'No settlement history exists for the selected account',
       });
     }
 
@@ -585,7 +685,11 @@ exports.updateSettlementBalance = async (req, res) => {
         amount: nextAmount,
         rows: updatedRows?.length || 0,
       },
-      message: 'Balance settled value updated',
+      message: reconstructedRows
+        ? `Missing settlement history was repaired and balance settled was updated for ${latestGroup.settlementDate}`
+        : usedLatestFallback
+        ? `No settlement was stored for ${cleanSettlementDate}; the latest settlement (${latestGroup.settlementDate}) was updated`
+        : 'Balance settled value updated',
     });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });

@@ -163,21 +163,6 @@ class KiteService {
       console.log('✅ Kite session created successfully');
       console.log('   In-memory token (first 10):', this.accessToken.substring(0, 10) + '...');
 
-      // Keep the previous close visible until fresh live ticks arrive.
-      // The stream will overwrite these values as soon as Kite starts sending data.
-      try {
-        await supabase
-          .from('symbols')
-          .update({
-            last_update: new Date().toISOString(),
-          })
-          .eq('is_active', true)
-          .eq('instrument_type', 'FUT');
-        console.log('✅ Preserved last prices until live stream refreshes them');
-      } catch (clearErr) {
-        console.warn('⚠️ Could not touch symbol timestamps:', clearErr.message);
-      }
-
       return {
         accessToken: this.accessToken,
         userId: session.user_id,

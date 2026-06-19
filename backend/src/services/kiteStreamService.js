@@ -649,37 +649,49 @@ class KiteStreamService {
         try {
           const { data: existingRows, error: existingError } = await supabase
             .from('symbols')
-            .select('symbol')
+            .select('*')
             .in('symbol', symbols);
 
           if (existingError) throw existingError;
 
-          const existingSymbols = new Set(
-            (existingRows || []).map((row) => String(row.symbol || '').toUpperCase()),
+          const existingBySymbol = new Map(
+            (existingRows || []).map((row) => [
+              String(row.symbol || '').toUpperCase(),
+              row,
+            ]),
           );
 
           const rows = chunk
-            .filter(({ sym }) => existingSymbols.has(String(sym || '').toUpperCase()))
-            .map(({ sym, price }) => ({
-            symbol:         sym,
-            last_price:     price.last,
-            bid:            price.bid,
-            ask:            price.ask,
-            open_price:     price.open,
-            high_price:     price.high,
-            low_price:      price.low,
-            previous_close: price.prevClose,
-            change_value:   price.change,
-            change_percent: price.changePct,
-            volume:         price.volume,
-            last_update:    now,
-          }));
+            .filter(({ sym }) => existingBySymbol.has(String(sym || '').toUpperCase()))
+            .map(({ sym, price }) => {
+              const existing = existingBySymbol.get(String(sym || '').toUpperCase());
+              return {
+                ...existing,
+                symbol:         sym,
+                last_price:     price.last,
+                // Keep an exact-token rolling close candidate throughout the
+                // session. At market close the final tick remains available
+                // even if the scheduled REST snapshot or next token fails.
+                close_price:    price.last,
+                bid:            price.bid,
+                ask:            price.ask,
+                open_price:     price.open,
+                high_price:     price.high,
+                low_price:      price.low,
+                previous_close: price.prevClose,
+                change_value:   price.change,
+                change_percent: price.changePct,
+                volume:         price.volume,
+                last_update:    now,
+              };
+            });
 
           if (rows.length === 0) continue;
 
-          await supabase
+          const { error: upsertError } = await supabase
             .from('symbols')
             .upsert(rows, { onConflict: 'symbol', ignoreDuplicates: false });
+          if (upsertError) throw upsertError;
 
         } catch (err) {
           // Non-fatal — live prices still flowing via socket

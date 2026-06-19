@@ -617,6 +617,19 @@ const startServer = async () => {
           if (sessionValid) {
             const result = await kiteStreamService.start(io);
             console.log('✅ Kite stream auto-start result:', result);
+            try {
+              const { syncKiteInstruments } = require('./utils/syncKiteInstruments');
+              const syncResult = await syncKiteInstruments();
+              if (syncResult.success && syncResult.upserted > 0) {
+                console.log(`📊 Auto-synced ${syncResult.upserted} new instruments`);
+                await kiteStreamService.refreshSubscriptions();
+                console.log('🔄 Stream refreshed with new tokens');
+              } else {
+                console.log('📊 All instruments already in sync');
+              }
+            } catch (syncErr) {
+              console.warn('⚠️ Auto instrument sync failed:', syncErr.message);
+            }
             closePriceSnapshotService.captureClosedSegmentsNow()
               .then((results) => {
                 const quotes = (results || []).flatMap((item) => item?.quotes || []);
@@ -631,19 +644,6 @@ const startServer = async () => {
               .catch((snapshotError) => {
                 console.warn('Closing price catch-up skipped:', snapshotError.message);
               });
-            try {
-              const { syncKiteInstruments } = require('./utils/syncKiteInstruments');
-              const syncResult = await syncKiteInstruments();
-              if (syncResult.success && syncResult.upserted > 0) {
-                console.log(`📊 Auto-synced ${syncResult.upserted} new instruments`);
-                await kiteStreamService.refreshSubscriptions();
-                console.log('🔄 Stream refreshed with new tokens');
-              } else {
-                console.log('📊 All instruments already in sync');
-              }
-            } catch (syncErr) {
-              console.warn('⚠️ Auto instrument sync failed:', syncErr.message);
-            }
           }
         } else {
           console.log('ℹ️ Kite session not ready. Admin must create session daily.');

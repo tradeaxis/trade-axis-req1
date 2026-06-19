@@ -109,7 +109,6 @@ async function syncKiteInstruments() {
     // ── 4. Build rows for every contract ────────────────────────────────────
     const rows          = [];
     const byUnderlying  = new Map();    // underlying → [instruments]
-    const nowISO        = new Date().toISOString();
 
     for (const inst of futures) {
       const ts         = String(inst.tradingsymbol).toUpperCase();
@@ -142,7 +141,6 @@ async function syncKiteInstruments() {
         series:                null,
         is_active:             true,
         trading_hours:         getTradingHours(exchange),
-        last_update:           nowISO,
         original_lot_size:     Number(inst.lot_size || 1),
       });
 
@@ -188,7 +186,6 @@ async function syncKiteInstruments() {
           series:                seriesNames[i],
           is_active:             true,
           trading_hours:         getTradingHours(exchange),
-          last_update:           nowISO,
           original_lot_size:     Number(inst.lot_size || 1),
         });
       }
@@ -211,7 +208,6 @@ async function syncKiteInstruments() {
         tick_size: Number(row.tick_size || 0.05),
         original_lot_size: Number(row.original_lot_size || row.lot_size || 1),
         is_active: true,
-        last_update: nowISO,
       });
       rowSymbols.add(row.symbol);
       preservedCount++;
