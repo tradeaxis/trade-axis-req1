@@ -476,6 +476,49 @@ const getSettlementBalancesByAccount = async (accountIds = []) => {
   return balances;
 };
 
+const getMissingSchemaColumn = (error) => {
+  const message = `${error?.message || ''} ${error?.details || ''}`;
+  const schemaCacheMatch = message.match(/Could not find the ['"]([^'"]+)['"] column/i);
+  if (schemaCacheMatch) return schemaCacheMatch[1];
+
+  const postgresMatch = message.match(/column (?:[\w]+\.)?["']?([\w]+)["']? does not exist/i);
+  return postgresMatch ? postgresMatch[1] : '';
+};
+
+const insertSettlementRowsCompat = async (records = []) => {
+  let payload = records.map((record) => ({ ...record }));
+  const removedColumns = [];
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = await supabase
+      .from('weekly_settlements')
+      .insert(payload)
+      .select('id, account_id, user_id, settlement_date, created_at, credit_before');
+
+    if (!result.error) {
+      return { ...result, removedColumns };
+    }
+
+    const missingColumn = getMissingSchemaColumn(result.error);
+    if (!missingColumn || !payload.some((row) => Object.hasOwn(row, missingColumn))) {
+      return { ...result, removedColumns };
+    }
+
+    removedColumns.push(missingColumn);
+    payload = payload.map((row) => {
+      const next = { ...row };
+      delete next[missingColumn];
+      return next;
+    });
+  }
+
+  return {
+    data: null,
+    error: new Error('Could not match the weekly_settlements table schema'),
+    removedColumns,
+  };
+};
+
 exports.updateSettlementBalance = async (req, res) => {
   try {
     const { accountId = '', userId = '', settlementDate = '', amount } = req.body || {};
@@ -593,35 +636,14 @@ exports.updateSettlementBalance = async (req, res) => {
           created_at: createdAt,
         }));
 
-        let insertResult = await supabase
-          .from('weekly_settlements')
-          .insert(records)
-          .select('id, account_id, user_id, settlement_date, created_at, credit_before');
-
-        if (
-          insertResult.error
-          && /old_trade_id|new_trade_id|created_at|settlement_type|credit_after/i.test(
-            insertResult.error.message || '',
-          )
-        ) {
-          const legacyRecords = records.map((record) => {
-            const {
-              old_trade_id,
-              new_trade_id,
-              created_at,
-              settlement_type,
-              credit_after,
-              ...legacyRecord
-            } = record;
-            return legacyRecord;
-          });
-          insertResult = await supabase
-            .from('weekly_settlements')
-            .insert(legacyRecords)
-            .select('id, account_id, user_id, settlement_date, created_at, credit_before');
-        }
+        const insertResult = await insertSettlementRowsCompat(records);
 
         if (insertResult.error) throw insertResult.error;
+        if (insertResult.removedColumns?.length) {
+          console.warn(
+            `Settlement history repair used legacy schema; omitted: ${insertResult.removedColumns.join(', ')}`,
+          );
+        }
         rows = insertResult.data || [];
         reconstructedRows = rows.length > 0;
       }
