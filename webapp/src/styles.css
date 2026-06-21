@@ -1520,8 +1520,22 @@ tr:last-child td {
 
 .trade-refresh-row {
   display: flex;
+  align-items: center;
+  gap: 8px;
   justify-content: flex-end;
   margin: 8px 0;
+}
+
+.trade-refresh-row .compact-select {
+  width: auto;
+  min-width: 92px;
+}
+
+.history-deal-filter {
+  display: grid;
+  grid-template-columns: minmax(180px, 280px) minmax(220px, 1fr);
+  gap: 8px;
+  margin: 10px 0;
 }
 
 .trade-action-bar {
@@ -2099,6 +2113,14 @@ tr:last-child td {
     width: 100%;
     max-width: none;
     min-width: 0;
+  }
+
+  .trade-refresh-row .compact-select {
+    width: 92px;
+  }
+
+  .history-deal-filter {
+    grid-template-columns: 1fr;
   }
 
   .account-switcher .btn {

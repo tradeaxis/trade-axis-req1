@@ -780,6 +780,7 @@ const Dashboard = () => {
   const [entryPrice, setEntryPrice] = useState('');
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [tradeTabSection, setTradeTabSection] = useState('positions');
+  const [tradePositionSort, setTradePositionSort] = useState('asc');
   // const [modifyModal, setModifyModal] = useState(null);
   const [expandedTradeId, setExpandedTradeId] = useState(null);
   const [closeConfirmTrade, setCloseConfirmTrade] = useState(null);
@@ -1338,6 +1339,16 @@ const Dashboard = () => {
       };
     }),
     [openTrades, quotes, quoteSymbols, marketStatus],
+  );
+  const sortedLiveOpenTrades = useMemo(
+    () => [...liveOpenTrades].sort((a, b) => {
+      const comparison = String(a.symbol || '').localeCompare(String(b.symbol || ''), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      });
+      return tradePositionSort === 'desc' ? -comparison : comparison;
+    }),
+    [liveOpenTrades, tradePositionSort],
   );
   const totalPnL = liveOpenTrades.reduce((sum, t) => sum + Number(t.live_profit ?? t.profit ?? 0), 0);
 
@@ -3346,6 +3357,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
   // ── Deals symbol filter ──
   const [dealsSymbolFilter, setDealsSymbolFilter] = useState('');
+  const [dealsCustomFilter, setDealsCustomFilter] = useState('');
   const [showDealsSymbolDropdown, setShowDealsSymbolDropdown] = useState(false);
   const dealsDropdownRef = useRef(null);
 
@@ -3409,9 +3421,21 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
   // ── Filtered deals ──
   const filteredDeals = useMemo(() => {
+    if (dealsSymbolFilter === '__custom__') {
+      const query = dealsCustomFilter.trim().toLowerCase();
+      if (!query) return deals || [];
+      return (deals || []).filter((deal) => [
+        deal.symbol,
+        deal.dealLabel,
+        deal.description,
+        deal.remarks,
+        deal.type,
+        deal.side,
+      ].some((value) => String(value || '').toLowerCase().includes(query)));
+    }
     if (!dealsSymbolFilter) return deals || [];
     return (deals || []).filter((d) => d.symbol === dealsSymbolFilter);
-  }, [deals, dealsSymbolFilter]);
+  }, [deals, dealsSymbolFilter, dealsCustomFilter]);
 
   const currentDealsSummary = useMemo(() => {
     if (!dealsSummary) {
@@ -3424,7 +3448,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
 
     const exitDeals = filteredDeals.filter((deal) => deal.source === 'trade' && deal.side === 'exit');
     const openPositionCommission = liveOpenTrades
-      .filter((trade) => String(trade.symbol || '').toUpperCase() === String(dealsSymbolFilter || '').toUpperCase())
+      .filter((trade) => (
+        dealsSymbolFilter === '__custom__'
+          ? String(trade.symbol || '').toLowerCase().includes(dealsCustomFilter.trim().toLowerCase())
+          : String(trade.symbol || '').toUpperCase() === String(dealsSymbolFilter || '').toUpperCase()
+      ))
       .reduce(
         (sum, trade) => sum + Number(trade.buy_brokerage ?? trade.brokerage ?? 0),
         0,
@@ -3447,7 +3475,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       balanceSettled: totalProfit - totalLoss - openPositionCommission,
       currentBalance: Number(dealsSummary.currentBalance || 0),
     };
-  }, [dealsSummary, filteredDeals, dealsSymbolFilter, liveOpenTrades]);
+  }, [dealsSummary, filteredDeals, dealsSymbolFilter, dealsCustomFilter, liveOpenTrades]);
 
   const formatPdfCurrency = (value) => {
     const numericValue = Number(value || 0);
@@ -4912,7 +4940,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       {[
           {
             id: 'positions',
-            label: `Positions (${liveOpenTrades.length})`,
+            label: `Positions (${sortedLiveOpenTrades.length})`,
           },
           {
             id: 'pending',
@@ -4937,6 +4965,25 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         ))}
       </div>
 
+      {tradeTabSection === 'positions' && sortedLiveOpenTrades.length > 1 && (
+        <div className="flex justify-end px-3 py-2 border-b" style={{ borderColor: '#363a45' }}>
+          <select
+            value={tradePositionSort}
+            onChange={(event) => setTradePositionSort(event.target.value)}
+            className="px-2 py-1.5 rounded-lg text-xs font-medium"
+            style={{
+              background: theme === 'light' ? '#f1f5f9' : '#252832',
+              border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
+              color: theme === 'light' ? '#1e293b' : '#d1d4dc',
+            }}
+            aria-label="Sort positions"
+          >
+            <option value="asc">A-Z</option>
+            <option value="desc">Z-A</option>
+          </select>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto">
         {tradeTabSection === 'positions' && (
           <>
@@ -4957,7 +5004,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               </div>
             )}
 
-            {liveOpenTrades.length === 0 ? (
+            {sortedLiveOpenTrades.length === 0 ? (
               <div
                 className="p-8 text-center"
                 style={{ color: '#787b86' }}
@@ -4969,7 +5016,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                 <div className="text-base">No open positions</div>
               </div>
             ) : (
-              liveOpenTrades.map((trade) => {
+              sortedLiveOpenTrades.map((trade) => {
                 const pnl = Number(trade.live_profit ?? trade.profit ?? 0);
                 const isProfit = pnl >= 0;
                 const isExpanded = expandedTradeId === trade.id;
@@ -5560,7 +5607,13 @@ const renderOrderConfirmation = () => {
                 >
                   <span>
                     {historyViewMode === 'deals'
-                      ? (dealsSymbolFilter ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols) : 'All Symbols')
+                      ? (
+                        dealsSymbolFilter === '__custom__'
+                          ? 'Custom'
+                          : dealsSymbolFilter
+                            ? formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)
+                            : 'All Symbols'
+                      )
                       : (historyLocalSymbolFilter ? formatDisplaySymbol(historyLocalSymbolFilter, allFuturesSymbols) : 'All Symbols')}
                   </span>
                   <ChevronDown size={16} color={textMuted} />
@@ -5585,6 +5638,13 @@ const renderOrderConfirmation = () => {
                         {formatDisplaySymbol(sym, allFuturesSymbols)}
                       </button>
                     ))}
+                    <button
+                      onClick={() => { setDealsSymbolFilter('__custom__'); setShowDealsSymbolDropdown(false); }}
+                      className="w-full px-3 py-2 text-left text-sm hover:bg-white/5"
+                      style={{ color: dealsSymbolFilter === '__custom__' ? '#2962ff' : textPrimary }}
+                    >
+                      Custom
+                    </button>
                   </div>
                 )}
               </div>
@@ -5602,6 +5662,16 @@ const renderOrderConfirmation = () => {
                 </button>
               )}
             </div>
+          )}
+
+          {historyViewMode === 'deals' && dealsSymbolFilter === '__custom__' && (
+            <input
+              value={dealsCustomFilter}
+              onChange={(event) => setDealsCustomFilter(event.target.value)}
+              placeholder="Search script, settlement or adjustment"
+              className="w-full mt-2 px-3 py-2 rounded-lg text-sm"
+              style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
+            />
           )}
         </div>
 

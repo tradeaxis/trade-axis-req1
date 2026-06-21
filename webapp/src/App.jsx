@@ -1756,6 +1756,7 @@ function Trade({ selectedAccount, refreshAuth }) {
   const [closeTarget, setCloseTarget] = useState(null);
   const [tradeView, setTradeView] = useState('positions');
   const [modifyOrder, setModifyOrder] = useState(null);
+  const [positionSort, setPositionSort] = useState('asc');
 
   const accountId = selectedAccount?.id;
 
@@ -1914,7 +1915,13 @@ function Trade({ selectedAccount, refreshAuth }) {
     if (!Number(existing.stop_loss || 0) && Number(position.stop_loss || 0)) existing.stop_loss = position.stop_loss;
     if (!Number(existing.take_profit || 0) && Number(position.take_profit || 0)) existing.take_profit = position.take_profit;
     return map;
-  }, new Map()).values());
+  }, new Map()).values()).sort((a, b) => {
+    const comparison = String(a.symbol || '').localeCompare(String(b.symbol || ''), undefined, {
+      sensitivity: 'base',
+      numeric: true,
+    });
+    return positionSort === 'desc' ? -comparison : comparison;
+  });
   const floatingPnl = groupedPositions.reduce((sum, row) => sum + Number(row.livePnl || 0), 0);
   const usedMargin = Number(selectedAccount?.margin || groupedPositions.reduce((sum, row) => sum + Number(row.margin || 0), 0));
   const balance = Number(selectedAccount?.balance || 0);
@@ -1948,6 +1955,15 @@ function Trade({ selectedAccount, refreshAuth }) {
         <button type="button" className={`tab ${tradeView === 'pending' ? 'active' : ''}`} onClick={() => setTradeView('pending')}>Pending ({orders.length})</button>
       </div>
       <div className="trade-refresh-row">
+        <select
+          className="select compact-select"
+          value={positionSort}
+          onChange={(event) => setPositionSort(event.target.value)}
+          aria-label="Sort positions"
+        >
+          <option value="asc">A-Z</option>
+          <option value="desc">Z-A</option>
+        </select>
         <button type="button" className="btn subtle" onClick={refreshTrade}><RefreshCw size={16} />Refresh</button>
       </div>
 
@@ -2319,6 +2335,8 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
   const [period, setPeriod] = useState('today');
   const [view, setView] = useState('deals');
   const [loading, setLoading] = useState(false);
+  const [dealScriptFilter, setDealScriptFilter] = useState('');
+  const [customDealFilter, setCustomDealFilter] = useState('');
 
   const load = useCallback(async () => {
     if (!selectedAccount?.id) return;
@@ -2378,6 +2396,36 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
       toast.error('Failed to refresh history');
     }
   };
+
+  const dealScripts = useMemo(
+    () => [...new Set((deals || []).map((deal) => deal.symbol).filter(Boolean))]
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true })),
+    [deals],
+  );
+  const visibleDeals = useMemo(() => {
+    if (dealScriptFilter === '__custom__') {
+      const query = customDealFilter.trim().toLowerCase();
+      if (!query) return deals;
+      return deals.filter((deal) => [
+        deal.symbol,
+        deal.dealLabel,
+        deal.description,
+        deal.remarks,
+        deal.type,
+        deal.side,
+      ].some((value) => String(value || '').toLowerCase().includes(query)));
+    }
+    if (!dealScriptFilter) return deals;
+    return deals.filter((deal) => String(deal.symbol || '') === dealScriptFilter);
+  }, [deals, dealScriptFilter, customDealFilter]);
+  const visibleDealsSummary = useMemo(
+    () => (
+      dealScriptFilter
+        ? buildFilteredDealsSummary(visibleDeals, {}, selectedAccount)
+        : dealsSummary
+    ),
+    [dealScriptFilter, dealsSummary, selectedAccount, visibleDeals],
+  );
 
   return (
     <div className="card pad history-panel compact-workspace-panel">
@@ -2495,17 +2543,39 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
 
       {view === 'deals' && (
         <>
+          <div className="history-deal-filter">
+            <select
+              className="select"
+              value={dealScriptFilter}
+              onChange={(event) => {
+                setDealScriptFilter(event.target.value);
+                if (event.target.value !== '__custom__') setCustomDealFilter('');
+              }}
+            >
+              <option value="">All Scripts</option>
+              {dealScripts.map((symbol) => <option key={symbol} value={symbol}>{symbol}</option>)}
+              <option value="__custom__">Custom</option>
+            </select>
+            {dealScriptFilter === '__custom__' && (
+              <input
+                className="input"
+                value={customDealFilter}
+                onChange={(event) => setCustomDealFilter(event.target.value)}
+                placeholder="Search script, settlement or adjustment"
+              />
+            )}
+          </div>
           <div className="deals-summary-strip">
-            <div><span>Profit:</span><strong className="positive-blue">{formatMoney(dealsSummary?.totalProfit || 0)}</strong></div>
-            <div><span>Loss:</span><strong className="negative">{formatMoney(dealsSummary?.totalLoss || 0)}</strong></div>
-            <div><span>Deposits:</span><strong className="positive-blue">{formatMoney(dealsSummary?.totalDeposits || 0)}</strong></div>
-            <div><span>Withdrawals:</span><strong className="negative">{formatMoney(dealsSummary?.totalWithdrawals || 0)}</strong></div>
-            <div><span>Commission:</span><strong>{formatMoney(dealsSummary?.totalCommission || 0)}</strong></div>
-            <div><span>Balance Settled:</span><strong className={Number(dealsSummary?.balanceSettled || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(dealsSummary?.balanceSettled || 0)}</strong></div>
-            <div><span>Balance:</span><strong>{formatMoney(dealsSummary?.balance || selectedAccount?.balance || 0)}</strong></div>
+            <div><span>Profit:</span><strong className="positive-blue">{formatMoney(visibleDealsSummary?.totalProfit || 0)}</strong></div>
+            <div><span>Loss:</span><strong className="negative">{formatMoney(visibleDealsSummary?.totalLoss || 0)}</strong></div>
+            <div><span>Deposits:</span><strong className="positive-blue">{formatMoney(visibleDealsSummary?.totalDeposits || 0)}</strong></div>
+            <div><span>Withdrawals:</span><strong className="negative">{formatMoney(visibleDealsSummary?.totalWithdrawals || 0)}</strong></div>
+            <div><span>Commission:</span><strong>{formatMoney(visibleDealsSummary?.totalCommission || 0)}</strong></div>
+            <div><span>Balance Settled:</span><strong className={Number(visibleDealsSummary?.balanceSettled || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(visibleDealsSummary?.balanceSettled || 0)}</strong></div>
+            <div><span>Balance:</span><strong>{formatMoney(visibleDealsSummary?.balance || selectedAccount?.balance || 0)}</strong></div>
           </div>
           <div className="deal-ledger-list">
-            {deals.map((deal) => {
+            {visibleDeals.map((deal) => {
               const amount = Number(deal.amount || deal.profit || 0);
               const side = deal.side || deal.trade_type || deal.type || '-';
               const qty = Number(deal.quantity || 0);
@@ -2539,7 +2609,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
                 </div>
               );
             })}
-            {!deals.length && <div className="empty-state compact-empty"><span>No deals found</span></div>}
+            {!visibleDeals.length && <div className="empty-state compact-empty"><span>No deals found</span></div>}
           </div>
         </>
       )}
@@ -3977,7 +4047,7 @@ function LedgerUpdateEditor({ user, onSaved }) {
       const res = await api.get('/web-admin/action-ledger', {
         params: { scope: 'selected', userId: user.id, limit: 5000 },
       });
-      setRows((res.data?.data || []).filter((row) => row.source === 'Transaction'));
+      setRows((res.data?.data || []).filter((row) => ['Transaction', 'Settlement'].includes(row.source)));
     } catch (error) {
       toast.error(error.response?.data?.message || 'Ledger history failed');
     } finally {
@@ -4028,8 +4098,12 @@ function LedgerUpdateEditor({ user, onSaved }) {
           <tbody>
             {loading && <tr><td colSpan="6">Loading ledger...</td></tr>}
             {!loading && rows.map((row) => {
-              const isDebit = String(row.action || '').includes('WITHDRAW') || Number(row.balanceAfter) < Number(row.balanceBefore);
-              const signedAmount = isDebit ? -Math.abs(Number(row.amount || 0)) : Math.abs(Number(row.amount || 0));
+              const rawAmount = Number(row.amount || 0);
+              const isDebit = rawAmount < 0
+                || String(row.action || '').includes('WITHDRAW')
+                || /\b(debit|withdraw|reduced)\b/i.test(String(row.message || ''))
+                || Number(row.balanceAfter) < Number(row.balanceBefore);
+              const signedAmount = isDebit ? -Math.abs(rawAmount) : Math.abs(rawAmount);
               return (
                 <tr key={row.id}>
                   <td>{formatDate(row.date)}</td>

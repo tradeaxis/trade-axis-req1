@@ -951,9 +951,51 @@ exports.actionLedger = async (req, res) => {
       .limit(maxRows);
     tradeQuery = applyDateRange(applyUserScope(tradeQuery), 'created_at');
 
-    const [transactionsResult, tradesResult] = await Promise.all([transactionQuery, tradeQuery]);
+    let settlementQuery = supabase
+      .from('weekly_settlements')
+      .select('*')
+      .order('settlement_date', { ascending: false })
+      .limit(maxRows);
+    settlementQuery = applyUserScope(settlementQuery);
+    if (from) settlementQuery = settlementQuery.gte('settlement_date', from);
+    if (to) settlementQuery = settlementQuery.lte('settlement_date', to);
+
+    const [transactionsResult, tradesResult, settlementsResult] = await Promise.all([
+      transactionQuery,
+      tradeQuery,
+      settlementQuery,
+    ]);
     if (transactionsResult.error) throw transactionsResult.error;
     if (tradesResult.error) throw tradesResult.error;
+
+    const settlementGroups = new Map();
+    if (!settlementsResult.error) {
+      (settlementsResult.data || []).forEach((row) => {
+        const date = firstNonEmptyString(
+          row.settlement_date,
+          row.created_at ? String(row.created_at).slice(0, 10) : '',
+        );
+        const executedAt = row.created_at || `${date}T01:00:00+05:30`;
+        const key = `${row.account_id || ''}::${date}::${executedAt}`;
+        if (!settlementGroups.has(key)) {
+          settlementGroups.set(key, {
+            id: `settlement-${key}`,
+            user_id: row.user_id,
+            account_id: row.account_id,
+            date: executedAt,
+            source: 'Settlement',
+            action: 'SETTLEMENT',
+            amount: toNumber(row.credit_before),
+            status: 'completed',
+            tradeCount: 0,
+            symbols: new Set(),
+          });
+        }
+        const group = settlementGroups.get(key);
+        group.tradeCount += 1;
+        if (row.symbol) group.symbols.add(String(row.symbol).toUpperCase());
+      });
+    }
 
     const allRows = [
       ...(transactionsResult.data || []).map((row) => ({
@@ -982,6 +1024,11 @@ exports.actionLedger = async (req, res) => {
         status: row.status || '-',
         message: `${String(row.trade_type || '').toUpperCase()} ${row.quantity || 0} ${row.symbol || ''} @ ${toNumber(row.open_price).toFixed(2)}${row.comment ? ` - ${row.comment}` : ''}`,
         brokerage: row.brokerage,
+      })),
+      ...[...settlementGroups.values()].map((group) => ({
+        ...group,
+        message: `Balance settled | ${group.tradeCount} trade${group.tradeCount === 1 ? '' : 's'}${group.symbols.size ? ` | ${[...group.symbols].join(', ')}` : ''}`,
+        symbols: undefined,
       })),
     ].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
 

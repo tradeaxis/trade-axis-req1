@@ -973,8 +973,16 @@ const getDeals = async (req, res) => {
       const description = txn.description || txn.note || '';
       const time = txn.processed_at || txn.created_at;
       const isAdminAdjustment = /admin/i.test(description);
+      const remarkType = String(description.match(/^\[([^\]]+)\]/)?.[1] || '')
+        .trim()
+        .toLowerCase();
+      const isSettlementEntry = txnType === 'settlement' || remarkType === 'settlement';
+      const isAdjustmentEntry = txnType === 'adjustment' || remarkType === 'adjustment';
+      const isRegisterBalanceEntry = txnType === 'register_balance' || remarkType === 'register balance';
+      const descriptionIndicatesDebit = /\b(debit|withdraw|reduced)\b/i.test(description);
+      const signedAmount = descriptionIndicatesDebit ? -Math.abs(amount) : amount;
 
-      if (txnType === 'deposit') {
+      if (txnType === 'deposit' && !isSettlementEntry && !isAdjustmentEntry && !isRegisterBalanceEntry) {
         allDeals.push({
           id: `deposit-${txn.id}`,
           source: 'transaction',
@@ -997,7 +1005,7 @@ const getDeals = async (req, res) => {
         return;
       }
 
-      if (['withdraw', 'withdrawal'].includes(txnType)) {
+      if (['withdraw', 'withdrawal'].includes(txnType) && !isSettlementEntry && !isAdjustmentEntry) {
         allDeals.push({
           id: `withdrawal-${txn.id}`,
           source: 'transaction',
@@ -1020,17 +1028,31 @@ const getDeals = async (req, res) => {
         return;
       }
 
-      if (amount !== 0) {
+      if (amount !== 0 || isSettlementEntry || isAdjustmentEntry || isRegisterBalanceEntry) {
+        const entryType = isSettlementEntry
+          ? 'settlement'
+          : isAdjustmentEntry
+            ? 'adjustment'
+            : isRegisterBalanceEntry
+              ? 'register_balance'
+              : signedAmount >= 0 ? 'deposit' : 'withdrawal';
+        const dealLabel = isSettlementEntry
+          ? 'Balance Settled'
+          : isAdjustmentEntry
+            ? 'Adjustment'
+            : isRegisterBalanceEntry
+              ? 'Register Balance'
+              : description || (signedAmount >= 0 ? 'Adjustment Credit' : 'Adjustment Debit');
         allDeals.push({
           id: `adjustment-${txn.id}`,
           source: 'transaction',
-          side: amount >= 0 ? 'deposit' : 'withdrawal',
-          type: amount >= 0 ? 'deposit' : 'withdrawal',
-          dealLabel: description || (amount >= 0 ? 'Adjustment Credit' : 'Adjustment Debit'),
+          side: isSettlementEntry ? 'settlement' : signedAmount >= 0 ? 'deposit' : 'withdrawal',
+          type: entryType,
+          dealLabel,
           symbol: null,
           quantity: null,
           price: null,
-          amount,
+          amount: signedAmount,
           profit: 0,
           commission: 0,
           time,
