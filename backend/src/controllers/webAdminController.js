@@ -1913,6 +1913,7 @@ exports.positions = async (req, res) => {
       status = 'open',
       q = '',
       limit = 1000,
+      offset = 0,
     } = req.query;
 
     if (userId) await assertManagedUser(req, userId);
@@ -1920,8 +1921,11 @@ exports.positions = async (req, res) => {
     let query = supabase
       .from('trades')
       .select('id, symbol, exchange, trade_type, quantity, lot_size, open_price, close_price, current_price, profit, margin, brokerage, buy_brokerage, sell_brokerage, user_id, account_id, open_time, close_time, stop_loss, take_profit, comment, status, created_at, updated_at, settled_from_trade_id, is_settlement_close')
-      .order(status === 'closed' ? 'close_time' : 'open_time', { ascending: false })
-      .limit(Math.min(Number(limit) || 1000, 2000));
+      .order(status === 'closed' ? 'close_time' : 'open_time', { ascending: false });
+
+    const pageSize = Math.min(Math.max(Number(limit) || 1000, 1), 2000);
+    const from = Math.max(Number(offset) || 0, 0);
+    query = query.range(from, from + pageSize - 1);
 
     if (status && status !== 'all') query = query.eq('status', status);
     if (userId) {

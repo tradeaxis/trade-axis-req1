@@ -486,6 +486,137 @@ const sortPositionRowsBySymbol = (rows = [], direction = 'asc') => (
   })
 );
 
+const escapeReportHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
+const getPositionsReportMetrics = (user, rows = []) => {
+  const fallbackAccount = getDisplayAccount(user.accounts);
+  const openRows = rows.filter((row) => ['open', 'active'].includes(String(row.status || 'open').toLowerCase()));
+  const openPnl = openRows.reduce((sum, row) => sum + Number(row.profit || 0), 0);
+  const usedMargin = openRows.reduce((sum, row) => sum + Number(row.margin || 0), 0);
+  const balance = Number(fallbackAccount.balance || 0);
+  const credit = Number(fallbackAccount.credit || 0);
+  const equity = balance + credit + openPnl;
+  const totalDrCr = equity - balance;
+  const freeMargin = equity - usedMargin;
+  const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+  return {
+    fallbackAccount,
+    balance,
+    equity,
+    totalDrCr,
+    openPnl,
+    freeMargin,
+    credit,
+    usedMargin,
+    marginLevel,
+    settlementBalance: Number(fallbackAccount.settlement_balance || 0),
+  };
+};
+
+const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc' }) => {
+  const generatedAt = formatDate(new Date().toISOString());
+  const statHtml = (label, value, tone = '') => `
+    <div class="stat ${tone}">
+      <span>${escapeReportHtml(label)}</span>
+      <strong>${escapeReportHtml(value)}</strong>
+    </div>`;
+
+  const userSections = users.map((user) => {
+    const rows = sortPositionRowsBySymbol(rowsByUser[user.id] || [], sort);
+    const metrics = getPositionsReportMetrics(user, rows);
+    const bodyRows = rows.length
+      ? rows.map((row) => {
+          const pnl = Number(row.profit || 0);
+          return `<tr>
+            <td>${escapeReportHtml(row.status || '-')}</td>
+            <td><strong>${escapeReportHtml(row.symbol || '-')}</strong></td>
+            <td>${escapeReportHtml(String(row.trade_type || '').toUpperCase())}</td>
+            <td>${escapeReportHtml(row.quantity ?? '-')}</td>
+            <td>${escapeReportHtml(formatDate(row.open_time || row.created_at))}</td>
+            <td>${escapeReportHtml(row.close_time ? formatDate(row.close_time) : '-')}</td>
+            <td>${escapeReportHtml(Number(row.open_price || 0).toFixed(2))}</td>
+            <td>${escapeReportHtml(row.close_price ? Number(row.close_price || 0).toFixed(2) : '-')}</td>
+            <td>${escapeReportHtml(Number(row.current_price || row.close_price || row.open_price || 0).toFixed(2))}</td>
+            <td class="${pnl >= 0 ? 'positive' : 'negative'}">${escapeReportHtml(pnl.toFixed(2))}</td>
+            <td>${escapeReportHtml(Number(row.brokerage || row.buy_brokerage || 0).toFixed(2))}</td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="11">No positions found</td></tr>';
+
+    return `<section class="user-section">
+      <div class="user-head">
+        <strong>${escapeReportHtml(user.login_id)} - ${escapeReportHtml(getUserName(user))}</strong>
+        <span>${escapeReportHtml(metrics.fallbackAccount.account_number || '')}</span>
+      </div>
+      <div class="stat-grid">
+        ${statHtml('Balance', formatPlainMoney(metrics.balance))}
+        ${statHtml('Equity', formatPlainMoney(metrics.equity))}
+        ${statHtml('Total Dr/Cr', formatPlainMoney(metrics.totalDrCr), metrics.totalDrCr >= 0 ? 'positive' : 'negative')}
+        ${statHtml('Floating P&L', formatPlainMoney(metrics.openPnl), metrics.openPnl >= 0 ? 'positive' : 'negative')}
+        ${statHtml('Free Margin', formatPlainMoney(metrics.freeMargin))}
+        ${statHtml('P&L', formatPlainMoney(metrics.credit), metrics.credit >= 0 ? 'positive' : 'negative')}
+        ${statHtml('Used Margin', formatPlainMoney(metrics.usedMargin))}
+        ${statHtml('Margin Level', metrics.usedMargin ? `${metrics.marginLevel.toFixed(2)}%` : '-')}
+        ${statHtml('Settlement Balance', formatPlainMoney(metrics.settlementBalance))}
+      </div>
+      <table>
+        <thead>
+          <tr><th>Type</th><th>Script</th><th>B/S</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th><th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Live P&L</th><th>Brokerage</th></tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Trade Axis User Positions Report</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; color: #111827; background: #fff; font-family: Arial, sans-serif; }
+    .report-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: 22px; color: #0f1f3d; }
+    .meta { color: #64748b; font-size: 12px; font-weight: 700; }
+    .user-section { page-break-inside: avoid; break-inside: avoid; margin: 0 0 20px; padding: 14px; border: 1px solid #cfd8e3; border-radius: 8px; }
+    .user-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: #475569; font-size: 12px; }
+    .user-head strong { color: #0f172a; font-size: 14px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #d8e0eb; border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
+    .stat { min-height: 52px; padding: 8px 10px; border-right: 1px solid #d8e0eb; border-bottom: 1px solid #d8e0eb; }
+    .stat span { display: block; margin-bottom: 5px; color: #64748b; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .stat strong { font-size: 14px; color: #111827; }
+    .positive strong, .positive { color: #2457d6 !important; }
+    .negative strong, .negative { color: #b4232f !important; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { border: 1px solid #d8e0eb; padding: 6px 5px; font-size: 9px; text-align: left; vertical-align: top; word-break: break-word; }
+    th { background: #10213f; color: #fff; font-size: 8px; text-transform: uppercase; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    @page { size: A4 landscape; margin: 10mm; }
+    @media print {
+      body { padding: 0; }
+      .user-section { page-break-inside: avoid; break-inside: avoid; }
+      thead { display: table-header-group; }
+      tr { page-break-inside: avoid; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="report-title">
+    <h1>Trade Axis User Positions Report</h1>
+    <div class="meta">Generated: ${escapeReportHtml(generatedAt)}<br />Users: ${users.length}</div>
+  </div>
+  ${userSections || '<p>No users selected.</p>'}
+</body>
+</html>`;
+};
+
 const loadTradableSymbols = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
   return dedupeTradableSymbols(filterTradableSymbols(res.data?.symbols || []));
@@ -3130,32 +3261,77 @@ function PositionsReportModal({ users = [], onClose }) {
     ));
   };
 
+  const fetchAllRowsForUser = useCallback(async (user) => {
+    const pageSize = 1000;
+    const allRows = [];
+    let offset = 0;
+    let keepGoing = true;
+
+    while (keepGoing) {
+      const res = await api.get('/web-admin/positions', {
+        params: {
+          userId: user.id,
+          status: 'all',
+          limit: pageSize,
+          offset,
+          _ts: Date.now(),
+        },
+      });
+      const pageRows = res.data?.data || [];
+      allRows.push(...pageRows);
+      offset += pageSize;
+      keepGoing = pageRows.length === pageSize && offset < 50000;
+    }
+
+    return allRows;
+  }, []);
+
   const loadReport = useCallback(async () => {
     if (!selectedUsers.length) {
       setRowsByUser({});
-      return;
+      return {};
     }
     setLoading(true);
     try {
       const pairs = await Promise.all(selectedUsers.map(async (user) => {
-        const res = await api.get('/web-admin/positions', { params: { userId: user.id, status: 'all' } });
-        return [user.id, res.data?.data || []];
+        const rows = await fetchAllRowsForUser(user);
+        return [user.id, rows];
       }));
-      setRowsByUser(Object.fromEntries(pairs));
+      const nextRowsByUser = Object.fromEntries(pairs);
+      setRowsByUser(nextRowsByUser);
+      return nextRowsByUser;
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to prepare report');
+      return {};
     } finally {
       setLoading(false);
     }
-  }, [selectedUsers]);
+  }, [fetchAllRowsForUser, selectedUsers]);
 
   useEffect(() => {
     loadReport();
   }, [loadReport]);
 
   const printReport = async () => {
-    await loadReport();
-    setTimeout(() => window.print(), 80);
+    const completeRowsByUser = await loadReport();
+    if (!selectedUsers.length) return;
+    const html = buildPositionsReportHtml({
+      users: selectedUsers,
+      rowsByUser: completeRowsByUser,
+      sort,
+    });
+    const reportWindow = window.open('', '_blank', 'width=1200,height=800');
+    if (!reportWindow) {
+      toast.error('Allow popups to save the full report PDF');
+      return;
+    }
+    reportWindow.document.open();
+    reportWindow.document.write(html);
+    reportWindow.document.close();
+    reportWindow.focus();
+    setTimeout(() => {
+      reportWindow.print();
+    }, 300);
   };
 
   return (
@@ -3208,33 +3384,24 @@ function PositionsReportModal({ users = [], onClose }) {
               <span>{formatDate(new Date().toISOString())}</span>
             </div>
             {selectedUsers.map((user) => {
-              const fallbackAccount = getDisplayAccount(user.accounts);
               const rows = sortPositionRowsBySymbol(rowsByUser[user.id] || [], sort);
-              const openRows = rows.filter((row) => ['open', 'active'].includes(String(row.status || 'open').toLowerCase()));
-              const openPnl = openRows.reduce((sum, row) => sum + Number(row.profit || 0), 0);
-              const usedMargin = openRows.reduce((sum, row) => sum + Number(row.margin || 0), 0);
-              const balance = Number(fallbackAccount.balance || 0);
-              const credit = Number(fallbackAccount.credit || 0);
-              const equity = balance + credit + openPnl;
-              const totalDrCr = equity - balance;
-              const freeMargin = equity - usedMargin;
-              const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+              const metrics = getPositionsReportMetrics(user, rows);
               return (
                 <section className="positions-report-section" key={user.id}>
                   <div className="report-user-head">
                     <strong>{user.login_id} - {getUserName(user)}</strong>
-                    <span>{fallbackAccount.account_number || ''}</span>
+                    <span>{metrics.fallbackAccount.account_number || ''}</span>
                   </div>
                   <div className="stats-grid compact-stats p-dashboard-grid">
-                    <Stat label="Balance" value={formatPlainMoney(balance)} />
-                    <Stat label="Equity" value={formatPlainMoney(equity)} />
-                    <Stat label="Total Dr/Cr" value={formatPlainMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
-                    <Stat label="Floating P&L" value={formatPlainMoney(openPnl)} tone={openPnl >= 0 ? 'positive-blue' : 'negative'} />
-                    <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} />
-                    <Stat label="P&L" value={formatPlainMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
-                    <Stat label="Used Margin" value={formatPlainMoney(usedMargin)} />
-                    <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
-                    <Stat label="Settlement Balance" value={formatPlainMoney(fallbackAccount.settlement_balance || 0)} />
+                    <Stat label="Balance" value={formatPlainMoney(metrics.balance)} />
+                    <Stat label="Equity" value={formatPlainMoney(metrics.equity)} />
+                    <Stat label="Total Dr/Cr" value={formatPlainMoney(metrics.totalDrCr)} tone={metrics.totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+                    <Stat label="Floating P&L" value={formatPlainMoney(metrics.openPnl)} tone={metrics.openPnl >= 0 ? 'positive-blue' : 'negative'} />
+                    <Stat label="Free Margin" value={formatPlainMoney(metrics.freeMargin)} />
+                    <Stat label="P&L" value={formatPlainMoney(metrics.credit)} tone={metrics.credit >= 0 ? 'positive' : 'negative'} />
+                    <Stat label="Used Margin" value={formatPlainMoney(metrics.usedMargin)} />
+                    <Stat label="Margin Level" value={metrics.usedMargin ? `${metrics.marginLevel.toFixed(2)}%` : '-'} />
+                    <Stat label="Settlement Balance" value={formatPlainMoney(metrics.settlementBalance)} />
                   </div>
                   <div className="table-wrap report-table-wrap">
                     <table>
