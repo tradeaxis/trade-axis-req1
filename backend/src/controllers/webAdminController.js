@@ -853,6 +853,19 @@ const getScopedUserIdsForFilter = async (req, scope = 'all', userId = '') => {
   return Array.isArray(managedIds) ? managedIds : null;
 };
 
+const parseIstDateTimeInput = (value) => {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const localDateTime = raw.length === 10
+    ? `${raw}T00:00:00`
+    : (raw.length === 16 ? `${raw}:00` : raw);
+  const normalized = hasTimezone ? raw : `${localDateTime}+05:30`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
 exports.listSymbols = async (req, res) => {
   try {
     const {
@@ -2185,7 +2198,7 @@ exports.tradeOnBehalf = async (req, res) => {
     const marginRequired = (price * qty * lotSize) / leverage;
     const shouldApplyEntryBrokerage = includeEntryBrokerage !== false;
     const brokerage = shouldApplyEntryBrokerage ? price * qty * lotSize * brokerageRate : 0;
-    const requestedEntryTime = entryTime ? new Date(entryTime) : null;
+    const requestedEntryTime = parseIstDateTimeInput(entryTime);
     const now = requestedEntryTime && !Number.isNaN(requestedEntryTime.getTime())
       ? requestedEntryTime.toISOString()
       : new Date().toISOString();

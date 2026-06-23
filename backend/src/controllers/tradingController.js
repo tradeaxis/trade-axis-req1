@@ -1205,7 +1205,7 @@ exports.cancelAllPendingOrders = async (req, res) => {
 // ─────────────────────────────────────────────
 exports.getTradeHistory = async (req, res) => {
   try {
-    const { accountId, period, symbol, limit = 500 } = req.query;
+    const { accountId, period, symbol, limit = 500, fromDate = '', toDate = '' } = req.query;
     const userId = req.user.id;
 
     if (!accountId)
@@ -1221,7 +1221,14 @@ exports.getTradeHistory = async (req, res) => {
 
     if (symbol) query = query.eq('symbol', symbol.toUpperCase());
 
-    if (period) {
+    if (period === 'custom' || fromDate || toDate) {
+      if (fromDate) {
+        query = query.gte('close_time', new Date(`${String(fromDate).slice(0, 10)}T00:00:00+05:30`).toISOString());
+      }
+      if (toDate) {
+        query = query.lte('close_time', new Date(`${String(toDate).slice(0, 10)}T23:59:59.999+05:30`).toISOString());
+      }
+    } else if (period) {
       const now = new Date();
       let startDate;
       switch (period) {

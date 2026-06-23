@@ -466,6 +466,7 @@ const getAccountMetrics = (account = {}) => {
   return {
     balance,
     credit,
+    openPnl: Number(account.open_pnl ?? account.dashboard_open_pnl ?? (totalDrCr - credit)),
     totalDrCr,
     equity,
     margin,

@@ -723,11 +723,13 @@ const inferOriginalQuantity = (trade) => {
   return Number(trade?.quantity || 0);
 };
 
-const isTimestampWithinPeriod = (value, startDate) => {
-  if (!startDate) return true;
+const isTimestampWithinPeriod = (value, startDate, endDate = null) => {
+  if (!startDate && !endDate) return true;
   if (!value) return false;
   const parsed = new Date(value);
-  return !Number.isNaN(parsed.getTime()) && parsed >= startDate;
+  return !Number.isNaN(parsed.getTime())
+    && (!startDate || parsed >= startDate)
+    && (!endDate || parsed <= endDate);
 };
 
 const extractChainEntryEvents = (rows = []) => {
@@ -750,7 +752,7 @@ const extractChainEntryEvents = (rows = []) => {
 
 const getDeals = async (req, res) => {
   try {
-    const { accountId, period = 'month', limit = 200 } = req.query;
+    const { accountId, period = 'month', limit = 200, fromDate = '', toDate = '' } = req.query;
     const userId = req.user.id;
 
     if (!accountId) {
@@ -759,34 +761,46 @@ const getDeals = async (req, res) => {
 
     const now = new Date();
     let startDate = null;
+    let endDate = null;
 
-    switch (period) {
-      case 'today':
-        startDate = new Date(now);
-        startDate.setHours(0, 0, 0, 0);
-        break;
-      case 'week':
-        startDate = new Date(now);
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case 'month':
-        startDate = new Date(now);
-        startDate.setMonth(startDate.getMonth() - 1);
-        break;
-      case '3months':
-        startDate = new Date(now);
-        startDate.setMonth(startDate.getMonth() - 3);
-        break;
-      case '6months':
-        startDate = new Date(now);
-        startDate.setMonth(startDate.getMonth() - 6);
-        break;
-      case 'year':
-        startDate = new Date(now);
-        startDate.setFullYear(startDate.getFullYear() - 1);
-        break;
-      default:
-        startDate = null;
+    if (period === 'custom' || fromDate || toDate) {
+      if (fromDate) {
+        startDate = new Date(`${String(fromDate).slice(0, 10)}T00:00:00+05:30`);
+      }
+      if (toDate) {
+        endDate = new Date(`${String(toDate).slice(0, 10)}T23:59:59.999+05:30`);
+      }
+    }
+
+    if (!startDate && !endDate) {
+      switch (period) {
+        case 'today':
+          startDate = new Date(now);
+          startDate.setHours(0, 0, 0, 0);
+          break;
+        case 'week':
+          startDate = new Date(now);
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+        case 'month':
+          startDate = new Date(now);
+          startDate.setMonth(startDate.getMonth() - 1);
+          break;
+        case '3months':
+          startDate = new Date(now);
+          startDate.setMonth(startDate.getMonth() - 3);
+          break;
+        case '6months':
+          startDate = new Date(now);
+          startDate.setMonth(startDate.getMonth() - 6);
+          break;
+        case 'year':
+          startDate = new Date(now);
+          startDate.setFullYear(startDate.getFullYear() - 1);
+          break;
+        default:
+          startDate = null;
+      }
     }
 
     const allDeals = [];
@@ -812,9 +826,15 @@ const getDeals = async (req, res) => {
     if (tradesError) throw tradesError;
 
     const tradeMatchesPeriod = (trade) => {
-      if (!startDate) return true;
-      const openOk = trade.open_time && new Date(trade.open_time) >= startDate;
-      const closeOk = trade.close_time && new Date(trade.close_time) >= startDate;
+      const inRange = (value) => {
+        if (!value) return false;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return false;
+        return (!startDate || date >= startDate) && (!endDate || date <= endDate);
+      };
+      if (!startDate && !endDate) return true;
+      const openOk = inRange(trade.open_time);
+      const closeOk = inRange(trade.close_time);
       return openOk || closeOk;
     };
 
@@ -841,7 +861,7 @@ const getDeals = async (req, res) => {
     tradeChains.forEach((chain, chainKey) => {
       const hasTradeTimestampInPeriod = chain.rows.some(tradeMatchesPeriod);
       const hasEntryEventInPeriod = extractChainEntryEvents(chain.rows)
-        .some((event) => isTimestampWithinPeriod(event.time, startDate));
+        .some((event) => isTimestampWithinPeriod(event.time, startDate, endDate));
 
       if (!startDate || hasTradeTimestampInPeriod || hasEntryEventInPeriod) {
         visibleTradeChainKeys.add(chainKey);
@@ -868,7 +888,7 @@ const getDeals = async (req, res) => {
 
       if (parsedEntryEvents.length > 0) {
         parsedEntryEvents
-          .filter((event) => isTimestampWithinPeriod(event.time, startDate))
+          .filter((event) => isTimestampWithinPeriod(event.time, startDate, endDate))
           .sort((a, b) => new Date(a.time) - new Date(b.time))
           .forEach((event, index) => {
             allDeals.push({
@@ -889,7 +909,7 @@ const getDeals = async (req, res) => {
               tradeId: entryTrade?.id,
             });
           });
-      } else if (isTimestampWithinPeriod(chain.openTime || entryTrade?.open_time, startDate)) {
+      } else if (isTimestampWithinPeriod(chain.openTime || entryTrade?.open_time, startDate, endDate)) {
         const entryQuantity = rows.reduce(
           (maxQty, row) => Math.max(maxQty, inferOriginalQuantity(row)),
           0,
@@ -959,8 +979,13 @@ const getDeals = async (req, res) => {
     if (txnsError) throw txnsError;
 
     const filteredTxns = (txns || []).filter((txn) => {
-      if (!startDate) return true;
-      return txn.created_at && new Date(txn.created_at) >= startDate;
+      if (!startDate && !endDate) return true;
+      const value = txn.processed_at || txn.created_at;
+      if (!value) return false;
+      const date = new Date(value);
+      return !Number.isNaN(date.getTime())
+        && (!startDate || date >= startDate)
+        && (!endDate || date <= endDate);
     });
 
     filteredTxns.forEach((txn) => {
@@ -1096,8 +1121,12 @@ const getDeals = async (req, res) => {
 
     settlementDeals.push(
       ...allSettlementDeals.filter((deal) => {
-        if (!startDate) return true;
-        return deal.time && new Date(deal.time) >= startDate;
+        if (!startDate && !endDate) return true;
+        if (!deal.time) return false;
+        const date = new Date(deal.time);
+        return !Number.isNaN(date.getTime())
+          && (!startDate || date >= startDate)
+          && (!endDate || date <= endDate);
       }),
     );
 

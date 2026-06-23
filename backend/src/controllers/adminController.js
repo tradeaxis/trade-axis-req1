@@ -387,6 +387,37 @@ const recalculateAccountSnapshot = async (accountId, updatedAt = new Date().toIS
   return { balance, credit, floatingProfit, totalMargin, equity, freeMargin };
 };
 
+const recalculateOpenTradeMarginsForLeverage = async (accountIds, leverageNum, updatedAt = new Date().toISOString()) => {
+  const ids = [...new Set((Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean))];
+  if (!ids.length) return;
+
+  const { data: trades, error } = await supabase
+    .from('trades')
+    .select('id, account_id, quantity, lot_size, open_price')
+    .in('account_id', ids)
+    .eq('status', 'open');
+
+  if (error) throw error;
+
+  for (const trade of trades || []) {
+    const qty = Number(trade.quantity || 0);
+    const lotSize = Number(trade.lot_size || 1) || 1;
+    const openPrice = Number(trade.open_price || 0);
+    const margin = leverageNum > 0 ? (openPrice * qty * lotSize) / leverageNum : 0;
+
+    const { error: updateError } = await supabase
+      .from('trades')
+      .update({ margin, updated_at: updatedAt })
+      .eq('id', trade.id);
+
+    if (updateError) throw updateError;
+  }
+
+  for (const accountId of ids) {
+    await recalculateAccountSnapshot(accountId, updatedAt);
+  }
+};
+
 // ============ USER FUNCTIONS ============
 
 exports.listUsers = async (req, res) => {
@@ -745,6 +776,7 @@ exports.updateUserLeverage = async (req, res) => {
       });
     }
 
+    let accountIdsToRecalculate = [];
     if (accountId) {
       const { error: accountError } = await supabase
         .from('accounts')
@@ -761,7 +793,16 @@ exports.updateUserLeverage = async (req, res) => {
             : `Failed to update account leverage: ${accountError.message}`,
         });
       }
+      accountIdsToRecalculate = [accountId];
     } else {
+      const { data: accountRows, error: fetchAccountsError } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('user_id', id);
+
+      if (fetchAccountsError) throw fetchAccountsError;
+      accountIdsToRecalculate = (accountRows || []).map((account) => account.id);
+
       const { error: accountError } = await supabase
         .from('accounts')
         .update({ leverage: leverageNum })
@@ -787,6 +828,8 @@ exports.updateUserLeverage = async (req, res) => {
         console.warn('User leverage column may not exist:', userErr.message);
       }
     }
+
+    await recalculateOpenTradeMarginsForLeverage(accountIdsToRecalculate, leverageNum);
 
     res.json({ success: true, message: `Leverage updated to 1:${leverageNum}` });
   } catch (error) {
