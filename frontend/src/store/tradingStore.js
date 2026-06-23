@@ -102,11 +102,14 @@ const useTradingStore = create((set, get) => ({
     }
   },
 
-  fetchDeals: async (accountId, period = 'month') => {
+  fetchDeals: async (accountId, periodOrParams = 'month') => {
     if (!accountId) return;
     set({ loading: true, error: null });
     try {
-      const response = await api.get(`/transactions/deals?accountId=${accountId}&period=${period}`);
+      const params = typeof periodOrParams === 'object'
+        ? { accountId, ...periodOrParams }
+        : { accountId, period: periodOrParams };
+      const response = await api.get('/transactions/deals', { params });
       if (response.data.success) {
         const nextState = {
           deals: response.data.data.deals || [],
@@ -337,11 +340,17 @@ const useTradingStore = create((set, get) => ({
       return { success: false, message: 'Missing order ID' };
     }
 
-    const { price, stopLoss, takeProfit, expiration } = modifications;
+    const { price, quantity, stopLoss, takeProfit, expiration } = modifications;
     set({ loading: true, error: null });
 
     try {
-      const payload = { price: parseFloat(price) || 0, stopLoss: parseFloat(stopLoss) || 0, takeProfit: parseFloat(takeProfit) || 0, expiration };
+      const payload = {
+        price: parseFloat(price) || 0,
+        quantity: quantity !== undefined && quantity !== null ? parseFloat(quantity) : undefined,
+        stopLoss: parseFloat(stopLoss) || 0,
+        takeProfit: parseFloat(takeProfit) || 0,
+        expiration,
+      };
       const response = await api.put(`/trading/pending-order/${orderId}`, payload);
 
       if (response.data.success) {

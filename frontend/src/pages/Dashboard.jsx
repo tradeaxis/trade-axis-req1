@@ -99,6 +99,7 @@ const HISTORY_PERIODS = [
   { id: 'week', label: 'Last Week' },
   { id: 'month', label: 'Last Month' },
   { id: '3months', label: 'Last 3 Months' },
+  { id: 'custom', label: 'Custom' },
 ];
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
@@ -213,6 +214,8 @@ const getPeriodStart = (periodId) => {
     case 'year':
       d.setFullYear(d.getFullYear() - 1);
       return d;
+    case 'custom':
+      return null;
     default:
       return null;
   }
@@ -794,6 +797,7 @@ const Dashboard = () => {
 
   // History
   const [historyPeriod, setHistoryPeriod] = useState('today');
+  const [historyCustomRange, setHistoryCustomRange] = useState({ from: '', to: '' });
   const [historyViewMode, setHistoryViewMode] = useState('positions');
   const [historyFilter, setHistoryFilter] = useState('all');
   const [historySymbolFilter, setHistorySymbolFilter] = useState('');
@@ -854,6 +858,7 @@ const Dashboard = () => {
 
     // ── Modify Pending Order Modal ──
   const [modifyPendingModal, setModifyPendingModal] = useState(null);
+  const [modifyPendingQty, setModifyPendingQty] = useState('');
   const [modifyPendingPrice, setModifyPendingPrice] = useState('');
   const [modifyPendingSL, setModifyPendingSL] = useState('');
   const [modifyPendingTP, setModifyPendingTP] = useState('');
@@ -1118,9 +1123,25 @@ const Dashboard = () => {
   // ── Fetch deals for history tab ──
   useEffect(() => {
     if (activeTab === 'history' && historyViewMode === 'deals' && selectedAccount?.id) {
-      fetchDeals(selectedAccount.id, historyPeriod);
+      fetchDeals(selectedAccount.id, {
+        period: historyPeriod,
+        ...(historyPeriod === 'custom'
+          ? { fromDate: historyCustomRange.from, toDate: historyCustomRange.to }
+          : {}),
+      });
     }
-  }, [activeTab, historyViewMode, historyPeriod, selectedAccount, fetchDeals]);
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchDeals]);
+
+  useEffect(() => {
+    if (activeTab === 'history' && historyViewMode !== 'deals' && selectedAccount?.id) {
+      fetchTradeHistory(selectedAccount.id, {
+        period: historyPeriod,
+        ...(historyPeriod === 'custom'
+          ? { fromDate: historyCustomRange.from, toDate: historyCustomRange.to }
+          : {}),
+      });
+    }
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchTradeHistory]);
 
   // ── Watchlists init ──
   const watchlistsInitRef = useRef(false);
@@ -1614,9 +1635,20 @@ const accountStats = useMemo(() => {
 
   const filteredHistoryTrades = useMemo(() => {
     const start = getPeriodStart(historyPeriod);
+    const customStart = historyCustomRange.from ? new Date(`${historyCustomRange.from}T00:00:00+05:30`) : null;
+    const customEnd = historyCustomRange.to ? new Date(`${historyCustomRange.to}T23:59:59.999+05:30`) : null;
     let list = tradeHistory || [];
 
-    if (start) {
+    if (historyPeriod === 'custom' && (customStart || customEnd)) {
+      list = list.filter((t) => {
+        const ct = t.close_time || t.closeTime;
+        if (!ct) return false;
+        const date = new Date(ct);
+        return !Number.isNaN(date.getTime())
+          && (!customStart || date >= customStart)
+          && (!customEnd || date <= customEnd);
+      });
+    } else if (start) {
       list = list.filter((t) => {
         const ct = t.close_time || t.closeTime;
         if (!ct) return false;
@@ -1630,7 +1662,7 @@ const accountStats = useMemo(() => {
       list = list.filter((t) => Number(t.profit || 0) < 0);
 
     return list;
-  }, [tradeHistory, historyPeriod, historyFilter]);
+  }, [tradeHistory, historyPeriod, historyCustomRange.from, historyCustomRange.to, historyFilter]);
 
   const filteredMessages = useMemo(() => {
     if (messageCategory === 'all') return messages;
@@ -1743,8 +1775,18 @@ const accountStats = useMemo(() => {
       await Promise.allSettled([
         fetchOpenTrades(accountId),
         fetchPendingOrders?.(accountId),
-        fetchTradeHistory(accountId),
-        fetchDeals(accountId, historyPeriod),
+        fetchTradeHistory(accountId, {
+          period: historyPeriod,
+          ...(historyPeriod === 'custom'
+            ? { fromDate: historyCustomRange.from, toDate: historyCustomRange.to }
+            : {}),
+        }),
+        fetchDeals(accountId, {
+          period: historyPeriod,
+          ...(historyPeriod === 'custom'
+            ? { fromDate: historyCustomRange.from, toDate: historyCustomRange.to }
+            : {}),
+        }),
       ]);
     },
     [
@@ -1754,6 +1796,8 @@ const accountStats = useMemo(() => {
       fetchTradeHistory,
       fetchDeals,
       historyPeriod,
+      historyCustomRange.from,
+      historyCustomRange.to,
     ],
   );
 
@@ -3364,6 +3408,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
   // Reset modify-pending values when modal opens
   useEffect(() => {
     if (modifyPendingModal) {
+      setModifyPendingQty(modifyPendingModal.quantity || '1');
       setModifyPendingPrice(Number(modifyPendingModal.price || 0).toFixed(2));
       setModifyPendingSL(modifyPendingModal.stop_loss || '');
       setModifyPendingTP(modifyPendingModal.take_profit || '');
@@ -4659,7 +4704,13 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     };
 
     const handleModify = async () => {
+      const parsedQty = Number(modifyPendingQty);
+      if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
+        toast.error('Enter valid quantity');
+        return;
+      }
       const result = await useTradingStore.getState().modifyPendingOrder(order.id, {
+        quantity: parsedQty,
         price: Number(modifyPendingPrice),
         stopLoss: Number(modifyPendingSL) || 0,
         takeProfit: Number(modifyPendingTP) || 0,
@@ -4707,6 +4758,19 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                   <div className="text-sm" style={{ color: '#787b86' }}>Qty: {order.quantity}</div>
                 </div>
               </div>
+            </div>
+
+            {/* Quantity */}
+            <div>
+              <label className="block text-xs mb-1.5 font-medium" style={{ color: '#787b86' }}>Quantity</label>
+              <input
+                type="number"
+                min="1"
+                value={modifyPendingQty}
+                onChange={(e) => setModifyPendingQty(e.target.value)}
+                className="w-full h-10 px-3 text-center text-base font-bold rounded-lg"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              />
             </div>
 
             {/* Price */}
@@ -5673,6 +5737,31 @@ const renderOrderConfirmation = () => {
               style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
             />
           )}
+
+          {historyPeriod === 'custom' && (
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <div>
+                <label className="block text-[10px] font-semibold mb-1" style={{ color: textMuted }}>From Date</label>
+                <input
+                  type="date"
+                  value={historyCustomRange.from}
+                  onChange={(event) => setHistoryCustomRange((prev) => ({ ...prev, from: event.target.value }))}
+                  className="w-full px-3 py-2 rounded-lg text-sm"
+                  style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold mb-1" style={{ color: textMuted }}>To Date</label>
+                <input
+                  type="date"
+                  value={historyCustomRange.to}
+                  onChange={(event) => setHistoryCustomRange((prev) => ({ ...prev, to: event.target.value }))}
+                  className="w-full px-3 py-2 rounded-lg text-sm"
+                  style={{ background: bgAlt, border: `1px solid ${border}`, color: textPrimary }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── Positions Stats ── */}
@@ -5886,6 +5975,8 @@ const renderOrderConfirmation = () => {
 
           {historyViewMode === 'orders' && (() => {
             const orderPeriodStart = getPeriodStart(historyPeriod);
+            const customStart = historyCustomRange.from ? new Date(`${historyCustomRange.from}T00:00:00+05:30`) : null;
+            const customEnd = historyCustomRange.to ? new Date(`${historyCustomRange.to}T23:59:59.999+05:30`) : null;
             const executedOrders = (tradeHistory || []).map((o) => ({
               ...o, _source: 'trade', _status: o.trade_type, _time: o.open_time,
             }));
@@ -5894,6 +5985,14 @@ const renderOrderConfirmation = () => {
             }));
             const allOrders = [...executedOrders, ...pendingHistory]
               .filter((order) => {
+                if (historyPeriod === 'custom') {
+                  if (!customStart && !customEnd) return true;
+                  if (!order._time) return false;
+                  const date = new Date(order._time);
+                  return !Number.isNaN(date.getTime())
+                    && (!customStart || date >= customStart)
+                    && (!customEnd || date <= customEnd);
+                }
                 if (!orderPeriodStart) return true;
                 if (!order._time) return false;
                 return new Date(order._time) >= orderPeriodStart;

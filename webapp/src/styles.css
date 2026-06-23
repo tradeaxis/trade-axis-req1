@@ -175,6 +175,120 @@ button:disabled {
   letter-spacing: 0.05em;
 }
 
+.compact-select {
+  width: auto;
+  min-width: 96px;
+}
+
+.custom-date-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(160px, 220px));
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.multi-select-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 560px;
+  max-height: 90px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.multi-select-strip label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.positions-report-modal .modal-body {
+  background: var(--surface-2);
+}
+
+.positions-report-print-area {
+  display: grid;
+  gap: 18px;
+}
+
+.report-title,
+.report-user-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-title h2 {
+  margin: 0;
+}
+
+.positions-report-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  break-inside: avoid;
+}
+
+.report-user-head {
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.report-user-head strong {
+  color: var(--ink);
+}
+
+.report-table-wrap {
+  margin-top: 12px;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .positions-report-print-area,
+  .positions-report-print-area * {
+    visibility: visible !important;
+  }
+
+  .positions-report-print-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    padding: 18px;
+    background: #fff;
+    color: #111827;
+  }
+
+  .positions-report-print-area .stat-card,
+  .positions-report-print-area .positions-report-section,
+  .positions-report-print-area table,
+  .positions-report-print-area th,
+  .positions-report-print-area td {
+    background: #fff !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+}
+
 .input,
 .select,
 .textarea {

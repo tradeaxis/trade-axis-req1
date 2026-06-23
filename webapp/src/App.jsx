@@ -476,6 +476,16 @@ const getAccountMetrics = (account = {}) => {
   };
 };
 
+const sortPositionRowsBySymbol = (rows = [], direction = 'asc') => (
+  [...rows].sort((a, b) => {
+    const comparison = String(a.symbol || '').localeCompare(String(b.symbol || ''), undefined, {
+      sensitivity: 'base',
+      numeric: true,
+    });
+    return direction === 'desc' ? -comparison : comparison;
+  })
+);
+
 const loadTradableSymbols = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
   return dedupeTradableSymbols(filterTradableSymbols(res.data?.symbols || []));
@@ -2338,16 +2348,22 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
   const [loading, setLoading] = useState(false);
   const [dealScriptFilter, setDealScriptFilter] = useState('');
   const [customDealFilter, setCustomDealFilter] = useState('');
+  const [customRange, setCustomRange] = useState({ from: '', to: '' });
 
   const load = useCallback(async () => {
     if (!selectedAccount?.id) return;
     setLoading(true);
     try {
+      const periodParams = {
+        accountId: selectedAccount.id,
+        period,
+        ...(period === 'custom' ? { fromDate: customRange.from, toDate: customRange.to } : {}),
+      };
       const [historyRes, orderRes, pendingRes, dealsRes] = await Promise.all([
-        api.get('/trading/history', { params: { accountId: selectedAccount.id, period } }),
+        api.get('/trading/history', { params: periodParams }),
         api.get(`/trading/pending-order-history/${selectedAccount.id}`),
         api.get(`/trading/pending-orders/${selectedAccount.id}`),
-        api.get('/transactions/deals', { params: { accountId: selectedAccount.id, period, limit: 500 } }),
+        api.get('/transactions/deals', { params: { ...periodParams, limit: 500 } }),
       ]);
       const historyRows = historyRes.data?.data || [];
       const pendingHistoryRows = orderRes.data?.data || [];
@@ -2362,10 +2378,18 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
         created_at: trade.open_time || trade.created_at,
         updated_at: trade.close_time || trade.updated_at,
       }));
-      const cutoff = getPeriodCutoff(period);
+      const cutoff = period === 'custom' ? null : getPeriodCutoff(period);
+      const customStart = customRange.from ? new Date(`${customRange.from}T00:00:00+05:30`) : null;
+      const customEnd = customRange.to ? new Date(`${customRange.to}T23:59:59.999+05:30`) : null;
       const isInPeriod = (row) => {
         const value = row.close_time || row.closed_at || row.exit_time || row.executed_at || row.time || row.updated_at || row.created_at || row.open_time || row.date;
-        return value ? new Date(value) >= cutoff : true;
+        if (!value) return true;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return false;
+        if (period === 'custom') {
+          return (!customStart || date >= customStart) && (!customEnd || date <= customEnd);
+        }
+        return date >= cutoff;
       };
       const filteredHistoryRows = historyRows.filter(isInPeriod);
       const filteredDeals = rawDeals.filter(isInPeriod);
@@ -2383,7 +2407,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
     } finally {
       setLoading(false);
     }
-  }, [selectedAccount?.id, period]);
+  }, [selectedAccount?.id, period, customRange.from, customRange.to]);
 
   useEffect(() => {
     load();
@@ -2438,6 +2462,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
               ['week', 'Week'],
               ['month', 'Month'],
               ['3months', '3 Months'],
+              ['custom', 'Custom'],
             ].map(([item, label]) => (
               <button key={item} className={`tab ${period === item ? 'active' : ''}`} onClick={() => setPeriod(item)}>{label}</button>
             ))}
@@ -2454,6 +2479,18 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
         </div>
         <button type="button" className="btn subtle" onClick={refreshHistory} disabled={loading}><RefreshCw size={16} />Refresh</button>
       </div>
+      {period === 'custom' && (
+        <div className="custom-date-row">
+          <div className="field">
+            <label>From Date</label>
+            <input className="input" type="date" value={customRange.from} onChange={(event) => setCustomRange((prev) => ({ ...prev, from: event.target.value }))} />
+          </div>
+          <div className="field">
+            <label>To Date</label>
+            <input className="input" type="date" value={customRange.to} onChange={(event) => setCustomRange((prev) => ({ ...prev, to: event.target.value }))} />
+          </div>
+        </div>
+      )}
 
       {view === 'positions' && (
         <div className="history-position-list">
@@ -2935,6 +2972,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
   const [q, setQ] = useState('');
   const [userFilter, setUserFilter] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [showPositionsReport, setShowPositionsReport] = useState(false);
   const [dialog, setDialog] = useState(null);
   const [autoCloseSettings, setAutoCloseSettings] = useState({ percent: 90, applyAll: true, userIds: [], userSettings: [] });
 
@@ -2970,7 +3008,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
     const metrics = getAccountMetrics(getDisplayAccount(user.accounts));
     acc.balance += metrics.balance;
     acc.equity += metrics.equity;
-    acc.openPnl += metrics.totalDrCr;
+    acc.openPnl += metrics.openPnl;
     acc.closedPnl += metrics.credit;
     acc.totalDrCr += metrics.totalDrCr;
     acc.margin += metrics.margin;
@@ -3002,6 +3040,9 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         </div>
         <div className="right">
           <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
+          {role === 'admin' && mode !== 'sub_broker' && (
+            <button type="button" className="btn subtle" onClick={() => setShowPositionsReport(true)}><FileText size={16} />Save P Report</button>
+          )}
           {(role !== 'sub_broker' || permissions.usersCreate !== false) && (
             <button className="btn primary" onClick={() => setShowCreate(true)}><Plus size={16} />Create {mode === 'sub_broker' ? 'Sub Broker' : 'User'}</button>
           )}
@@ -3028,6 +3069,7 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         onOpenDialog={setDialog}
       />
       {showCreate && <CreateUserModal mode={mode} role={role} brokerScope={brokerScope} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load(); }} />}
+      {showPositionsReport && <PositionsReportModal users={users} onClose={() => setShowPositionsReport(false)} />}
       {dialog?.type === 'positions' && <UserPositionsModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'brokerage' && <BrokerageModal user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.type === 'ledger' && <LedgerModal user={dialog.user} onClose={() => setDialog(null)} onSaved={load} />}
@@ -3064,6 +3106,166 @@ function UserManagementTotals({ totals }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function PositionsReportModal({ users = [], onClose }) {
+  const [scope, setScope] = useState('all');
+  const [singleUserId, setSingleUserId] = useState(users[0]?.id || '');
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [rowsByUser, setRowsByUser] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [sort, setSort] = useState('asc');
+
+  const selectedUsers = useMemo(() => {
+    if (scope === 'single') return users.filter((user) => user.id === singleUserId);
+    if (scope === 'multiple') return users.filter((user) => selectedIds.includes(user.id));
+    return users;
+  }, [scope, selectedIds, singleUserId, users]);
+
+  const toggleSelected = (userId) => {
+    setSelectedIds((prev) => (
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    ));
+  };
+
+  const loadReport = useCallback(async () => {
+    if (!selectedUsers.length) {
+      setRowsByUser({});
+      return;
+    }
+    setLoading(true);
+    try {
+      const pairs = await Promise.all(selectedUsers.map(async (user) => {
+        const res = await api.get('/web-admin/positions', { params: { userId: user.id, status: 'all' } });
+        return [user.id, res.data?.data || []];
+      }));
+      setRowsByUser(Object.fromEntries(pairs));
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Failed to prepare report');
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedUsers]);
+
+  useEffect(() => {
+    loadReport();
+  }, [loadReport]);
+
+  const printReport = async () => {
+    await loadReport();
+    setTimeout(() => window.print(), 80);
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal full-screen-modal positions-report-modal">
+        <div className="modal-head no-print">
+          <div>
+            <strong>Save User Positions Report</strong>
+            <p>Select all, one user, or multiple users and save the P dashboard with positions.</p>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="toolbar no-print">
+            <div className="left">
+              <select className="select" value={scope} onChange={(event) => setScope(event.target.value)}>
+                <option value="all">All users</option>
+                <option value="single">Single user</option>
+                <option value="multiple">Multiple users</option>
+              </select>
+              {scope === 'single' && (
+                <select className="select" value={singleUserId} onChange={(event) => setSingleUserId(event.target.value)}>
+                  {users.map((user) => <option key={user.id} value={user.id}>{user.login_id} - {getUserName(user)}</option>)}
+                </select>
+              )}
+              {scope === 'multiple' && (
+                <div className="multi-select-strip">
+                  {users.map((user) => (
+                    <label key={user.id}>
+                      <input type="checkbox" checked={selectedIds.includes(user.id)} onChange={() => toggleSelected(user.id)} />
+                      <span>{user.login_id}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <select className="select compact-select" value={sort} onChange={(event) => setSort(event.target.value)}>
+                <option value="asc">A-Z</option>
+                <option value="desc">Z-A</option>
+              </select>
+            </div>
+            <div className="right">
+              <button className="btn subtle" onClick={loadReport} disabled={loading}><RefreshCw size={16} />Preview</button>
+              <button className="btn primary" onClick={printReport} disabled={loading || !selectedUsers.length}><FileText size={16} />Save</button>
+            </div>
+          </div>
+
+          <div className="positions-report-print-area">
+            <div className="report-title">
+              <h2>Trade Axis User Positions Report</h2>
+              <span>{formatDate(new Date().toISOString())}</span>
+            </div>
+            {selectedUsers.map((user) => {
+              const fallbackAccount = getDisplayAccount(user.accounts);
+              const rows = sortPositionRowsBySymbol(rowsByUser[user.id] || [], sort);
+              const openRows = rows.filter((row) => ['open', 'active'].includes(String(row.status || 'open').toLowerCase()));
+              const openPnl = openRows.reduce((sum, row) => sum + Number(row.profit || 0), 0);
+              const usedMargin = openRows.reduce((sum, row) => sum + Number(row.margin || 0), 0);
+              const balance = Number(fallbackAccount.balance || 0);
+              const credit = Number(fallbackAccount.credit || 0);
+              const equity = balance + credit + openPnl;
+              const totalDrCr = equity - balance;
+              const freeMargin = equity - usedMargin;
+              const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
+              return (
+                <section className="positions-report-section" key={user.id}>
+                  <div className="report-user-head">
+                    <strong>{user.login_id} - {getUserName(user)}</strong>
+                    <span>{fallbackAccount.account_number || ''}</span>
+                  </div>
+                  <div className="stats-grid compact-stats p-dashboard-grid">
+                    <Stat label="Balance" value={formatPlainMoney(balance)} />
+                    <Stat label="Equity" value={formatPlainMoney(equity)} />
+                    <Stat label="Total Dr/Cr" value={formatPlainMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
+                    <Stat label="Floating P&L" value={formatPlainMoney(openPnl)} tone={openPnl >= 0 ? 'positive-blue' : 'negative'} />
+                    <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} />
+                    <Stat label="P&L" value={formatPlainMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
+                    <Stat label="Used Margin" value={formatPlainMoney(usedMargin)} />
+                    <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} />
+                    <Stat label="Settlement Balance" value={formatPlainMoney(fallbackAccount.settlement_balance || 0)} />
+                  </div>
+                  <div className="table-wrap report-table-wrap">
+                    <table>
+                      <thead><tr><th>Type</th><th>Script</th><th>B/S</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th><th>Entry Price</th><th>Exit Price</th><th>Current Price</th><th>Live P&L</th><th>Brokerage</th></tr></thead>
+                      <tbody>
+                        {rows.map((row) => (
+                          <tr key={`${user.id}-${row.id}`}>
+                            <td>{row.status || '-'}</td>
+                            <td><strong>{row.symbol}</strong></td>
+                            <td>{String(row.trade_type || '').toUpperCase()}</td>
+                            <td>{row.quantity}</td>
+                            <td>{formatDate(row.open_time || row.created_at)}</td>
+                            <td>{row.close_time ? formatDate(row.close_time) : '-'}</td>
+                            <td>{Number(row.open_price || 0).toFixed(2)}</td>
+                            <td>{row.close_price ? Number(row.close_price || 0).toFixed(2) : '-'}</td>
+                            <td>{Number(row.current_price || row.close_price || row.open_price || 0).toFixed(2)}</td>
+                            <td className={Number(row.profit || 0) >= 0 ? 'positive-blue' : 'negative'}>{Number(row.profit || 0).toFixed(2)}</td>
+                            <td>{Number(row.brokerage || row.buy_brokerage || 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                        {!rows.length && <tr><td colSpan="11">No positions found</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              );
+            })}
+            {!selectedUsers.length && <div className="empty-state compact-empty"><span>Select at least one user</span></div>}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3296,8 +3498,9 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
           {users.map((user) => {
             const primary = getDisplayAccount(user.accounts);
             const metrics = getAccountMetrics(primary);
-            const openPnl = metrics.totalDrCr;
+            const openPnl = metrics.openPnl;
             const closedPnl = metrics.credit;
+            const totalDrCr = metrics.totalDrCr;
             return (
             <tr key={user.id}>
               <td>
@@ -3313,7 +3516,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
               <td>{metrics.equity.toLocaleString('en-IN')}</td>
               <td className={openPnl >= 0 ? 'positive-blue' : 'negative'}>{openPnl.toFixed(2)}</td>
               <td className={closedPnl >= 0 ? 'positive' : 'negative'}>{closedPnl.toFixed(2)}</td>
-              <td className={openPnl >= 0 ? 'positive-blue' : 'negative'}>{openPnl.toFixed(2)}</td>
+              <td className={totalDrCr >= 0 ? 'positive-blue' : 'negative'}>{totalDrCr.toFixed(2)}</td>
               <td>{metrics.margin.toLocaleString('en-IN')}</td>
               <td>{metrics.marginLevel ? metrics.marginLevel.toFixed(2) : '-'}</td>
               <td>{metrics.freeMargin.toLocaleString('en-IN')}</td>
@@ -3448,6 +3651,7 @@ function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPer
   const [userId, setUserId] = useState('');
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(false);
+  const [positionSort, setPositionSort] = useState('asc');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3470,6 +3674,7 @@ function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPer
   }, [load]);
 
   const totalPnl = rows.reduce((sum, row) => sum + Number(row.profit || 0), 0);
+  const sortedRows = useMemo(() => sortPositionRowsBySymbol(rows, positionSort), [rows, positionSort]);
 
   return (
     <div className="card pad">
@@ -3489,12 +3694,16 @@ function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPer
           <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search script" />
         </div>
         <div className="right">
+          <select className="select compact-select" value={positionSort} onChange={(event) => setPositionSort(event.target.value)} aria-label="Sort positions">
+            <option value="asc">A-Z</option>
+            <option value="desc">Z-A</option>
+          </select>
           <span className={`pill ${totalPnl >= 0 ? 'teal' : 'red'}`}>Overall P&L {totalPnl.toFixed(2)}</span>
           <button type="button" className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
         </div>
       </div>
       <AdminPositionTable
-        rows={rows}
+        rows={sortedRows}
         status={status}
         onReload={load}
         canEdit={role !== 'sub_broker' || permissions.adminPositionsEdit !== false}
@@ -3511,6 +3720,7 @@ function UserPositionsModal({ user, onClose }) {
   const [statsRows, setStatsRows] = useState([]);
   const [status, setStatus] = useState('open');
   const [q, setQ] = useState('');
+  const [positionSort, setPositionSort] = useState('asc');
 
   const load = useCallback(async () => {
     const [res, statsRes] = await Promise.all([
@@ -3561,6 +3771,7 @@ function UserPositionsModal({ user, onClose }) {
     fallbackAccount.settlement_balance ??
     0
   );
+  const sortedRows = useMemo(() => sortPositionRowsBySymbol(rows, positionSort), [rows, positionSort]);
 
   return (
     <div className="modal-backdrop">
@@ -3592,10 +3803,14 @@ function UserPositionsModal({ user, onClose }) {
               <input className="input" value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search" />
             </div>
             <div className="right">
+              <select className="select compact-select" value={positionSort} onChange={(event) => setPositionSort(event.target.value)} aria-label="Sort user positions">
+                <option value="asc">A-Z</option>
+                <option value="desc">Z-A</option>
+              </select>
               <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
             </div>
           </div>
-          <AdminPositionTable rows={rows} status={status} onReload={load} />
+          <AdminPositionTable rows={sortedRows} status={status} onReload={load} />
         </div>
       </div>
     </div>
