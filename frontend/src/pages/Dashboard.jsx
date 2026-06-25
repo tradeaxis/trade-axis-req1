@@ -257,16 +257,34 @@ const getMonthKey = (date) =>
 
 const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
 
-const getAllowedContractMonthKeys = (referenceDate = new Date()) => {
+const isCommoditySymbol = (symbol = {}) => {
+  const source = [
+    symbol.category,
+    symbol.segment,
+    symbol.exchange,
+    symbol.kite_exchange,
+    symbol.instrument_type,
+    symbol.symbol,
+    symbol.kite_tradingsymbol,
+    symbol.display_name,
+    symbol.underlying,
+  ].join(' ').toUpperCase();
+
+  return /MCX|COMMODITY|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|ALUMINI|LEAD|NICKEL|COTTON/.test(source);
+};
+
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 15 : 20);
+
+const getAllowedContractMonthKeys = (referenceDate = new Date(), symbol = {}) => {
   const allowed = new Set([getMonthKey(referenceDate)]);
-  if (referenceDate.getDate() >= 20) {
+  if (referenceDate.getDate() >= getNextContractVisibilityDay(symbol)) {
     allowed.add(getMonthKey(addMonths(referenceDate, 1)));
   }
   return allowed;
 };
 
 const isVisibleContract = (symbol, referenceDate = new Date()) => {
-  const allowedKeys = getAllowedContractMonthKeys(referenceDate);
+  const allowedKeys = getAllowedContractMonthKeys(referenceDate, symbol);
   const expiry = getContractExpiryDate(symbol);
   if (expiry) return allowedKeys.has(getMonthKey(expiry));
 
@@ -505,10 +523,11 @@ const pickLiveContractRows = (symbolsList = []) => {
     rowsByUnderlying.get(key).push(row);
   }
 
-  const preferredVisibleContracts = now.getDate() >= 20 ? 2 : 1;
   const picked = [];
 
   for (const rows of rowsByUnderlying.values()) {
+    const nextMonthDay = rows.some((row) => isCommoditySymbol(row)) ? 15 : 20;
+    const preferredVisibleContracts = now.getDate() >= nextMonthDay ? 2 : 1;
     const visibleRows = getUpcomingLiveContractRows(rows, now, preferredVisibleContracts);
     if (visibleRows.length > 0) {
       picked.push(...visibleRows);

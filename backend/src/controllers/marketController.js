@@ -57,6 +57,24 @@ const getMonthKey = (date) =>
 
 const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
 
+const isCommoditySymbolRow = (symbol = {}) => {
+  const source = [
+    symbol.category,
+    symbol.segment,
+    symbol.exchange,
+    symbol.kite_exchange,
+    symbol.instrument_type,
+    symbol.symbol,
+    symbol.kite_tradingsymbol,
+    symbol.display_name,
+    symbol.underlying,
+  ].join(' ').toUpperCase();
+
+  return /MCX|COMMODITY|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|ALUMINI|LEAD|NICKEL|COTTON/.test(source);
+};
+
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbolRow(symbol) ? 15 : 20);
+
 const parseContractMonth = (value = '') => {
   const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
   if (!raw) return '';
@@ -75,7 +93,7 @@ const parseContractMonth = (value = '') => {
 
 const isVisibleContractRow = (symbol, referenceDate = getIstNow()) => {
   const allowedMonthKeys = new Set([getMonthKey(referenceDate)]);
-  if (referenceDate.getDate() >= 20) {
+  if (referenceDate.getDate() >= getNextContractVisibilityDay(symbol)) {
     allowedMonthKeys.add(getMonthKey(addMonths(referenceDate, 1)));
   }
 

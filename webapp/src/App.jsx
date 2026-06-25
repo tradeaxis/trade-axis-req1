@@ -214,12 +214,14 @@ const isCommoditySymbol = (symbol = {}) => {
   return /MCX|COMMODITY|CRUDE|GOLD|SILVER|COPPER|NATURALGAS|ALUMINI|ALUMINIUM|ZINC|LEAD|NICKEL/.test(source);
 };
 
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 15 : 20);
+
 const isVisibleContract = (symbol, referenceDate = new Date()) => {
   const expiry = getExpiryDate(symbol);
   if (!expiry) return true;
 
   const allowedMonths = new Set([getMonthKey(referenceDate)]);
-  if (referenceDate.getDate() >= 20) {
+  if (referenceDate.getDate() >= getNextContractVisibilityDay(symbol)) {
     allowedMonths.add(getMonthKey(addMonths(referenceDate, 1)));
   }
 
@@ -519,7 +521,25 @@ const getPositionsReportMetrics = (user, rows = []) => {
   };
 };
 
-const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc' }) => {
+const getPositionReportStatusLabel = (statusFilter = 'all') => {
+  if (statusFilter === 'open') return 'Open positions';
+  if (statusFilter === 'closed') return 'Closed positions';
+  return 'All positions';
+};
+
+const filterPositionsReportRows = (rows = [], statusFilter = 'all') => {
+  const filter = String(statusFilter || 'all').toLowerCase();
+  if (filter === 'all') return rows;
+  if (filter === 'open') {
+    return rows.filter((row) => ['open', 'active'].includes(String(row.status || '').toLowerCase()));
+  }
+  if (filter === 'closed') {
+    return rows.filter((row) => String(row.status || '').toLowerCase() === 'closed');
+  }
+  return rows;
+};
+
+const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc', statusFilter = 'all' }) => {
   const generatedAt = formatDate(new Date().toISOString());
   const statHtml = (label, value, tone = '') => `
     <div class="stat ${tone}">
@@ -528,7 +548,7 @@ const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc' })
     </div>`;
 
   const userSections = users.map((user) => {
-    const rows = sortPositionRowsBySymbol(rowsByUser[user.id] || [], sort);
+    const rows = sortPositionRowsBySymbol(filterPositionsReportRows(rowsByUser[user.id] || [], statusFilter), sort);
     const metrics = getPositionsReportMetrics(user, rows);
     const bodyRows = rows.length
       ? rows.map((row) => {
@@ -610,7 +630,7 @@ const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc' })
 <body>
   <div class="report-title">
     <h1>Trade Axis User Positions Report</h1>
-    <div class="meta">Generated: ${escapeReportHtml(generatedAt)}<br />Users: ${users.length}</div>
+    <div class="meta">Generated: ${escapeReportHtml(generatedAt)}<br />Users: ${users.length}<br />Filter: ${escapeReportHtml(getPositionReportStatusLabel(statusFilter))}</div>
   </div>
   ${userSections || '<p>No users selected.</p>'}
 </body>
@@ -3248,6 +3268,7 @@ function PositionsReportModal({ users = [], onClose }) {
   const [rowsByUser, setRowsByUser] = useState({});
   const [loading, setLoading] = useState(false);
   const [sort, setSort] = useState('asc');
+  const [statusFilter, setStatusFilter] = useState('open');
 
   const selectedUsers = useMemo(() => {
     if (scope === 'single') return users.filter((user) => user.id === singleUserId);
@@ -3271,7 +3292,7 @@ function PositionsReportModal({ users = [], onClose }) {
       const res = await api.get('/web-admin/positions', {
         params: {
           userId: user.id,
-          status: 'all',
+          status: statusFilter,
           limit: pageSize,
           offset,
           _ts: Date.now(),
@@ -3284,7 +3305,7 @@ function PositionsReportModal({ users = [], onClose }) {
     }
 
     return allRows;
-  }, []);
+  }, [statusFilter]);
 
   const loadReport = useCallback(async () => {
     if (!selectedUsers.length) {
@@ -3319,6 +3340,7 @@ function PositionsReportModal({ users = [], onClose }) {
       users: selectedUsers,
       rowsByUser: completeRowsByUser,
       sort,
+      statusFilter,
     });
     const reportWindow = window.open('', '_blank', 'width=1200,height=800');
     if (!reportWindow) {
@@ -3371,6 +3393,11 @@ function PositionsReportModal({ users = [], onClose }) {
                 <option value="asc">A-Z</option>
                 <option value="desc">Z-A</option>
               </select>
+              <select className="select compact-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <option value="open">Open</option>
+                <option value="closed">Closed</option>
+                <option value="all">All</option>
+              </select>
             </div>
             <div className="right">
               <button className="btn subtle" onClick={loadReport} disabled={loading}><RefreshCw size={16} />Preview</button>
@@ -3381,10 +3408,10 @@ function PositionsReportModal({ users = [], onClose }) {
           <div className="positions-report-print-area">
             <div className="report-title">
               <h2>Trade Axis User Positions Report</h2>
-              <span>{formatDate(new Date().toISOString())}</span>
+              <span>{getPositionReportStatusLabel(statusFilter)} | {formatDate(new Date().toISOString())}</span>
             </div>
             {selectedUsers.map((user) => {
-              const rows = sortPositionRowsBySymbol(rowsByUser[user.id] || [], sort);
+              const rows = sortPositionRowsBySymbol(filterPositionsReportRows(rowsByUser[user.id] || [], statusFilter), sort);
               const metrics = getPositionsReportMetrics(user, rows);
               return (
                 <section className="positions-report-section" key={user.id}>
@@ -5177,11 +5204,47 @@ const getLedgerExportRows = (rows = []) =>
       account: row.account_number || '-',
       source: row.source || '-',
       action: row.action || '-',
+      type: row.ledgerType || getActionLedgerRowType(row),
       amount: amount.toFixed(2),
       status: row.status || '-',
       message: row.message || '-',
     };
   });
+
+const ACTION_LEDGER_TYPE_OPTIONS = [
+  ['all', 'All records'],
+  ['open', 'Open trades'],
+  ['closed', 'Closed trades'],
+  ['withdrawal', 'Withdrawals'],
+  ['settlement', 'Settlements'],
+  ['deposit', 'Deposits'],
+  ['adjustment', 'Adjustments'],
+  ['other', 'Other transactions'],
+];
+
+const getActionLedgerRowType = (row = {}) => {
+  const source = String(row.source || '').toLowerCase();
+  const action = String(row.action || '').toLowerCase();
+  const message = String(row.message || '').toLowerCase();
+  const status = String(row.status || '').toLowerCase();
+
+  if (source === 'trade') {
+    if (status === 'open' || action.includes('open')) return 'open';
+    if (status === 'closed' || action.includes('closed') || action.includes('close')) return 'closed';
+    return 'trade';
+  }
+  if (source === 'settlement' || action.includes('settlement') || message.includes('settlement')) return 'settlement';
+  if (action.includes('withdraw') || message.includes('withdraw')) return 'withdrawal';
+  if (action.includes('deposit') || message.includes('deposit') || message.includes('fund added')) return 'deposit';
+  if (action.includes('adjust') || message.includes('adjust')) return 'adjustment';
+  return 'other';
+};
+
+const filterActionLedgerRows = (rows = [], type = 'all') => {
+  const filter = String(type || 'all').toLowerCase();
+  if (filter === 'all') return rows;
+  return rows.filter((row) => String(row.ledgerType || getActionLedgerRowType(row)) === filter);
+};
 
 const exportLedgerExcel = (rows, label) => {
   const exportRows = getLedgerExportRows(rows);
@@ -5362,7 +5425,7 @@ const exportLedgerPdf = (rows, label) => {
 
 function ActionLedgerPanel() {
   const today = new Date().toISOString().slice(0, 10);
-  const [filters, setFilters] = useState({ from: today, to: today, scope: 'all', userId: '' });
+  const [filters, setFilters] = useState({ from: today, to: today, scope: 'all', userId: '', type: 'all' });
   const [users, setUsers] = useState([]);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -5396,12 +5459,15 @@ function ActionLedgerPanel() {
   }, [fetchRows]);
 
   const update = (key, value) => setFilters((prev) => ({ ...prev, [key]: value }));
-  const label = `${filters.scope === 'all' ? 'All Users' : filters.scope === 'own' ? 'Own Account' : (users.find((user) => user.id === filters.userId)?.login_id || 'Selected User')} ${filters.from || 'start'} to ${filters.to || 'today'}`;
+  const selectedTypeLabel = ACTION_LEDGER_TYPE_OPTIONS.find(([value]) => value === filters.type)?.[1] || 'All records';
+  const displayRows = useMemo(() => filterActionLedgerRows(rows, filters.type), [filters.type, rows]);
+  const label = `${filters.scope === 'all' ? 'All Users' : filters.scope === 'own' ? 'Own Account' : (users.find((user) => user.id === filters.userId)?.login_id || 'Selected User')} ${selectedTypeLabel} ${filters.from || 'start'} to ${filters.to || 'today'}`;
   const exportRows = async (format) => {
     const currentRows = rows.length ? rows : await fetchRows();
-    if (!currentRows.length) return toast.error('No rows available for this filter');
-    if (format === 'pdf') exportLedgerPdf(currentRows, label);
-    else exportLedgerExcel(currentRows, label);
+    const typedRows = filterActionLedgerRows(currentRows, filters.type);
+    if (!typedRows.length) return toast.error('No rows available for this filter');
+    if (format === 'pdf') exportLedgerPdf(typedRows, label);
+    else exportLedgerExcel(typedRows, label);
   };
 
   return (
@@ -5415,6 +5481,9 @@ function ActionLedgerPanel() {
           <option value="own">Own account ledger</option>
           <option value="selected">Select users</option>
         </select>
+        <select className="select" value={filters.type} onChange={(event) => update('type', event.target.value)}>
+          {ACTION_LEDGER_TYPE_OPTIONS.map(([value, text]) => <option key={value} value={value}>{text}</option>)}
+        </select>
         {filters.scope === 'selected' && (
           <select className="select" value={filters.userId} onChange={(event) => update('userId', event.target.value)}>
             <option value="">Select user</option>
@@ -5425,7 +5494,7 @@ function ActionLedgerPanel() {
         <button className="btn subtle" onClick={() => exportRows('pdf')} disabled={loading}><FileText size={16} />Export PDF</button>
         <button className="btn success" onClick={() => exportRows('excel')} disabled={loading}><FileSpreadsheet size={16} />Export Excel</button>
       </div>
-      <div className="table-wrap"><table><thead><tr><th>Date</th><th>User ID</th><th>User</th><th>Account</th><th>Source</th><th>Action</th><th>Amount</th><th>Status</th><th>Message</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{formatDate(row.date)}</td><td>{row.user_login_id || row.user_id || '-'}</td><td>{row.user_name || '-'}</td><td>{row.account_number || '-'}</td><td>{row.source}</td><td>{row.action}</td><td className={Number(row.amount || 0) >= 0 ? 'positive-blue' : 'negative'}>{Number(row.amount || 0).toFixed(2)}</td><td>{row.status}</td><td>{row.message}</td></tr>)}{!rows.length && <tr><td colSpan="9">{loading ? 'Loading action ledger...' : 'No ledger rows found'}</td></tr>}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>User ID</th><th>User</th><th>Account</th><th>Type</th><th>Source</th><th>Action</th><th>Amount</th><th>Status</th><th>Message</th></tr></thead><tbody>{displayRows.map((row) => <tr key={row.id}><td>{formatDate(row.date)}</td><td>{row.user_login_id || row.user_id || '-'}</td><td>{row.user_name || '-'}</td><td>{row.account_number || '-'}</td><td>{row.ledgerType || getActionLedgerRowType(row)}</td><td>{row.source}</td><td>{row.action}</td><td className={Number(row.amount || 0) >= 0 ? 'positive-blue' : 'negative'}>{Number(row.amount || 0).toFixed(2)}</td><td>{row.status}</td><td>{row.message}</td></tr>)}{!displayRows.length && <tr><td colSpan="10">{loading ? 'Loading action ledger...' : 'No ledger rows found'}</td></tr>}</tbody></table></div>
     </div>
   );
 }
@@ -5978,6 +6047,23 @@ function KiteSetupPanel() {
   const [loginUrl, setLoginUrl] = useState('');
   const [requestToken, setRequestToken] = useState('');
   const [tokenMode, setTokenMode] = useState('automatic');
+  const [providerSettings, setProviderSettings] = useState({
+    activeProvider: 'kite',
+    providers: {
+      kite: { enabled: true, label: 'Kite' },
+      truedata: { enabled: false, label: 'TrueData', userId: '', token: '', websocketUrl: '' },
+      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', jwtToken: '', feedToken: '' },
+    },
+  });
+
+  const normalizeProviderSettings = (settings = {}) => ({
+    activeProvider: settings.activeProvider || 'kite',
+    providers: {
+      kite: { enabled: true, label: 'Kite', ...(settings.providers?.kite || {}) },
+      truedata: { enabled: false, label: 'TrueData', userId: '', token: '', websocketUrl: '', ...(settings.providers?.truedata || {}) },
+      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', jwtToken: '', feedToken: '', ...(settings.providers?.angelone || {}) },
+    },
+  });
 
   const load = async () => {
     const [res, settingsRes] = await Promise.all([
@@ -5986,6 +6072,7 @@ function KiteSetupPanel() {
     ]);
     setStatus(res.data || {});
     setTokenMode(settingsRes.data?.data?.tokenMode || res.data?.authSettings?.tokenMode || 'automatic');
+    setProviderSettings(normalizeProviderSettings(settingsRes.data?.data || res.data?.authSettings || {}));
   };
 
   useEffect(() => {
@@ -6030,6 +6117,34 @@ function KiteSetupPanel() {
     }
   };
 
+  const updateProviderField = (providerKey, key, value) => {
+    setProviderSettings((prev) => ({
+      ...prev,
+      providers: {
+        ...prev.providers,
+        [providerKey]: {
+          ...(prev.providers?.[providerKey] || {}),
+          [key]: value,
+        },
+      },
+    }));
+  };
+
+  const saveProviderSettings = async () => {
+    try {
+      const res = await api.post('/web-admin/kite/settings', {
+        tokenMode,
+        activeProvider: providerSettings.activeProvider,
+        providers: providerSettings.providers,
+      });
+      setProviderSettings(normalizeProviderSettings(res.data?.data || providerSettings));
+      toast.success('Market data provider settings saved');
+      load().catch(() => {});
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Could not save provider settings');
+    }
+  };
+
   return (
     <div className="grid-2">
       <div className="card pad">
@@ -6056,6 +6171,47 @@ function KiteSetupPanel() {
           />
           <span>Enable automatic Kite token handling</span>
         </label>
+        <div className="section-head"><div><h2>Market Data Providers</h2><p>Kite remains live. Save backup credentials for TrueData and Angel One.</p></div></div>
+        <div className="grid-2">
+          <div className="field">
+            <label>Active Provider</label>
+            <select
+              className="select"
+              value={providerSettings.activeProvider}
+              onChange={(event) => setProviderSettings((prev) => ({ ...prev, activeProvider: event.target.value }))}
+            >
+              <option value="kite">Kite</option>
+              <option value="truedata">TrueData</option>
+              <option value="angelone">Angel One</option>
+            </select>
+          </div>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={!!providerSettings.providers?.truedata?.enabled}
+              onChange={(event) => updateProviderField('truedata', 'enabled', event.target.checked)}
+            />
+            <span>Enable TrueData backup</span>
+          </label>
+        </div>
+        <div className="grid-2">
+          <div className="field"><label>TrueData User ID</label><input className="input" value={providerSettings.providers?.truedata?.userId || ''} onChange={(event) => updateProviderField('truedata', 'userId', event.target.value)} /></div>
+          <div className="field"><label>TrueData Token</label><input className="input" value={providerSettings.providers?.truedata?.token || ''} onChange={(event) => updateProviderField('truedata', 'token', event.target.value)} /></div>
+          <div className="field"><label>TrueData WebSocket URL</label><input className="input" value={providerSettings.providers?.truedata?.websocketUrl || ''} onChange={(event) => updateProviderField('truedata', 'websocketUrl', event.target.value)} /></div>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={!!providerSettings.providers?.angelone?.enabled}
+              onChange={(event) => updateProviderField('angelone', 'enabled', event.target.checked)}
+            />
+            <span>Enable Angel One backup</span>
+          </label>
+          <div className="field"><label>Angel One API Key</label><input className="input" value={providerSettings.providers?.angelone?.apiKey || ''} onChange={(event) => updateProviderField('angelone', 'apiKey', event.target.value)} /></div>
+          <div className="field"><label>Angel One Client Code</label><input className="input" value={providerSettings.providers?.angelone?.clientCode || ''} onChange={(event) => updateProviderField('angelone', 'clientCode', event.target.value)} /></div>
+          <div className="field"><label>Angel One JWT Token</label><input className="input" value={providerSettings.providers?.angelone?.jwtToken || ''} onChange={(event) => updateProviderField('angelone', 'jwtToken', event.target.value)} /></div>
+          <div className="field"><label>Angel One Feed Token</label><input className="input" value={providerSettings.providers?.angelone?.feedToken || ''} onChange={(event) => updateProviderField('angelone', 'feedToken', event.target.value)} /></div>
+        </div>
+        <button className="btn primary" onClick={saveProviderSettings}>Save Provider Settings</button>
         <div className="section-head"><div><h2>Daily Setup</h2><p>Generate login URL and enter request token.</p></div></div>
         <button className="btn primary" onClick={getLogin}>Get Login URL</button>
         {loginUrl && <textarea className="textarea mono" readOnly value={loginUrl} style={{ marginTop: 12 }} />}

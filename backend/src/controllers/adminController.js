@@ -40,16 +40,54 @@ const KITE_AUTH_SETTINGS_KEY = 'kite_auth_settings';
 const DEFAULT_KITE_AUTH_SETTINGS = {
   tokenMode: 'automatic',
   automatic: true,
+  activeProvider: 'kite',
+  providers: {
+    kite: {
+      enabled: true,
+      label: 'Kite',
+    },
+    truedata: {
+      enabled: false,
+      label: 'TrueData',
+      userId: '',
+      token: '',
+      websocketUrl: '',
+    },
+    angelone: {
+      enabled: false,
+      label: 'Angel One',
+      apiKey: '',
+      clientCode: '',
+      jwtToken: '',
+      feedToken: '',
+    },
+  },
 };
 
 const normalizeKiteAuthSettings = (value = {}) => {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const tokenMode = source.tokenMode === 'manual' || source.mode === 'manual' ? 'manual' : 'automatic';
+  const providerKeys = new Set(['kite', 'truedata', 'angelone']);
+  const activeProvider = providerKeys.has(String(source.activeProvider || '').toLowerCase())
+    ? String(source.activeProvider).toLowerCase()
+    : 'kite';
+  const incomingProviders = source.providers && typeof source.providers === 'object' ? source.providers : {};
+  const providers = Object.fromEntries(Object.entries(DEFAULT_KITE_AUTH_SETTINGS.providers).map(([key, defaults]) => ([
+    key,
+    {
+      ...defaults,
+      ...(incomingProviders[key] && typeof incomingProviders[key] === 'object' ? incomingProviders[key] : {}),
+      enabled: toBoolean(incomingProviders[key]?.enabled, defaults.enabled),
+    },
+  ])));
+
   return {
     ...DEFAULT_KITE_AUTH_SETTINGS,
     ...source,
     tokenMode,
     automatic: tokenMode === 'automatic',
+    activeProvider,
+    providers,
   };
 };
 
@@ -1548,10 +1586,15 @@ exports.getKiteAuthSettings = async (req, res) => {
 
 exports.updateKiteAuthSettings = async (req, res) => {
   try {
+    const existingSettings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
     const tokenMode = req.body?.tokenMode === 'manual' || req.body?.automatic === false
       ? 'manual'
       : 'automatic';
-    const settings = normalizeKiteAuthSettings({ tokenMode });
+    const settings = normalizeKiteAuthSettings({
+      ...existingSettings,
+      ...req.body,
+      tokenMode,
+    });
 
     const { error } = await supabase
       .from('app_settings')

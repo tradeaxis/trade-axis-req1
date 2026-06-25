@@ -930,6 +930,7 @@ exports.actionLedger = async (req, res) => {
       to = '',
       scope = 'all',
       userId = '',
+      type = 'all',
       limit = 2000,
     } = req.query;
 
@@ -1010,6 +1011,33 @@ exports.actionLedger = async (req, res) => {
       });
     }
 
+    const getLedgerType = (row = {}) => {
+      const source = String(row.source || '').toLowerCase();
+      const action = String(row.action || '').toLowerCase();
+      const message = String(row.message || '').toLowerCase();
+      const status = String(row.status || '').toLowerCase();
+
+      if (source === 'trade') {
+        if (status === 'open' || action.includes('open')) return 'open';
+        if (status === 'closed' || action.includes('closed') || action.includes('close')) return 'closed';
+        return 'trade';
+      }
+      if (source === 'settlement' || action.includes('settlement') || message.includes('settlement')) return 'settlement';
+      if (action.includes('withdraw') || message.includes('withdraw')) return 'withdrawal';
+      if (action.includes('deposit') || message.includes('deposit') || message.includes('fund added')) return 'deposit';
+      if (action.includes('adjust') || message.includes('adjust')) return 'adjustment';
+      return 'other';
+    };
+
+    const matchesLedgerType = (row = {}) => {
+      const filter = String(type || 'all').toLowerCase();
+      if (!filter || filter === 'all') return true;
+      const rowType = getLedgerType(row);
+      if (filter === 'trades') return ['open', 'closed', 'trade'].includes(rowType);
+      if (filter === 'transactions') return ['deposit', 'withdrawal', 'adjustment', 'other'].includes(rowType);
+      return rowType === filter;
+    };
+
     const allRows = [
       ...(transactionsResult.data || []).map((row) => ({
         id: `txn-${row.id}`,
@@ -1043,7 +1071,10 @@ exports.actionLedger = async (req, res) => {
         message: `Balance settled | ${group.tradeCount} trade${group.tradeCount === 1 ? '' : 's'}${group.symbols.size ? ` | ${[...group.symbols].join(', ')}` : ''}`,
         symbols: undefined,
       })),
-    ].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    ]
+      .map((row) => ({ ...row, ledgerType: getLedgerType(row) }))
+      .filter(matchesLedgerType)
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
 
     const enrichedRows = await attachUserAndAccountInfo(allRows);
     res.json({ success: true, data: enrichedRows.slice(0, maxRows) });

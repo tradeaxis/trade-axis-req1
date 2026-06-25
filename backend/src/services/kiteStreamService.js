@@ -216,6 +216,22 @@ class KiteStreamService {
     return out;
   }
 
+  isCommoditySymbolRow(row = {}) {
+    const source = [
+      row.category,
+      row.segment,
+      row.exchange,
+      row.kite_exchange,
+      row.instrument_type,
+      row.symbol,
+      row.kite_tradingsymbol,
+      row.display_name,
+      row.underlying,
+    ].join(' ').toUpperCase();
+
+    return /MCX|COMMODITY|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|ALUMINI|LEAD|NICKEL|COTTON/.test(source);
+  }
+
   // ── Build token → symbol(s) map ──────────────────────────────────────────
   // Each instrument_token maps to:
   //   • The raw Kite tradingsymbol (e.g. "NIFTY26MARFUT")
@@ -252,12 +268,13 @@ class KiteStreamService {
       rowsByUnderlying.get(key).push(row);
     }
 
-    const now = new Date();
-    const preferredVisibleContracts = now.getDate() >= 20 ? 2 : 1;
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const selectedTokens = new Set();
     const selectedUnderlyingKeys = new Set();
 
     for (const [underlyingKey, rows] of rowsByUnderlying.entries()) {
+      const nextMonthDay = rows.some((row) => this.isCommoditySymbolRow(row)) ? 15 : 20;
+      const preferredVisibleContracts = now.getDate() >= nextMonthDay ? 2 : 1;
       const selectedRows = getUpcomingContractRows(rows, now, preferredVisibleContracts);
       if (!selectedRows.length) continue;
 
