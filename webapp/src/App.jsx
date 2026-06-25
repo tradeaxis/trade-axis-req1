@@ -214,7 +214,7 @@ const isCommoditySymbol = (symbol = {}) => {
   return /MCX|COMMODITY|CRUDE|GOLD|SILVER|COPPER|NATURALGAS|ALUMINI|ALUMINIUM|ZINC|LEAD|NICKEL/.test(source);
 };
 
-const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 15 : 20);
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 1 : 20);
 
 const isVisibleContract = (symbol, referenceDate = new Date()) => {
   const expiry = getExpiryDate(symbol);
@@ -263,17 +263,6 @@ const isMarketOpenNow = (symbol = '') => {
   const text = String(symbol || '').toUpperCase();
   const isCommodity = /MCX|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/.test(text);
   return isCommodity ? minutes >= 9 * 60 && minutes <= 23 * 60 + 30 : minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
-};
-
-const isSettlementReopenPosition = (position = {}) => {
-  const comment = String(position.comment || position.remarks || '').toLowerCase();
-  return Boolean(position.settled_from_trade_id)
-    || Boolean(position.settlement_week)
-    || comment.includes('m2m reopen')
-    || comment.includes('settlement reopen')
-    || comment.includes('reopen repaired')
-    || comment.includes('reopen normalized')
-    || comment.includes('weekly settlement');
 };
 
 const normalizeLiveUnderlyingKey = (value = '') =>
@@ -373,19 +362,6 @@ const getLivePositionPrice = (position, symbols = []) => {
   const marketOpen = isMarketOpenNow(position?.symbol);
   const symbol = findPositionSymbol(position, symbols);
 
-  if (!marketOpen && isSettlementReopenPosition(position)) {
-    return firstPositiveNumber(
-      position?.open_price,
-      symbol?.last,
-      symbol?.last_price,
-      symbol?.lastPrice,
-      symbol?.close_price,
-      symbol?.closePrice,
-      position?.current_price,
-      position?.close_price,
-    );
-  }
-
   if (!marketOpen) {
     return firstPositiveNumber(
       symbol?.close_price,
@@ -426,8 +402,6 @@ const getLivePositionPrice = (position, symbols = []) => {
 };
 
 const getPositionPnl = (position, symbols = []) => {
-  if (!isMarketOpenNow(position?.symbol) && isSettlementReopenPosition(position)) return 0;
-
   const currentPrice = getLivePositionPrice(position, symbols);
   const qty = Number(position.quantity || 0);
   const openPrice = Number(position.open_price || 0);
@@ -2759,7 +2733,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
             <div><span>Loss:</span><strong className="negative">{formatMoney(visibleDealsSummary?.totalLoss || 0)}</strong></div>
             <div><span>Deposits:</span><strong className="positive-blue">{formatMoney(visibleDealsSummary?.totalDeposits || 0)}</strong></div>
             <div><span>Withdrawals:</span><strong className="negative">{formatMoney(visibleDealsSummary?.totalWithdrawals || 0)}</strong></div>
-            <div><span>Commission:</span><strong>{formatMoney(visibleDealsSummary?.totalCommission || 0)}</strong></div>
+            <div><span>Commission:</span><strong>{formatMoney(visibleDealsSummary?.displayCommission ?? visibleDealsSummary?.totalCommission ?? 0)}</strong></div>
             <div><span>Balance Settled:</span><strong className={Number(visibleDealsSummary?.balanceSettled || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(visibleDealsSummary?.balanceSettled || 0)}</strong></div>
             <div><span>Balance:</span><strong>{formatMoney(visibleDealsSummary?.balance || selectedAccount?.balance || 0)}</strong></div>
           </div>
@@ -4843,6 +4817,7 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
     else if (type.includes('withdraw') || description.includes('withdraw')) acc.totalWithdrawals += Math.abs(amount);
     else if (deal.source === 'trade' && deal.side === 'exit' && amount >= 0) acc.totalProfit += amount;
     else if (deal.source === 'trade' && deal.side === 'exit') acc.totalLoss += Math.abs(amount);
+    acc.displayCommission += Number(deal.commission || deal.brokerage || 0);
     return acc;
   }, {
     totalProfit: 0,
@@ -4850,10 +4825,12 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
     totalDeposits: 0,
     totalWithdrawals: 0,
     totalCommission: 0,
+    displayCommission: 0,
     balanceSettled: 0,
     balance: Number(selectedAccount?.balance ?? fallback?.balance ?? 0),
   });
 
+  const calculatedDisplayCommission = summary.displayCommission;
   summary.totalProfit = Number(fallback?.totalProfit ?? summary.totalProfit);
   summary.totalLoss = Number(fallback?.totalLoss ?? summary.totalLoss);
   summary.totalDeposits = Number(fallback?.totalDeposits ?? summary.totalDeposits);
@@ -4861,8 +4838,10 @@ function buildFilteredDealsSummary(deals = [], fallback = {}, selectedAccount = 
   summary.totalCommission = Number(
     fallback?.openPositionCommission ?? fallback?.totalCommission ?? 0,
   );
-  const calculatedBalanceSettled =
-    summary.totalProfit - summary.totalLoss - summary.totalCommission;
+  summary.displayCommission = Number(
+    fallback?.displayCommission ?? calculatedDisplayCommission ?? summary.totalCommission ?? 0,
+  );
+  const calculatedBalanceSettled = summary.totalProfit - summary.totalLoss;
   summary.balanceSettled = Number(
     fallback?.balanceSettled ??
     (hasSettlementRow ? summary.balanceSettled : calculatedBalanceSettled),

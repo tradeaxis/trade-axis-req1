@@ -1159,8 +1159,11 @@ const getDeals = async (req, res) => {
       (sum, trade) => sum + inferEntryCommission(trade),
       0,
     );
-    const calculatedBalanceSettled =
-      totalProfit - totalLoss - openPositionCommission;
+    const displayCommission = allDeals.reduce(
+      (sum, deal) => sum + Number(deal.commission || deal.brokerage || 0),
+      0,
+    );
+    const calculatedBalanceSettled = totalProfit - totalLoss;
 
     const summary = {
       totalProfit,
@@ -1169,6 +1172,7 @@ const getDeals = async (req, res) => {
       totalWithdrawals: Math.abs(allDeals.filter((d) => d.type === 'withdrawal').reduce((s, d) => s + d.amount, 0)),
       totalCommission: openPositionCommission,
       openPositionCommission,
+      displayCommission: Number(displayCommission.toFixed(2)),
       balanceSettled: settlementSummaryDeal
         ? Number(settlementSummaryDeal.amount || 0)
         : Number(calculatedBalanceSettled.toFixed(2)),

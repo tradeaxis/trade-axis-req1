@@ -2,7 +2,7 @@
 // ═══════════════════════════════════════════════════════════════
 //  Weekly M2M Settlement — Close & Re-open at SAME price
 //
-//  ▸ No brokerage on settlement (close or reopen)
+//  ▸ No exit brokerage on settlement; the original entry brokerage is included once in settled P&L.
 //  ▸ Balance NEVER changes
 //  ▸ Credit resets to 0 (weekly realized P&L settled offline by admin)
 //  ▸ Equity resets to Balance
@@ -286,11 +286,30 @@ class WeeklySettlementService {
         Number(account.credit || 0),
       );
 
-      // Calculate equity BEFORE settlement (for admin record)
-      const floatingBefore = accountTrades.reduce(
-        (sum, t) => sum + Number(t.profit || 0),
-        0
-      );
+      const settlementPnlByTradeId = new Map();
+      const calculateSettlementPnl = (trade) => {
+        const closePrice = Number(settlementPrices.get(String(trade.id)) || 0);
+        const qty = Number(trade.quantity || 0);
+        const openPrice = Number(trade.open_price || 0);
+        const direction = trade.trade_type === 'buy' ? 1 : -1;
+        const grossPnL = closePrice > 0 && openPrice > 0 && qty > 0
+          ? roundMoney((closePrice - openPrice) * direction * qty)
+          : roundMoney(Number(trade.profit || 0));
+        const entryBrokerage = roundMoney(Number(trade.buy_brokerage ?? trade.brokerage ?? 0));
+        return {
+          closePrice,
+          grossPnL,
+          entryBrokerage,
+          netPnL: roundMoney(grossPnL - entryBrokerage),
+        };
+      };
+
+      // Calculate equity BEFORE settlement from settlement prices, not stale open-position P&L.
+      const floatingBefore = accountTrades.reduce((sum, t) => {
+        const pnl = calculateSettlementPnl(t);
+        settlementPnlByTradeId.set(String(t.id), pnl);
+        return sum + pnl.netPnL;
+      }, 0);
       const weeklyPnL = roundMoney(creditBefore + floatingBefore);
       const equityBefore = balance + weeklyPnL;
 
@@ -316,10 +335,11 @@ class WeeklySettlementService {
 
           const qty = Number(trade.quantity || 0);
           const openPrice = Number(trade.open_price || 0);
-          const direction = trade.trade_type === 'buy' ? 1 : -1;
-
-          // P&L = pure price difference × qty (NO brokerage)
-          const grossPnL = (closePrice - openPrice) * direction * qty;
+          const {
+            grossPnL,
+            entryBrokerage,
+            netPnL,
+          } = settlementPnlByTradeId.get(String(trade.id)) || calculateSettlementPnl(trade);
 
           // ── A) Close the old trade ──
           const { data: closedTrade, error: closeErr } = await supabase
@@ -327,7 +347,7 @@ class WeeklySettlementService {
             .update({
               close_price: closePrice,
               current_price: closePrice,
-              profit: grossPnL,        // gross — no brokerage on settlement
+              profit: netPnL,          // net of original entry brokerage
               sell_brokerage: 0,       // no exit brokerage
               brokerage: 0,            // no brokerage for settlement
               status: 'closed',
@@ -335,7 +355,7 @@ class WeeklySettlementService {
               updated_at: closeTime,
               is_settlement_close: true,
               settlement_week: settlementWeek,
-              comment: `Weekly settlement close. Gross P&L: ${grossPnL.toFixed(2)}`,
+              comment: `Weekly settlement close. Net P&L: ${netPnL.toFixed(2)} (gross ${grossPnL.toFixed(2)}, entry brokerage ${entryBrokerage.toFixed(2)})`,
             })
             .eq('id', trade.id)
             .eq('status', 'open')
@@ -366,7 +386,7 @@ class WeeklySettlementService {
                 close_time: null,
                 status: 'open',
                 current_price: closePrice,
-                profit: grossPnL,
+                profit: netPnL,
                 sell_brokerage: Number(trade.sell_brokerage || 0),
                 brokerage: Number(trade.brokerage || 0),
                 is_settlement_close: false,
@@ -499,11 +519,11 @@ class WeeklySettlementService {
           applyReopenedMargin(newTrade.id, Number(newTrade.margin || reopenMargin || 0));
           settledCount++;
 
-          const emoji = grossPnL >= 0 ? '🟢' : '🔴';
+          const emoji = netPnL >= 0 ? '🟢' : '🔴';
           console.log(
             `  ${emoji} ${trade.symbol} ${trade.trade_type.toUpperCase()} x${qty}` +
             ` | ${openPrice.toFixed(2)} → ${closePrice.toFixed(2)}` +
-            ` | P&L: ${grossPnL >= 0 ? '+' : ''}${grossPnL.toFixed(2)}` +
+            ` | P&L: ${netPnL >= 0 ? '+' : ''}${netPnL.toFixed(2)}` +
             ` | Reopened #${newTrade.id}`
           );
 
@@ -520,8 +540,8 @@ class WeeklySettlementService {
               quantity: qty,
               open_price: openPrice,
               close_price: closePrice,
-              profit_loss: grossPnL,
-              commission: 0,           // no brokerage on settlement
+              profit_loss: netPnL,
+              commission: entryBrokerage,
               balance_before: balance,
               balance_after: balance,   // balance NEVER changes
               credit_before: weeklyPnL,
@@ -706,8 +726,9 @@ class WeeklySettlementService {
           closePrice = resolvedPrice;
           const qty = toNumber(row.quantity);
           const openPrice = toNumber(row.open_price);
+          const entryBrokerage = roundMoney(Number(row.commission || 0));
           profitLoss = qty > 0 && openPrice > 0
-            ? roundMoney((closePrice - openPrice) * tradeDirection(row) * qty)
+            ? roundMoney(((closePrice - openPrice) * tradeDirection(row) * qty) - entryBrokerage)
             : roundMoney(oldProfitLoss);
 
           row.close_price = closePrice;
@@ -1240,7 +1261,7 @@ class WeeklySettlementService {
     const scopedAccountIds = [...(accountIds || [])].filter(Boolean);
     let openTradeQuery = supabase
       .from('trades')
-      .select('id,account_id,user_id,symbol,trade_type,quantity,open_price,current_price,profit,margin,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time')
+      .select('id,account_id,user_id,symbol,trade_type,quantity,open_price,current_price,profit,margin,brokerage,buy_brokerage,settled_from_trade_id,settlement_week,is_settlement_close,created_at,open_time')
       .eq('status', 'open');
 
     if (scopedAccountIds.length > 0) {
@@ -1308,13 +1329,15 @@ class WeeklySettlementService {
       const grossPnL = closePrice > 0 && openPrice > 0 && qty > 0
         ? (closePrice - openPrice) * direction * qty
         : Number(parent.profit || 0);
+      const entryBrokerage = roundMoney(Number(parent.buy_brokerage ?? parent.brokerage ?? 0));
+      const netPnL = roundMoney(grossPnL - entryBrokerage);
 
       const { error: parentErr } = await supabase
         .from('trades')
         .update({
           close_price: closePrice || Number(parent.current_price || parent.open_price || 0),
           current_price: closePrice || Number(parent.current_price || parent.open_price || 0),
-          profit: grossPnL,
+          profit: netPnL,
           sell_brokerage: 0,
           brokerage: 0,
           status: 'closed',

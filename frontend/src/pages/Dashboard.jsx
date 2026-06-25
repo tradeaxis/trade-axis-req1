@@ -273,7 +273,7 @@ const isCommoditySymbol = (symbol = {}) => {
   return /MCX|COMMODITY|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|ALUMINI|LEAD|NICKEL|COTTON/.test(source);
 };
 
-const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 15 : 20);
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbol(symbol) ? 1 : 20);
 
 const getAllowedContractMonthKeys = (referenceDate = new Date(), symbol = {}) => {
   const allowed = new Set([getMonthKey(referenceDate)]);
@@ -375,19 +375,6 @@ const getTradeQuotePrice = (trade, quotes = {}, symbols = []) => {
   const quote = findTradeQuote(trade, quotes, symbols);
 
   if (!isMarketOpenNow(trade?.symbol)) {
-    if (isSettlementReopenTrade(trade)) {
-      return firstPositiveNumber(
-        trade?.open_price,
-        quote?.last,
-        quote?.last_price,
-        quote?.lastPrice,
-        quote?.close_price,
-        quote?.closePrice,
-        trade?.current_price,
-        trade?.close_price,
-      );
-    }
-
     return firstPositiveNumber(
       quote?.close_price,
       quote?.closePrice,
@@ -434,16 +421,6 @@ const getTradeLivePnl = (trade, currentPrice) => {
   const brokerage = Number(trade?.buy_brokerage ?? trade?.brokerage ?? 0);
   if (!quantity || !openPrice || !currentPrice) return Number(trade?.profit || 0);
   return (currentPrice - openPrice) * quantity * lotSize * direction - brokerage;
-};
-
-const isSettlementReopenTrade = (trade = {}) => {
-  const comment = String(trade?.comment || '').toLowerCase();
-  return Boolean(trade?.settled_from_trade_id)
-    || Boolean(trade?.settlement_week)
-    || comment.includes('m2m reopen')
-    || comment.includes('settlement reopen')
-    || comment.includes('reopen repaired')
-    || comment.includes('reopen normalized');
 };
 
 const findScrollableParent = (element) => {
@@ -1352,11 +1329,10 @@ const Dashboard = () => {
         || !isMarketOpenNow(trade?.symbol);
 
       if (marketClosed) {
-        const isSettlementReopen = isSettlementReopenTrade(trade);
         const quotePrice = getTradeQuotePrice(trade, quotes, quoteSymbols);
         const storedCurrentPrice = firstPositiveNumber(
           quotePrice,
-          isSettlementReopen ? null : trade?.current_price,
+          trade?.current_price,
           trade?.close_price,
           trade?.open_price,
         );
@@ -3521,6 +3497,10 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         (sum, trade) => sum + Number(trade.buy_brokerage ?? trade.brokerage ?? 0),
         0,
       );
+    const displayCommission = filteredDeals.reduce(
+      (sum, deal) => sum + Number(deal.commission || deal.brokerage || 0),
+      0,
+    );
     const totalProfit = exitDeals
       .filter((deal) => Number(deal.amount || 0) > 0)
       .reduce((sum, deal) => sum + Number(deal.amount || 0), 0);
@@ -3536,7 +3516,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
       totalDeposits: 0,
       totalWithdrawals: 0,
       totalCommission: openPositionCommission,
-      balanceSettled: totalProfit - totalLoss - openPositionCommission,
+      displayCommission,
+      balanceSettled: totalProfit - totalLoss,
       currentBalance: Number(dealsSummary.currentBalance || 0),
     };
   }, [dealsSummary, filteredDeals, dealsSymbolFilter, dealsCustomFilter, liveOpenTrades]);
@@ -3645,7 +3626,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               ['Loss', formatPdfCurrency(currentDealsSummary.totalLoss || 0)],
               ['Deposits', formatPdfCurrency(currentDealsSummary.totalDeposits || 0)],
               ['Withdrawals', formatPdfCurrency(currentDealsSummary.totalWithdrawals || 0)],
-              ['Commission', formatPdfCurrency(currentDealsSummary.totalCommission || 0)],
+              ['Commission', formatPdfCurrency(currentDealsSummary.displayCommission ?? currentDealsSummary.totalCommission ?? 0)],
               ['Balance Settled', formatSignedPdfCurrency(currentDealsSummary.balanceSettled || 0)],
               ['Current Balance', formatPdfCurrency(currentDealsSummary.currentBalance || 0)],
             ]
@@ -6105,7 +6086,7 @@ const renderOrderConfirmation = () => {
                       <span style={{ color: textMuted }}>
                         Commission{dealsSymbolFilter ? ` (${formatDisplaySymbol(dealsSymbolFilter, allFuturesSymbols)})` : ''}:
                       </span>
-                      <span className="font-bold" style={{ color: textMuted }}>{formatINR(currentDealsSummary.totalCommission)}</span>
+                      <span className="font-bold" style={{ color: textMuted }}>{formatINR(currentDealsSummary.displayCommission ?? currentDealsSummary.totalCommission ?? 0)}</span>
                     </div>
                     <div className="flex justify-between col-span-2">
                       <span style={{ color: textMuted }}>Balance Settled:</span>

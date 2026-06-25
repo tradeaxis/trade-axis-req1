@@ -73,7 +73,7 @@ const isCommoditySymbolRow = (symbol = {}) => {
   return /MCX|COMMODITY|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|ALUMINI|LEAD|NICKEL|COTTON/.test(source);
 };
 
-const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbolRow(symbol) ? 15 : 20);
+const getNextContractVisibilityDay = (symbol = {}) => (isCommoditySymbolRow(symbol) ? 1 : 20);
 
 const parseContractMonth = (value = '') => {
   const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
