@@ -1,4 +1,4 @@
-const DEFAULT_LEVERAGE_OPTIONS = [1, 2, 5, 10, 20, 25, 30, 40, 50, 100, 200, 300, 500, 1000];
+const DEFAULT_LEVERAGE_OPTIONS = [1, 2, 5, 10, 15, 20, 25, 30, 40, 50, 100, 200, 300, 500, 1000];
 
 const normalizeLeverageOptions = (values = []) => (
   [...new Set(
@@ -18,7 +18,7 @@ const parseEnvLeverageOptions = () => {
 
 const getAllowedLeverageOptions = () => {
   const envOptions = parseEnvLeverageOptions();
-  return envOptions || DEFAULT_LEVERAGE_OPTIONS;
+  return envOptions ? normalizeLeverageOptions([...envOptions, 15]) : DEFAULT_LEVERAGE_OPTIONS;
 };
 
 const isAllowedLeverage = (value) => {

@@ -58,6 +58,10 @@ router.post('/kite/stop-stream', adminAuth, adminController.stopKiteStream);
 router.get('/kite/status', adminAuth, adminController.kiteStatus);
 router.get('/kite/settings', adminAuth, adminController.getKiteAuthSettings);
 router.post('/kite/settings', adminAuth, adminController.updateKiteAuthSettings);
+router.post('/angelone/session', adminAuth, adminController.setAngelOneSession);
+router.get('/angelone/login-url', adminAuth, adminController.getAngelOneLoginUrl);
+router.post('/angelone/start-stream', adminAuth, adminController.startAngelOneStream);
+router.post('/angelone/stop-stream', adminAuth, adminController.stopAngelOneStream);
 // Add these with the other admin routes
 router.post('/cleanup-data', adminAuth, adminController.cleanupOldData);
 router.post('/kite/delete-token', adminAuth, adminController.deleteExpiredToken);

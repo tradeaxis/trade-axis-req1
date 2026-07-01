@@ -6025,13 +6025,15 @@ function KiteSetupPanel() {
   const [status, setStatus] = useState(null);
   const [loginUrl, setLoginUrl] = useState('');
   const [requestToken, setRequestToken] = useState('');
+  const [angelSessionToken, setAngelSessionToken] = useState('');
+  const [angelLoginUrl, setAngelLoginUrl] = useState('');
   const [tokenMode, setTokenMode] = useState('automatic');
   const [providerSettings, setProviderSettings] = useState({
     activeProvider: 'kite',
     providers: {
       kite: { enabled: true, label: 'Kite' },
       truedata: { enabled: false, label: 'TrueData', userId: '', token: '', websocketUrl: '' },
-      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', jwtToken: '', feedToken: '' },
+      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', redirectUrl: 'https://dashboard.tradeaxis.in', jwtToken: '', feedToken: '' },
     },
   });
 
@@ -6040,7 +6042,7 @@ function KiteSetupPanel() {
     providers: {
       kite: { enabled: true, label: 'Kite', ...(settings.providers?.kite || {}) },
       truedata: { enabled: false, label: 'TrueData', userId: '', token: '', websocketUrl: '', ...(settings.providers?.truedata || {}) },
-      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', jwtToken: '', feedToken: '', ...(settings.providers?.angelone || {}) },
+      angelone: { enabled: false, label: 'Angel One', apiKey: '', clientCode: '', redirectUrl: 'https://dashboard.tradeaxis.in', jwtToken: '', feedToken: '', ...(settings.providers?.angelone || {}) },
     },
   });
 
@@ -6113,7 +6115,7 @@ function KiteSetupPanel() {
     try {
       const res = await api.post('/web-admin/kite/settings', {
         tokenMode,
-        activeProvider: providerSettings.activeProvider,
+        activeProvider: status?.stream?.source === 'angelone' ? 'angelone' : 'kite',
         providers: providerSettings.providers,
       });
       setProviderSettings(normalizeProviderSettings(res.data?.data || providerSettings));
@@ -6121,6 +6123,39 @@ function KiteSetupPanel() {
       load().catch(() => {});
     } catch (error) {
       toast.error(error.response?.data?.message || 'Could not save provider settings');
+    }
+  };
+
+  const setAngelSession = async () => {
+    try {
+      const angel = providerSettings.providers?.angelone || {};
+      const res = await api.post('/web-admin/angelone/session', {
+        sessionToken: angelSessionToken,
+        apiKey: angel.apiKey,
+        clientCode: angel.clientCode,
+      });
+      setAngelSessionToken('');
+      toast.success(res.data?.message || 'Angel One stream started');
+      load().catch(() => {});
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Angel One session failed');
+    }
+  };
+
+  const getAngelLogin = async () => {
+    const popup = window.open('about:blank', '_blank');
+    try {
+      await saveProviderSettings();
+      const res = await api.get('/web-admin/angelone/login-url');
+      const url = res.data?.loginUrl || '';
+      setAngelLoginUrl(url);
+      if (url && popup) {
+        popup.opener = null;
+        popup.location = url;
+      }
+    } catch (error) {
+      popup?.close();
+      toast.error(error.response?.data?.message || 'Could not create Angel One login URL');
     }
   };
 
@@ -6133,6 +6168,8 @@ function KiteSetupPanel() {
           <Stat label="Stream" value={status?.stream?.running ? 'Running' : 'Stopped'} />
           <Stat label="Tokens" value={status?.stream?.tokenCount || 0} />
           <Stat label="Token Mode" value={tokenMode === 'automatic' ? 'Automatic' : 'Manual'} />
+          <Stat label="Active Provider" value={status?.stream?.source === 'angelone' ? 'Angel One' : 'Kite'} />
+          <Stat label="Angel Stream" value={status?.angelOneStream?.running ? 'Running' : 'Stopped'} />
         </div>
       </div>
       <div className="card pad">
@@ -6150,33 +6187,22 @@ function KiteSetupPanel() {
           />
           <span>Enable automatic Kite token handling</span>
         </label>
-        <div className="section-head"><div><h2>Market Data Providers</h2><p>Kite remains live. Save backup credentials for TrueData and Angel One.</p></div></div>
+        <div className="section-head"><div><h2>Market Data Providers</h2><p>Only one provider publishes prices. Starting Angel One stops Kite; starting Kite stops Angel One.</p></div></div>
         <div className="grid-2">
           <div className="field">
             <label>Active Provider</label>
             <select
               className="select"
-              value={providerSettings.activeProvider}
-              onChange={(event) => setProviderSettings((prev) => ({ ...prev, activeProvider: event.target.value }))}
+              value={status?.stream?.source === 'angelone' ? 'angelone' : 'kite'}
+              disabled
             >
               <option value="kite">Kite</option>
-              <option value="truedata">TrueData</option>
               <option value="angelone">Angel One</option>
             </select>
           </div>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={!!providerSettings.providers?.truedata?.enabled}
-              onChange={(event) => updateProviderField('truedata', 'enabled', event.target.checked)}
-            />
-            <span>Enable TrueData backup</span>
-          </label>
+          <div className="field"><label>Provider State</label><div className="input">{status?.stream?.source === 'angelone' ? 'Angel One is publishing' : 'Kite is publishing'}</div></div>
         </div>
         <div className="grid-2">
-          <div className="field"><label>TrueData User ID</label><input className="input" value={providerSettings.providers?.truedata?.userId || ''} onChange={(event) => updateProviderField('truedata', 'userId', event.target.value)} /></div>
-          <div className="field"><label>TrueData Token</label><input className="input" value={providerSettings.providers?.truedata?.token || ''} onChange={(event) => updateProviderField('truedata', 'token', event.target.value)} /></div>
-          <div className="field"><label>TrueData WebSocket URL</label><input className="input" value={providerSettings.providers?.truedata?.websocketUrl || ''} onChange={(event) => updateProviderField('truedata', 'websocketUrl', event.target.value)} /></div>
           <label className="check-row">
             <input
               type="checkbox"
@@ -6187,18 +6213,29 @@ function KiteSetupPanel() {
           </label>
           <div className="field"><label>Angel One API Key</label><input className="input" value={providerSettings.providers?.angelone?.apiKey || ''} onChange={(event) => updateProviderField('angelone', 'apiKey', event.target.value)} /></div>
           <div className="field"><label>Angel One Client Code</label><input className="input" value={providerSettings.providers?.angelone?.clientCode || ''} onChange={(event) => updateProviderField('angelone', 'clientCode', event.target.value)} /></div>
-          <div className="field"><label>Angel One JWT Token</label><input className="input" value={providerSettings.providers?.angelone?.jwtToken || ''} onChange={(event) => updateProviderField('angelone', 'jwtToken', event.target.value)} /></div>
-          <div className="field"><label>Angel One Feed Token</label><input className="input" value={providerSettings.providers?.angelone?.feedToken || ''} onChange={(event) => updateProviderField('angelone', 'feedToken', event.target.value)} /></div>
+          <div className="field"><label>Angel Redirect URL</label><input className="input" value={providerSettings.providers?.angelone?.redirectUrl || ''} onChange={(event) => updateProviderField('angelone', 'redirectUrl', event.target.value)} /></div>
         </div>
         <button className="btn primary" onClick={saveProviderSettings}>Save Provider Settings</button>
+        <div className="section-head"><div><h2>Angel One Session</h2><p>Paste the complete SmartAPI redirect URL, JSON token bundle, or JWT|FEED value once.</p></div></div>
+        <div className="field">
+          <label>Angel Session</label>
+          <input className="input" type="password" autoComplete="off" value={angelSessionToken} onChange={(event) => setAngelSessionToken(event.target.value)} />
+        </div>
+        <button className="btn primary" onClick={getAngelLogin}>Get Angel Login URL</button>
+        {angelLoginUrl && <textarea className="textarea mono" readOnly value={angelLoginUrl} style={{ marginTop: 12 }} />}
+        <div className="kite-action-grid">
+          <button className="btn success" onClick={setAngelSession}>Set Session & Start</button>
+          <button className="btn primary" onClick={() => runKiteAction('/web-admin/angelone/start-stream', 'Angel One stream started')}>Restart Angel</button>
+          <button className="btn subtle" onClick={() => runKiteAction('/web-admin/angelone/stop-stream', 'Angel One stream stopped')}>Stop Angel</button>
+        </div>
         <div className="section-head"><div><h2>Daily Setup</h2><p>Generate login URL and enter request token.</p></div></div>
         <button className="btn primary" onClick={getLogin}>Get Login URL</button>
         {loginUrl && <textarea className="textarea mono" readOnly value={loginUrl} style={{ marginTop: 12 }} />}
         <div className="field" style={{ marginTop: 12 }}><label>Request Token</label><input className="input" value={requestToken} onChange={(event) => setRequestToken(event.target.value)} /></div>
         <button className="btn success" onClick={setToken}>Set Token</button>
         <div className="kite-action-grid">
-          <button className="btn primary" onClick={() => runKiteAction('/web-admin/kite/start-stream', 'Stream started')}>Start Stream</button>
-          <button className="btn subtle" onClick={() => runKiteAction('/web-admin/kite/stop-stream', 'Stream stopped')}>Stop Stream</button>
+          <button className="btn primary" onClick={() => runKiteAction('/web-admin/kite/start-stream', 'Kite stream started')}>Start Kite</button>
+          <button className="btn subtle" onClick={() => runKiteAction('/web-admin/kite/stop-stream', 'Kite stream stopped')}>Stop Kite</button>
           <button className="btn success" onClick={() => runKiteAction('/web-admin/kite/sync-symbols', 'Symbols synced')}>Sync Symbols</button>
         </div>
       </div>

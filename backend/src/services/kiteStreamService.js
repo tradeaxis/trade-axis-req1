@@ -132,6 +132,7 @@ class KiteStreamService {
     this.io          = null;
     this.running     = false;
     this.lastTickAt  = null;
+    this.activeSource = 'kite';
 
     // token → { symbols: string[], tickSize: number, exchange: string }
     this.tokenToSymbols = new Map();
@@ -346,6 +347,7 @@ class KiteStreamService {
 
   async start(io) {
     this.io = io;
+    this.activeSource = 'kite';
 
     // DON'T call init(true) here — it re-reads from DB which may have stale data
     // due to async write race condition. Instead, just check if kiteService 
@@ -499,6 +501,7 @@ class KiteStreamService {
       this.lastEmitAt.clear();
       this.underlyingCount = 0;
       this.mappedSymbolCount = 0;
+      this.activeSource = 'kite';
     }
     console.log('🛑 KiteStreamService fully stopped. Price cache cleared.');
     return { stopped: true };
@@ -624,7 +627,7 @@ class KiteStreamService {
             volume:        priceData.volume,
             contractMonth,
             timestamp:     emitTs,
-            source:        'kite',
+            source:        this.activeSource || 'kite',
           });
         }
       }
@@ -724,6 +727,7 @@ class KiteStreamService {
     
     return {
       running:           this.running,
+      source:            this.activeSource || 'kite',
       lastTickAt:        this.lastTickAt,
       tickAgeSeconds:    tickAge,
       sessionExpired:    this.lastTickAt === null && !this.running,
@@ -741,6 +745,9 @@ class KiteStreamService {
   }
 
   async refreshSubscriptions() {
+    if (this.activeSource !== 'kite') {
+      return { refreshed: false, reason: `${this.activeSource} is the active provider` };
+    }
     if (!this.ticker || !this.running) {
       console.log('ℹ️ Ticker not running, skip refresh');
       return { refreshed: false };
@@ -764,6 +771,36 @@ class KiteStreamService {
 
     console.log(`🔄 Refreshed subscriptions: ${oldCount} → ${newCount} tokens`);
     return { refreshed: true, oldCount, newCount, removedCount: removedTokens.length };
+  }
+
+  activateExternalSource(source, io, tokenMap) {
+    this.io = io || this.io;
+    this.activeSource = String(source || 'external').toLowerCase();
+    this.running = true;
+    this.lastTickAt = null;
+    this.priceCache.clear();
+    this.tokenPriceCache.clear();
+    this.dirtySymbols.clear();
+    this.lastEmitAt.clear();
+    this.tokenToSymbols = tokenMap instanceof Map ? tokenMap : new Map();
+    this.underlyingCount = new Set(
+      [...this.tokenToSymbols.values()].map((entry) => entry.underlying).filter(Boolean),
+    ).size;
+    this.mappedSymbolCount = [...this.tokenToSymbols.values()]
+      .reduce((count, entry) => count + (entry.symbols?.length || 0), 0);
+    this.startDBFlush();
+  }
+
+  ingestExternalTicks(source, ticks, mode = 'full') {
+    if (String(source || '').toLowerCase() !== this.activeSource) return false;
+    this.lastTickAt = new Date().toISOString();
+    this.handleTicks(ticks, mode);
+    return true;
+  }
+
+  async releaseExternalSource(source) {
+    if (String(source || '').toLowerCase() !== this.activeSource) return;
+    await this.stop();
   }
 }
 

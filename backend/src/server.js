@@ -38,6 +38,7 @@ const webAdminRoutes    = require('./routes/webAdmin');
 const SocketHandler       = require('./websocket/socketHandler');
 const kiteService         = require('./services/kiteService');
 const kiteStreamService   = require('./services/kiteStreamService');
+const angelOneStreamService = require('./services/angelOneStreamService');
 const weeklySettlementService = require('./services/weeklySettlementService');
 const closePriceSnapshotService = require('./services/closePriceSnapshotService');
 
@@ -385,6 +386,7 @@ app.get('/health', async (req, res) => {
     websocket:        'active',
     connectedClients: io.engine.clientsCount,
     kite:             kiteStreamService.status(),
+    angelOne:         angelOneStreamService.status(),
     dbQueue:          dbQueue.getStats(),          // ✅ no require() inside handler
     lastSettlement:   lastSettlement ? lastSettlement.toISOString() : 'never',
     timestamp:        new Date().toISOString(),
@@ -681,6 +683,10 @@ const gracefulShutdown = async (signal) => {
   }
 
   socketHandler.stop?.();
+
+  try {
+    await angelOneStreamService.stop();
+  } catch {}
 
   try {
     await kiteStreamService.stop();

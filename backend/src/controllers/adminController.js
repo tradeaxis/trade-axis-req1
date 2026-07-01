@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const kiteService = require('../services/kiteService');
 const kiteStreamService = require('../services/kiteStreamService');
+const angelOneStreamService = require('../services/angelOneStreamService');
 const closePriceSnapshotService = require('../services/closePriceSnapshotService');
 const tradingService = require('../services/tradingService');
 const { fetchHolidaysFromKite } = require('../services/marketStatus');
@@ -58,6 +59,7 @@ const DEFAULT_KITE_AUTH_SETTINGS = {
       label: 'Angel One',
       apiKey: '',
       clientCode: '',
+      redirectUrl: 'https://dashboard.tradeaxis.in',
       jwtToken: '',
       feedToken: '',
     },
@@ -88,6 +90,29 @@ const normalizeKiteAuthSettings = (value = {}) => {
     automatic: tokenMode === 'automatic',
     activeProvider,
     providers,
+  };
+};
+
+const sanitizeKiteAuthSettings = (value = {}) => {
+  const settings = normalizeKiteAuthSettings(value);
+  const angel = settings.providers?.angelone || {};
+  const truedata = settings.providers?.truedata || {};
+  return {
+    ...settings,
+    providers: {
+      ...settings.providers,
+      truedata: {
+        ...truedata,
+        token: '',
+        tokenConfigured: Boolean(truedata.token),
+      },
+      angelone: {
+        ...angel,
+        jwtToken: '',
+        feedToken: '',
+        sessionReady: Boolean(angel.jwtToken && angel.feedToken),
+      },
+    },
   };
 };
 
@@ -1129,41 +1154,67 @@ exports.deleteUser = async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Close all open trades first
-    try {
-      await supabase
-        .from('trades')
-        .update({ status: 'closed', close_time: new Date().toISOString() })
-        .eq('user_id', id)
-        .eq('status', 'open');
-    } catch (e) {
-      console.warn('Close trades error:', e.message);
+    const deleteRows = async (table, column, value, { optional = false } = {}) => {
+      const { error } = await supabase.from(table).delete().eq(column, value);
+      if (!error) return;
+
+      const missingRelation = /relation .* does not exist|could not find the table|schema cache/i.test(error.message || '');
+      if (optional && missingRelation) return;
+      throw new Error(`${table}: ${error.message}`);
+    };
+
+    const { data: accountRows, error: accountLookupError } = await supabase
+      .from('accounts')
+      .select('id')
+      .eq('user_id', id);
+    if (accountLookupError) throw accountLookupError;
+    const accountIds = (accountRows || []).map((account) => account.id).filter(Boolean);
+
+    const { data: watchlistRows, error: watchlistLookupError } = await supabase
+      .from('watchlists')
+      .select('id')
+      .eq('user_id', id);
+    if (watchlistLookupError && !/relation .* does not exist|schema cache/i.test(watchlistLookupError.message || '')) {
+      throw watchlistLookupError;
+    }
+    const watchlistIds = (watchlistRows || []).map((watchlist) => watchlist.id).filter(Boolean);
+
+    // Settlement rows reference both users/accounts and trades. Remove them before
+    // deleting either side of those foreign keys.
+    await deleteRows('weekly_settlements', 'user_id', id, { optional: true });
+
+    for (const accountId of accountIds) {
+      await deleteRows('settlement_positions', 'account_id', accountId, { optional: true });
+      await deleteRows('position_settlements', 'account_id', accountId, { optional: true });
+    }
+    await deleteRows('settlements', 'user_id', id, { optional: true });
+
+    for (const watchlistId of watchlistIds) {
+      await deleteRows('watchlist_symbols', 'watchlist_id', watchlistId, { optional: true });
     }
 
-    // Delete pending orders
-    try {
-      await supabase.from('pending_orders').delete().eq('user_id', id);
-    } catch (e) { /* table may not exist */ }
+    await deleteRows('support_messages', 'user_id', id, { optional: true });
+    await deleteRows('support_messages', 'sender_id', id, { optional: true });
+    await deleteRows('watchlists', 'user_id', id, { optional: true });
+    await deleteRows('pending_orders', 'user_id', id, { optional: true });
 
-    // Delete transactions
-    try {
-      await supabase.from('transactions').delete().eq('user_id', id);
-    } catch (e) {
-      console.warn('Delete transactions error:', e.message);
+    const { error: processedByError } = await supabase
+      .from('transactions')
+      .update({ processed_by: null })
+      .eq('processed_by', id);
+    if (processedByError && !/processed_by|schema cache|column/i.test(processedByError.message || '')) {
+      throw processedByError;
     }
+    await deleteRows('transactions', 'user_id', id, { optional: true });
+    await deleteRows('trades', 'user_id', id);
+    await deleteRows('accounts', 'user_id', id);
 
-    // Delete trades
-    try {
-      await supabase.from('trades').delete().eq('user_id', id);
-    } catch (e) {
-      console.warn('Delete trades error:', e.message);
-    }
-
-    // Delete accounts
-    try {
-      await supabase.from('accounts').delete().eq('user_id', id);
-    } catch (e) {
-      console.warn('Delete accounts error:', e.message);
+    const { error: createdByError } = await supabase
+      .from('users')
+      .update({ created_by: null })
+      .eq('created_by', id);
+    if (createdByError && !/created_by|schema cache|column/i.test(createdByError.message || '')) {
+      throw createdByError;
     }
 
     // Delete user
@@ -1172,10 +1223,7 @@ exports.deleteUser = async (req, res) => {
       .delete()
       .eq('id', id);
 
-    if (deleteError) {
-      console.error('Delete user error:', deleteError);
-      return res.status(500).json({ success: false, message: `Failed to delete user: ${deleteError.message}` });
-    }
+    if (deleteError) throw deleteError;
 
     res.json({ 
       success: true, 
@@ -1183,7 +1231,10 @@ exports.deleteUser = async (req, res) => {
     });
   } catch (error) {
     console.error('deleteUser error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({
+      success: false,
+      message: `Failed to delete user safely: ${error.message}`,
+    });
   }
 };
 
@@ -1574,10 +1625,23 @@ const getKiteAuthSettingsValue = async () => {
   return normalizeKiteAuthSettings(parseAppSettingValue(data?.value));
 };
 
+const saveKiteAuthSettingsValue = async (value) => {
+  const settings = normalizeKiteAuthSettings(value);
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert({
+      key: KITE_AUTH_SETTINGS_KEY,
+      value: JSON.stringify(settings),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' });
+  if (error) throw error;
+  return settings;
+};
+
 exports.getKiteAuthSettings = async (req, res) => {
   try {
     const settings = await getKiteAuthSettingsValue();
-    res.json({ success: true, data: settings });
+    res.json({ success: true, data: sanitizeKiteAuthSettings(settings) });
   } catch (error) {
     console.error('getKiteAuthSettings error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -1590,10 +1654,28 @@ exports.updateKiteAuthSettings = async (req, res) => {
     const tokenMode = req.body?.tokenMode === 'manual' || req.body?.automatic === false
       ? 'manual'
       : 'automatic';
+    const incomingProviders = req.body?.providers && typeof req.body.providers === 'object'
+      ? req.body.providers
+      : {};
     const settings = normalizeKiteAuthSettings({
       ...existingSettings,
       ...req.body,
       tokenMode,
+      providers: {
+        ...existingSettings.providers,
+        ...incomingProviders,
+        truedata: {
+          ...existingSettings.providers?.truedata,
+          ...incomingProviders.truedata,
+          token: incomingProviders.truedata?.token || existingSettings.providers?.truedata?.token || '',
+        },
+        angelone: {
+          ...existingSettings.providers?.angelone,
+          ...incomingProviders.angelone,
+          jwtToken: incomingProviders.angelone?.jwtToken || existingSettings.providers?.angelone?.jwtToken || '',
+          feedToken: incomingProviders.angelone?.feedToken || existingSettings.providers?.angelone?.feedToken || '',
+        },
+      },
     });
 
     const { error } = await supabase
@@ -1606,7 +1688,7 @@ exports.updateKiteAuthSettings = async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true, data: settings, message: `Kite token mode set to ${tokenMode}` });
+    res.json({ success: true, data: sanitizeKiteAuthSettings(settings), message: `Kite token mode set to ${tokenMode}` });
   } catch (error) {
     console.error('updateKiteAuthSettings error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -1789,9 +1871,12 @@ exports.startKiteStream = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Socket.IO not available' });
     }
 
+    await angelOneStreamService.stop();
     const result = await kiteStreamService.start(io);
 
     if (result.started) {
+      const existingSettings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
+      await saveKiteAuthSettingsValue({ ...existingSettings, activeProvider: 'kite' });
       res.json({
         success: true,
         message: `Kite stream started with ${result.underlyingCount || result.tokens} live symbols`,
@@ -1812,6 +1897,12 @@ exports.startKiteStream = async (req, res) => {
 
 exports.stopKiteStream = async (req, res) => {
   try {
+    if (angelOneStreamService.status().running) {
+      return res.status(409).json({
+        success: false,
+        message: 'Angel One is active. Use Stop Angel before stopping the shared price stream.',
+      });
+    }
     const result = await kiteStreamService.stop();
     res.json({ success: true, message: 'Kite stream stopped', ...result });
   } catch (error) {
@@ -1854,10 +1945,118 @@ exports.kiteStatus = async (req, res) => {
           }
         : null,
       stream: streamStatus,
-      authSettings,
+      angelOneStream: angelOneStreamService.status(),
+      authSettings: sanitizeKiteAuthSettings(authSettings),
     });
   } catch (error) {
     console.error('kiteStatus error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.setAngelOneSession = async (req, res) => {
+  try {
+    const existingSettings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
+    const existingAngel = existingSettings.providers?.angelone || {};
+    const parsed = angelOneStreamService.parseSessionBundle(
+      req.body?.sessionToken || req.body?.sessionBundle || req.body,
+    );
+    const apiKey = String(req.body?.apiKey || existingAngel.apiKey || '').trim();
+    const clientCode = String(req.body?.clientCode || existingAngel.clientCode || '').trim();
+    const jwtToken = parsed.jwtToken || String(req.body?.jwtToken || '').trim();
+    const feedToken = parsed.feedToken || String(req.body?.feedToken || '').trim();
+
+    if (!jwtToken || !feedToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Paste the complete Angel redirect URL, JSON token bundle, or jwtToken|feedToken value.',
+      });
+    }
+    if (!apiKey || !clientCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Save the Angel One API key and client code first.',
+      });
+    }
+
+    const io = req.app.get('io');
+    if (!io) throw new Error('Socket.IO not available');
+    const result = await angelOneStreamService.start({ io, apiKey, clientCode, jwtToken, feedToken });
+
+    const settings = await saveKiteAuthSettingsValue({
+      ...existingSettings,
+      activeProvider: 'angelone',
+      providers: {
+        ...existingSettings.providers,
+        angelone: {
+          ...existingAngel,
+          enabled: true,
+          apiKey,
+          clientCode,
+          jwtToken,
+          feedToken,
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: `Angel One stream started with ${result.tokens} exact-expiry instruments`,
+      data: { ...result, activeProvider: settings.activeProvider },
+    });
+  } catch (error) {
+    console.error('setAngelOneSession error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getAngelOneLoginUrl = async (req, res) => {
+  try {
+    const settings = await getKiteAuthSettingsValue();
+    const angel = settings.providers?.angelone || {};
+    if (!angel.apiKey) {
+      return res.status(400).json({ success: false, message: 'Save the Angel One API key first.' });
+    }
+    const redirectUrl = String(angel.redirectUrl || process.env.ANGEL_ONE_REDIRECT_URL || 'https://dashboard.tradeaxis.in').trim();
+    const loginUrl = new URL('https://smartapi.angelone.in/publisher-login');
+    loginUrl.searchParams.set('api_key', angel.apiKey);
+    loginUrl.searchParams.set('redirect_url', redirectUrl);
+    loginUrl.searchParams.set('state', `trade-axis-${Date.now()}`);
+    res.json({
+      success: true,
+      loginUrl: loginUrl.toString(),
+      redirectUrl,
+      message: 'Complete Angel One login, then paste the complete redirected URL into Angel Session.',
+    });
+  } catch (error) {
+    console.error('getAngelOneLoginUrl error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.startAngelOneStream = async (req, res) => {
+  try {
+    const settings = await getKiteAuthSettingsValue();
+    const angel = settings.providers?.angelone || {};
+    const io = req.app.get('io');
+    if (!io) throw new Error('Socket.IO not available');
+    const result = await angelOneStreamService.start({ io, ...angel });
+    await saveKiteAuthSettingsValue({ ...settings, activeProvider: 'angelone' });
+    res.json({ success: true, message: 'Angel One stream started', data: result });
+  } catch (error) {
+    console.error('startAngelOneStream error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.stopAngelOneStream = async (req, res) => {
+  try {
+    const result = await angelOneStreamService.stop();
+    const settings = await getKiteAuthSettingsValue().catch(() => DEFAULT_KITE_AUTH_SETTINGS);
+    await saveKiteAuthSettingsValue({ ...settings, activeProvider: 'kite' });
+    res.json({ success: true, message: 'Angel One stream stopped', data: result });
+  } catch (error) {
+    console.error('stopAngelOneStream error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

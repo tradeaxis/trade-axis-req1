@@ -64,6 +64,10 @@ router.post('/kite/start-stream', webAdminAuth, adminController.startKiteStream)
 router.post('/kite/stop-stream', webAdminAuth, adminController.stopKiteStream);
 router.get('/kite/settings', webAdminAuth, adminController.getKiteAuthSettings);
 router.post('/kite/settings', webAdminAuth, adminController.updateKiteAuthSettings);
+router.post('/angelone/session', webAdminAuth, adminController.setAngelOneSession);
+router.get('/angelone/login-url', webAdminAuth, adminController.getAngelOneLoginUrl);
+router.post('/angelone/start-stream', webAdminAuth, adminController.startAngelOneStream);
+router.post('/angelone/stop-stream', webAdminAuth, adminController.stopAngelOneStream);
 
 router.get('/support-messages', webAdminAuth, messageController.listSupportMessages);
 router.post('/support-messages', webAdminAuth, messageController.sendSupportReply);
