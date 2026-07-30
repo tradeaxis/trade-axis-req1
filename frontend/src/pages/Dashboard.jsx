@@ -329,6 +329,8 @@ const normalizeLiveUnderlyingKey = (value) =>
     .replace(/-[IVX]+$/i, '')
     .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(new RegExp(`(${CONTRACT_MONTHS.join('|')})FUT$`, 'i'), '')
+    .replace(new RegExp(`(${CONTRACT_MONTHS.join('|')})$`, 'i'), '')
     .replace(/FUT$/i, '')
     .replace(/[-_]/g, '')
     .replace(/[^A-Z0-9]/g, '');
@@ -363,7 +365,7 @@ const findTradeQuote = (trade, quotes = {}, symbols = []) => {
       parseContractMonth(row?.kite_tradingsymbol) ||
       parseContractMonth(row?.display_name) ||
       (row?.expiry_date ? CONTRACT_MONTHS[new Date(row.expiry_date).getMonth()] || '' : '');
-    const monthMatches = !tradeMonth || !rowMonth || tradeMonth === rowMonth;
+    const monthMatches = tradeMonth ? rowMonth === tradeMonth : true;
     return monthMatches && (symbolKey === tradeKey || underlyingKey === tradeKey);
   });
 

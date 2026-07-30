@@ -273,9 +273,69 @@ const normalizeLiveUnderlyingKey = (value = '') =>
     .replace(/[-_][IVX]+$/i, '')
     .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
+    .replace(new RegExp(`(${monthAbbrs.join('|')})FUT$`, 'i'), '')
+    .replace(new RegExp(`(${monthAbbrs.join('|')})$`, 'i'), '')
     .replace(/FUT$/i, '')
     .replace(/[-_]/g, '')
     .replace(/[^A-Z0-9]/g, '');
+
+const getContractMonthInfo = (value) => {
+  const expiry = getExpiryDate(value);
+  if (expiry) {
+    return {
+      key: getMonthKey(expiry),
+      label: monthAbbrs[expiry.getMonth()] || '',
+    };
+  }
+
+  const source = typeof value === 'object'
+    ? [
+      value?.symbol,
+      value?.kite_tradingsymbol,
+      value?.display_name,
+      value?.underlying,
+    ].filter(Boolean).join(' ')
+    : value;
+  const parsed = parseContractMonth(source);
+  if (!parsed || parsed.month < 0) return null;
+  const date = new Date(parsed.year, parsed.month, 1);
+  return {
+    key: getMonthKey(date),
+    label: monthAbbrs[parsed.month] || '',
+  };
+};
+
+const getContractFamilyKey = (value = '') => {
+  const row = typeof value === 'object' ? value : null;
+  return normalizeLiveUnderlyingKey(
+    row
+      ? row.underlying || row.display_name || row.kite_tradingsymbol || row.symbol || row.name
+      : value,
+  );
+};
+
+const getSymbolContractLabel = (value) => {
+  const month = getContractMonthInfo(value);
+  const family = getContractFamilyKey(value);
+  return month?.label && family ? `${family}-${month.label}` : '';
+};
+
+const symbolMatchesContractInput = (row, input) => {
+  const inputMonth = getContractMonthInfo(input)?.key || '';
+  const rowMonth = getContractMonthInfo(row)?.key || '';
+  if (inputMonth && inputMonth !== rowMonth) return false;
+
+  const inputFamily = getContractFamilyKey(input);
+  if (!inputFamily) return false;
+
+  return [
+    row?.symbol,
+    row?.kite_tradingsymbol,
+    row?.display_name,
+    row?.underlying,
+    row?.name,
+  ].some((value) => normalizeLiveUnderlyingKey(value) === inputFamily);
+};
 
 const getSymbolPrice = (symbol) => {
   const isLive =
@@ -334,6 +394,7 @@ const findPositionSymbol = (position, symbols = []) => {
 const findSymbolByInput = (input, symbols = []) => {
   const raw = String(input || '').toUpperCase().trim();
   if (!raw) return null;
+  const requestedMonth = getContractMonthInfo(raw)?.key || '';
 
   const exact = symbols.find((row) => [
     row?.symbol,
@@ -342,20 +403,25 @@ const findSymbolByInput = (input, symbols = []) => {
   ].some((value) => String(value || '').toUpperCase().trim() === raw));
   if (exact) return exact;
 
-  const labelExact = symbols.find((row) => getTradeAxisSymbolLabel(row, symbols).toUpperCase() === raw);
+  const requestedLabel = getSymbolContractLabel(raw).toUpperCase();
+  const labelExact = requestedLabel
+    ? symbols.find((row) => getSymbolContractLabel(row).toUpperCase() === requestedLabel)
+    : symbols.find((row) => getTradeAxisSymbolLabel(row, symbols).toUpperCase() === raw);
   if (labelExact) return labelExact;
 
-  const requestedExpiry = getExpiryDate(raw);
-  const requestedMonth = requestedExpiry ? getMonthKey(requestedExpiry) : '';
+  const contractMatch = symbols.find((row) => symbolMatchesContractInput(row, raw));
+  if (contractMatch) return contractMatch;
+
+  if (requestedMonth) return null;
+
   const positionKey = normalizeLiveUnderlyingKey(raw);
-  return symbols.find((row) => {
-    const symbolKey = normalizeLiveUnderlyingKey(row?.symbol);
-    const underlyingKey = normalizeLiveUnderlyingKey(row?.underlying || row?.display_name || row?.name);
-    const rowExpiry = getExpiryDate(row);
-    const rowMonth = rowExpiry ? getMonthKey(rowExpiry) : '';
-    const monthMatches = !requestedMonth || !rowMonth || requestedMonth === rowMonth;
-    return monthMatches && (symbolKey === positionKey || underlyingKey === positionKey);
-  }) || null;
+  return symbols.find((row) => [
+    row?.symbol,
+    row?.kite_tradingsymbol,
+    row?.display_name,
+    row?.underlying,
+    row?.name,
+  ].some((value) => normalizeLiveUnderlyingKey(value) === positionKey)) || null;
 };
 
 const getLivePositionPrice = (position, symbols = []) => {
@@ -632,11 +698,17 @@ const getQuoteSegmentKind = (symbol = {}) => {
 };
 
 const getTradeAxisSymbolLabel = (symbolOrRow, symbols = []) => {
+  const raw = typeof symbolOrRow === 'string' ? symbolOrRow : symbolOrRow?.symbol;
+  const rawContractLabel = typeof symbolOrRow === 'string' ? getSymbolContractLabel(raw) : '';
+  if (rawContractLabel) return rawContractLabel;
+
   const row = typeof symbolOrRow === 'string'
     ? findSymbolByInput(symbolOrRow, symbols)
     : symbolOrRow;
-  const raw = typeof symbolOrRow === 'string' ? symbolOrRow : row?.symbol;
   if (!row && !raw) return '-';
+
+  const rowContractLabel = getSymbolContractLabel(row);
+  if (rowContractLabel) return rowContractLabel;
 
   const expiry = getExpiryDate(row);
   if (expiry) {
