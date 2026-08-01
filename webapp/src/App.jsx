@@ -270,7 +270,7 @@ const normalizeLiveUnderlyingKey = (value = '') =>
     .toUpperCase()
     .replace(/\s+/g, '')
     .replace(new RegExp(`[-_](${monthAbbrs.join('|')})$`, 'i'), '')
-    .replace(/[-_][IVX]+$/i, '')
+    .replace(/[-_](?:I|II|III)$/i, '')
     .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
     .replace(/\d{2}[A-Z]{3}FUT$/i, '')
     .replace(new RegExp(`(${monthAbbrs.join('|')})FUT$`, 'i'), '')
@@ -690,6 +690,9 @@ const getQuoteAgeMs = (symbol = {}) => {
 
 const isQuoteStale = (symbol = {}) => getQuoteAgeMs(symbol) > 10_000;
 
+const stripRollingAliasSuffix = (value) =>
+  String(value || '').replace(/[-_\s](?:I|II|III)$/i, '');
+
 const getQuoteSegmentKind = (symbol = {}) => {
   const source = `${symbol.category || ''} ${symbol.segment || ''} ${symbol.exchange || ''} ${symbol.instrument_type || ''} ${symbol.symbol || ''} ${symbol.underlying || ''}`.toUpperCase();
   if (isCommoditySymbol(symbol)) return 'mcx';
@@ -715,7 +718,7 @@ const getTradeAxisSymbolLabel = (symbolOrRow, symbols = []) => {
     const base = String(row?.underlying || row?.display_name || raw || '')
       .toUpperCase()
       .replace(/\s+/g, '')
-      .replace(/[-_][IVX]+$/i, '')
+      .replace(/[-_](?:I|II|III)$/i, '')
       .replace(/\d{2}[A-Z]{3}\d{2}FUT$/i, '')
       .replace(/\d{2}[A-Z]{3}FUT$/i, '')
       .replace(/FUT$/i, '')
@@ -723,7 +726,7 @@ const getTradeAxisSymbolLabel = (symbolOrRow, symbols = []) => {
     return `${base}-${monthAbbrs[expiry.getMonth()] || ''}`;
   }
 
-  return String(raw || row?.display_name || '').toUpperCase().replace(/[-_][IVX]+$/i, '').replace(/FUT$/i, '');
+  return stripRollingAliasSuffix(String(raw || row?.display_name || '').toUpperCase()).replace(/FUT$/i, '');
 };
 
 const getContractFamily = (symbol = {}) => {
@@ -1800,7 +1803,7 @@ function ChartWorkspace({ selectedAccount }) {
         </div>
         <div className="chart-actions">
           <select className="select" value={symbol} onChange={(event) => setSymbol(event.target.value)} style={{ maxWidth: 260 }}>
-            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}
+            {symbols.map((row) => <option key={row.symbol} value={row.symbol}>{getTradeAxisSymbolLabel(row)}</option>)}
           </select>
           <button className="btn primary" disabled={!symbol} onClick={() => setShowTicket(true)}>
             <ArrowLeftRight size={16} />
@@ -1820,7 +1823,7 @@ function ChartWorkspace({ selectedAccount }) {
         <div className="list compact-list">
           {symbols.slice(0, 18).map((row) => (
             <button key={row.symbol} className={`row clickable ${symbol === row.symbol ? 'active' : ''}`} onClick={() => setSymbol(row.symbol)}>
-              <div><strong>{row.symbol}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
+              <div><strong>{getTradeAxisSymbolLabel(row)}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
               <div className="mono">{getSymbolPrice(row).toFixed(2)}</div>
             </button>
           ))}
@@ -1998,12 +2001,32 @@ function Trade({ selectedAccount, refreshAuth }) {
     return () => clearInterval(interval);
   }, [accountId]);
 
-  const closeTrade = async (trade, quantity) => {
-    const closeQty = Number(quantity || trade.quantity || 0);
+  const closeTrade = async (trade, values = {}) => {
+    const closeQty = Number(values.quantity || trade.quantity || 0);
     if (!closeQty || closeQty <= 0) return toast.error('Enter quantity to close');
     try {
       const totalQty = Number(trade.quantity || 0);
       const childTrades = Array.isArray(trade.childTrades) && trade.childTrades.length ? trade.childTrades : [trade];
+      if (values.limitClose) {
+        const targetTrade = childTrades[0] || trade;
+        const limitPrice = Number(values.limitPrice || 0);
+        if (!limitPrice || limitPrice <= 0) return toast.error('Enter limit close price');
+        const closeSide = String(targetTrade.trade_type || trade.trade_type || '').toLowerCase() === 'buy' ? 'sell' : 'buy';
+        await api.post('/trading/order', {
+          accountId,
+          symbol: targetTrade.symbol || trade.symbol,
+          type: closeSide,
+          orderType: closeSide === 'sell' ? 'sell_limit' : 'buy_limit',
+          quantity: closeQty,
+          price: limitPrice,
+          stopLoss: 0,
+          takeProfit: 0,
+        });
+        toast.success('Limit close order placed');
+        setCloseTarget(null);
+        await load();
+        return;
+      }
       if (childTrades.length > 1) {
         let remainingQty = closeQty;
         for (const child of childTrades) {
@@ -2027,18 +2050,6 @@ function Trade({ selectedAccount, refreshAuth }) {
       await load();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Close failed');
-    }
-  };
-
-  const partialCloseTrade = async (trade) => {
-    const volume = window.prompt('Enter quantity to close', String(trade.quantity || ''));
-    if (!volume) return;
-    try {
-      const res = await api.post(`/trading/partial-close/${trade.id}`, { accountId, volume: Number(volume) });
-      toast.success(res.data?.message || 'Position partially closed');
-      await load();
-    } catch (error) {
-      toast.error(error.response?.data?.message || 'Partial close failed');
     }
   };
 
@@ -2135,7 +2146,7 @@ function Trade({ selectedAccount, refreshAuth }) {
   const balance = Number(selectedAccount?.balance || 0);
   const credit = Number(selectedAccount?.credit || 0);
   const equity = balance + credit + floatingPnl;
-  const freeMargin = Math.max(0, equity - usedMargin);
+  const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
   const totalDrCr = equity - balance;
 
@@ -2151,7 +2162,7 @@ function Trade({ selectedAccount, refreshAuth }) {
           <Stat label="Equity" value={formatPlainMoney(equity)} tone={equity >= balance ? 'positive-blue' : 'negative'} />
           <Stat label="Total Dr/Cr" value={formatPlainMoney(totalDrCr)} tone={totalDrCr >= 0 ? 'positive-blue' : 'negative'} />
           <Stat label="Floating P&L" value={formatPlainMoney(floatingPnl)} tone={floatingPnl >= 0 ? 'positive-blue' : 'negative'} />
-          <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} tone="positive" />
+          <Stat label="Free Margin" value={formatPlainMoney(freeMargin)} tone={freeMargin >= 0 ? 'positive' : 'negative'} />
           <Stat label="P&L" value={formatPlainMoney(credit)} tone={credit >= 0 ? 'positive' : 'negative'} />
           <Stat label="Used Margin" value={formatPlainMoney(usedMargin)} tone="gold" />
           <Stat label="Margin Level" value={usedMargin ? `${marginLevel.toFixed(2)}%` : '-'} tone="positive" />
@@ -2278,7 +2289,7 @@ function Trade({ selectedAccount, refreshAuth }) {
         <ClosePositionModal
           trade={closeTarget}
           onClose={() => setCloseTarget(null)}
-          onSubmit={(quantity) => closeTrade(closeTarget, quantity)}
+          onSubmit={(values) => closeTrade(closeTarget, values)}
         />
       )}
     </div>
@@ -2302,7 +2313,7 @@ function Trade({ selectedAccount, refreshAuth }) {
         <div className="list">
           {visibleSymbols.map((row) => (
             <button key={row.symbol} className={`row clickable ${selectedSymbol === row.symbol ? 'active' : ''}`} onClick={() => setSelectedSymbol(row.symbol)}>
-              <div><strong>{row.symbol}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
+              <div><strong>{getTradeAxisSymbolLabel(row)}</strong><div className="meta">{row.display_name || row.exchange}</div></div>
               <div className="mono">{getSymbolPrice(row).toFixed(2)}</div>
             </button>
           ))}
@@ -2329,7 +2340,7 @@ function Trade({ selectedAccount, refreshAuth }) {
             <tbody>
               {positions.map((position) => (
                 <tr key={position.id}>
-                  <td><strong>{position.symbol}</strong><div className="meta">{position.id}</div></td>
+                  <td><strong>{getTradeAxisSymbolLabel(position.symbol, symbols)}</strong><div className="meta">{position.id}</div></td>
                   <td><span className={`pill ${position.trade_type === 'buy' ? 'teal' : 'red'}`}>{position.trade_type}</span></td>
                   <td>{position.quantity}</td>
                   <td>{Number(position.open_price || 0).toFixed(2)}</td>
@@ -2337,8 +2348,7 @@ function Trade({ selectedAccount, refreshAuth }) {
                   <td className={Number(position.profit || 0) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.profit)}</td>
                   <td>
                     <div className="action-row">
-                      <button className="btn subtle" onClick={() => partialCloseTrade(position)}>Partial</button>
-                      <button className="btn danger" onClick={() => closeTrade(position.id)}>Close</button>
+                      <button className="btn danger" onClick={() => setCloseTarget(position)}>Close</button>
                     </div>
                   </td>
                 </tr>
@@ -2357,7 +2367,7 @@ function Trade({ selectedAccount, refreshAuth }) {
         <div className="list">
           {orders.map((order) => (
             <div className="row" key={order.id}>
-              <div><strong>{order.symbol}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
+              <div><strong>{getTradeAxisSymbolLabel(order.symbol, symbols)}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
               <div className="action-row">
                 <span className="pill gold">{order.status}</span>
                 <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
@@ -2434,10 +2444,17 @@ function OrderFields({ form, setForm, symbols, lockedSymbol = false }) {
 
 function ClosePositionModal({ trade, onClose, onSubmit }) {
   const [quantity, setQuantity] = useState(String(trade?.quantity || 1));
+  const [partialClose, setPartialClose] = useState(false);
+  const [limitClose, setLimitClose] = useState(false);
+  const [limitPrice, setLimitPrice] = useState('');
   const qty = Number(quantity || 0);
   const totalQty = Number(trade?.quantity || 0);
   const closePrice = Number(trade?.livePrice || trade?.current_price || trade?.open_price || 0);
-  const isPartial = qty > 0 && qty < totalQty;
+  const isPartial = partialClose && qty > 0 && qty < totalQty;
+
+  useEffect(() => {
+    if (!partialClose) setQuantity(String(totalQty || 1));
+  }, [partialClose, totalQty]);
 
   return (
     <div className="modal-backdrop">
@@ -2456,15 +2473,42 @@ function ClosePositionModal({ trade, onClose, onSubmit }) {
             <div><span>Market Price</span><strong>{closePrice.toFixed(2)}</strong></div>
             <div><span>Live P&L</span><strong className={Number(trade?.livePnl || 0) >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(trade?.livePnl)}</strong></div>
           </div>
+          <label className="row">
+            <span>Partial Close</span>
+            <input
+              type="checkbox"
+              checked={partialClose}
+              onChange={(event) => setPartialClose(event.target.checked)}
+            />
+          </label>
           <div className="field">
             <label>Quantity to Close</label>
-            <input className="input" type="number" min="1" max={totalQty} value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+            <input className="input" type="number" min="1" max={totalQty} value={quantity} disabled={!partialClose} onChange={(event) => setQuantity(event.target.value)} />
             <div className="meta">{isPartial ? 'This will partially close the position.' : 'This will close the full position.'}</div>
           </div>
+          <label className="row">
+            <span>Limit Close</span>
+            <input
+              type="checkbox"
+              checked={limitClose}
+              onChange={(event) => setLimitClose(event.target.checked)}
+            />
+          </label>
+          {limitClose && (
+            <div className="field">
+              <label>Target Price</label>
+              <input className="input" type="number" value={limitPrice} onChange={(event) => setLimitPrice(event.target.value)} placeholder={closePrice ? closePrice.toFixed(2) : '0.00'} />
+              <div className="meta">A pending limit order will close this position when target price is reached.</div>
+            </div>
+          )}
           <div className="grid-2">
             <button className="btn subtle" onClick={onClose}>Cancel</button>
-            <button className="btn danger" disabled={!qty || qty > totalQty} onClick={() => onSubmit(qty)}>
-              {isPartial ? 'Partial Close' : 'Close Position'}
+            <button className="btn danger" disabled={!qty || qty > totalQty || (limitClose && !Number(limitPrice || 0))} onClick={() => onSubmit({
+              quantity: qty,
+              limitClose,
+              limitPrice: Number(limitPrice || 0),
+            })}>
+              {limitClose ? 'Place Limit Close' : isPartial ? 'Partial Close' : 'Close Position'}
             </button>
           </div>
         </div>
@@ -2540,6 +2584,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
   const [orderRows, setOrderRows] = useState([]);
   const [deals, setDeals] = useState([]);
   const [dealsSummary, setDealsSummary] = useState(null);
+  const [weeklyPositionNetPnl, setWeeklyPositionNetPnl] = useState(0);
   const [period, setPeriod] = useState('today');
   const [view, setView] = useState('deals');
   const [loading, setLoading] = useState(false);
@@ -2556,13 +2601,15 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
         period,
         ...(period === 'custom' ? { fromDate: customRange.from, toDate: customRange.to } : {}),
       };
-      const [historyRes, orderRes, pendingRes, dealsRes] = await Promise.all([
+      const [historyRes, weeklyHistoryRes, orderRes, pendingRes, dealsRes] = await Promise.all([
         api.get('/trading/history', { params: periodParams }),
+        api.get('/trading/history', { params: { accountId: selectedAccount.id, period: 'week' } }),
         api.get(`/trading/pending-order-history/${selectedAccount.id}`),
         api.get(`/trading/pending-orders/${selectedAccount.id}`),
         api.get('/transactions/deals', { params: { ...periodParams, limit: 500 } }),
       ]);
       const historyRows = historyRes.data?.data || [];
+      const weeklyHistoryRows = weeklyHistoryRes.data?.data || [];
       const pendingHistoryRows = orderRes.data?.data || [];
       const pendingRows = pendingRes.data?.data || [];
       const rawDeals = dealsRes.data?.data?.deals || [];
@@ -2598,6 +2645,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
       setRows(filteredHistoryRows);
       setOrderRows([...orderMap.values()].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)));
       setDeals(filteredDeals);
+      setWeeklyPositionNetPnl(weeklyHistoryRows.reduce((sum, trade) => sum + Number(trade.profit || 0), 0));
       setDealsSummary(buildFilteredDealsSummary(filteredDeals, dealsRes.data?.data?.summary, selectedAccount));
     } catch {
       toast.error('Failed to load history');
@@ -2644,9 +2692,9 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
     () => (
       dealScriptFilter
         ? buildFilteredDealsSummary(visibleDeals, {}, selectedAccount)
-        : dealsSummary
+        : { ...(dealsSummary || {}), balanceSettled: weeklyPositionNetPnl }
     ),
-    [dealScriptFilter, dealsSummary, selectedAccount, visibleDeals],
+    [dealScriptFilter, dealsSummary, selectedAccount, visibleDeals, weeklyPositionNetPnl],
   );
 
   return (
@@ -2708,7 +2756,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
               <div className="history-position-row" key={trade.id}>
                 <div className="history-position-head">
                   <div>
-                    <strong>{trade.symbol}</strong>
+                    <strong>{getTradeAxisSymbolLabel(trade.symbol)}</strong>
                     <span>{trade.close_count || 1} close</span>
                   </div>
                   <div className={pnl >= 0 ? 'positive-blue' : 'negative'}>{formatMoney(pnl)}</div>
@@ -2757,7 +2805,7 @@ function TradeHistory({ selectedAccount, refreshAuth }) {
               {orderRows.map((order) => (
                 <tr key={order.id}>
                   <td className="mono">{order.id}</td>
-                  <td><strong>{order.symbol}</strong></td>
+                  <td><strong>{getTradeAxisSymbolLabel(order.symbol)}</strong></td>
                   <td><span className={`pill ${order.trade_type === 'buy' ? 'teal' : 'red'}`}>{order.trade_type || '-'}</span></td>
                   <td>{String(order.order_type || order.type || '-').replace('_', ' ')}</td>
                   <td>{order.quantity || '-'}</td>
@@ -3172,14 +3220,17 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
   const [showPositionsReport, setShowPositionsReport] = useState(false);
   const [dialog, setDialog] = useState(null);
   const [autoCloseSettings, setAutoCloseSettings] = useState({ percent: 90, applyAll: true, userIds: [], userSettings: [] });
+  const [tradeDisableSettings, setTradeDisableSettings] = useState({ all: false, users: {} });
 
   const load = useCallback(async () => {
-    const [res, autoCloseRes] = await Promise.all([
+    const [res, autoCloseRes, tradeDisableRes] = await Promise.all([
       api.get('/web-admin/users', { params: { q, role: 'all' } }),
       api.get('/web-admin/auto-close-settings').catch(() => ({ data: { data: null } })),
+      api.get('/web-admin/trade-disable-settings').catch(() => ({ data: { data: null } })),
     ]);
     const data = res.data?.data || [];
     if (autoCloseRes.data?.data) setAutoCloseSettings(autoCloseRes.data.data);
+    if (tradeDisableRes.data?.data) setTradeDisableSettings(tradeDisableRes.data.data);
     setAllUsers(data);
     setUsers(data.filter((user) => {
       if (mode === 'sub_broker') return user.role === 'sub_broker';
@@ -3188,6 +3239,16 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
       return user.role === 'user';
     }));
   }, [q, mode, role, brokerScope?.id]);
+
+  const saveTradeDisable = async (payload) => {
+    try {
+      const res = await api.post('/web-admin/trade-disable-settings', payload);
+      setTradeDisableSettings(res.data?.data || { all: false, users: {} });
+      toast.success(res.data?.message || 'Trade access updated');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Trade access update failed');
+    }
+  };
 
   useEffect(() => {
     load().catch(() => toast.error('Failed to load users'));
@@ -3238,6 +3299,15 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         <div className="right">
           <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
           {role === 'admin' && mode !== 'sub_broker' && (
+            <button
+              type="button"
+              className={tradeDisableSettings.all ? 'btn success' : 'btn danger'}
+              onClick={() => saveTradeDisable({ all: !tradeDisableSettings.all })}
+            >
+              {tradeDisableSettings.all ? 'Enable All Trades' : 'Disable All Trades'}
+            </button>
+          )}
+          {mode !== 'sub_broker' && (
             <button type="button" className="btn subtle" onClick={() => setShowPositionsReport(true)}><FileText size={16} />Save P Report</button>
           )}
           {(role !== 'sub_broker' || permissions.usersCreate !== false) && (
@@ -3262,6 +3332,9 @@ function UsersPanel({ mode, role, currentUser, brokerScope = null, permissions =
         canCreate={role !== 'sub_broker' || permissions.usersCreate !== false}
         canUpdate={role !== 'sub_broker' || permissions.usersUpdate !== false}
         canDelete={role !== 'sub_broker' || permissions.usersDelete !== false}
+        canTradeDisable={role === 'admin'}
+        tradeDisableSettings={tradeDisableSettings}
+        onTradeDisable={(userId, disabled) => saveTradeDisable({ userId, disabled })}
         onRefresh={load}
         onOpenDialog={setDialog}
       />
@@ -3483,7 +3556,7 @@ function PositionsReportModal({ users = [], onClose }) {
                         {rows.map((row) => (
                           <tr key={`${user.id}-${row.id}`}>
                             <td>{row.status || '-'}</td>
-                            <td><strong>{row.symbol}</strong></td>
+                            <td><strong>{getTradeAxisSymbolLabel(row.symbol)}</strong></td>
                             <td>{String(row.trade_type || '').toUpperCase()}</td>
                             <td>{row.quantity}</td>
                             <td>{formatDate(row.open_time || row.created_at)}</td>
@@ -3693,7 +3766,21 @@ function getAutoClosePercentForUser(user, settings = {}) {
   return user.auto_close_percent ?? user.stop_loss_percent ?? '-';
 }
 
-function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPositions = true, canLedger = true, canUpdate = true, canDelete = true, onRefresh, onOpenDialog }) {
+function UsersTable({
+  users,
+  brokers = [],
+  showBroker,
+  autoCloseSettings,
+  canPositions = true,
+  canLedger = true,
+  canUpdate = true,
+  canDelete = true,
+  canTradeDisable = false,
+  tradeDisableSettings = { all: false, users: {} },
+  onTradeDisable,
+  onRefresh,
+  onOpenDialog,
+}) {
   const updateBroker = async (userId, brokerId) => {
     try {
       await api.post('/web-admin/assign-broker', { userId, brokerId: brokerId || null });
@@ -3732,7 +3819,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>Total Dr/Cr</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>L</th><th>SL</th><th>Demo</th><th>Active</th><th>Created On</th><th>Actions</th></tr>
+          <tr><th>P / B / L</th><th>User ID</th><th>Name</th><th>Ledger Bal</th><th>Equity</th><th>Open PNL</th><th>Closed P&L</th><th>Total Dr/Cr</th><th>Margin Used</th><th>Margin Lvl %</th><th>Margin Available</th><th>Sub Broker</th><th>Admin</th><th>Type</th><th>L</th><th>SL</th><th>Trade</th><th>Demo</th><th>Active</th><th>Created On</th><th>Actions</th></tr>
         </thead>
         <tbody>
           {users.map((user) => {
@@ -3741,6 +3828,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
             const openPnl = metrics.openPnl;
             const closedPnl = metrics.credit;
             const totalDrCr = metrics.totalDrCr;
+            const tradingDisabled = tradeDisableSettings.all === true || tradeDisableSettings.users?.[user.id] === true;
             return (
             <tr key={user.id}>
               <td>
@@ -3774,6 +3862,19 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
               <td><span className="pill blue">{user.closing_mode ? 'Closing' : 'Exposure'}</span></td>
               <td>{user.leverage || primary.leverage || '-'}</td>
               <td>{getAutoClosePercentForUser(user, autoCloseSettings)}</td>
+              <td>
+                {canTradeDisable ? (
+                  <button
+                    type="button"
+                    className={tradingDisabled ? 'btn danger compact-action' : 'btn success compact-action'}
+                    onClick={() => onTradeDisable?.(user.id, !tradingDisabled)}
+                  >
+                    {tradingDisabled ? 'Off' : 'On'}
+                  </button>
+                ) : (
+                  <span className={tradingDisabled ? 'pill red' : 'pill teal'}>{tradingDisabled ? 'Off' : 'On'}</span>
+                )}
+              </td>
               <td>{(user.accounts || []).some((account) => account.is_demo) ? 'YES' : 'NO'}</td>
               <td>{user.is_active ? 'YES' : 'NO'}</td>
               <td>{formatDate(user.created_at)}</td>
@@ -3792,7 +3893,7 @@ function UsersTable({ users, brokers = [], showBroker, autoCloseSettings, canPos
               </td>
             </tr>
           )})}
-          {!users.length && <tr><td colSpan="20">No users found</td></tr>}
+          {!users.length && <tr><td colSpan="21">No users found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -4096,7 +4197,7 @@ function AdminPositionTable({ rows, status, onReload, canEdit = true, canExit = 
                 <td><strong className="mono">{row.user_login_id || row.user_id}</strong></td>
                 <td className="mono">{String(row.id).slice(0, 14)}</td>
                 <td>{row.status || status}</td>
-                <td><strong>{row.symbol}</strong></td>
+                <td><strong>{getTradeAxisSymbolLabel(row.symbol)}</strong></td>
                 <td><span className={row.trade_type === 'buy' ? 'positive' : 'negative'}>{String(row.trade_type || '').toUpperCase()}</span></td>
                 <td>{row.quantity}</td>
                 <td>{formatDate(row.open_time)}</td>
@@ -4682,7 +4783,7 @@ function ScriptSettingsEditor({ user }) {
         <div className="field"><label>Type Select</label><select className="select" value={form.segment} onChange={(event) => setForm((prev) => ({ ...prev, segment: event.target.value }))}><option>NSE</option><option>MCX</option><option>NSEOPT</option><option>MCXOPT</option><option>Crypto</option></select></div>
         <div className="field"><label>Symbol ({symbols.length} available)</label><input className="input" placeholder="Search symbol" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} /></div>
         <div className="field"><label>Type Select</label><select className="select" value={form.settingType} onChange={(event) => setForm((prev) => ({ ...prev, settingType: event.target.value }))}><option>Value Settings</option><option>Quantity Settings</option><option>Block Settings</option></select></div>
-        <div className="field"><label>Select Symbol</label><select className="select" value={form.symbol} onChange={(event) => setForm((prev) => ({ ...prev, symbol: event.target.value }))}>{filtered.map((row) => <option key={row.symbol} value={row.symbol}>{row.symbol}</option>)}</select></div>
+        <div className="field"><label>Select Symbol</label><select className="select" value={form.symbol} onChange={(event) => setForm((prev) => ({ ...prev, symbol: event.target.value }))}>{filtered.map((row) => <option key={row.symbol} value={row.symbol}>{getTradeAxisSymbolLabel(row)}</option>)}</select></div>
         <div className="field"><label>Per Order Value</label><input className="input" placeholder="Per Order Value" value={form.perOrderValue} onChange={(event) => setForm((prev) => ({ ...prev, perOrderValue: event.target.value }))} /></div>
         <div className="field"><label>Max Value Holding</label><input className="input" placeholder="Max Value Holding" value={form.maxValueHolding} onChange={(event) => setForm((prev) => ({ ...prev, maxValueHolding: event.target.value }))} /></div>
         <div className="field"><label>Fix OPTSELL HO</label><input className="input" value={form.fixOptSellHo} onChange={(event) => setForm((prev) => ({ ...prev, fixOptSellHo: event.target.value }))} /></div>
@@ -4695,7 +4796,7 @@ function ScriptSettingsEditor({ user }) {
           <tbody>
             {settings.map((row) => (
               <tr key={row.id || row.symbol}>
-                <td>{row.symbol}</td>
+                <td>{getTradeAxisSymbolLabel(row.symbol)}</td>
                 <td>{row.segment || '-'}</td>
                 <td>{row.settingType || '-'}</td>
                 <td>{row.maxValueHolding || 0}</td>
@@ -5044,7 +5145,7 @@ function AdminOrdersPanel() {
         <table>
           <thead><tr><th>User ID</th><th>Trade Type</th><th>Time</th><th>Type</th><th>Script</th><th>Quantity</th><th>Rate</th><th>Status</th></tr></thead>
           <tbody>
-            {rows.map((row) => <tr key={`${row.id}-${row.status}`}><td><strong className="mono">{row.user_login_id || row.user_id}</strong></td><td>{String(row.order_type || 'market').toUpperCase()}</td><td>{formatDate(row.time || row.created_at || row.open_time)}</td><td><span className={String(row.trade_type).toLowerCase() === 'sell' ? 'negative' : 'positive'}>{String(row.trade_type || row.type || '').toUpperCase()}</span></td><td>{row.symbol}</td><td>{row.quantity}</td><td>{Number(row.rate || row.price || row.open_price || 0).toFixed(2)}</td><td>{row.order_status || row.status}</td></tr>)}
+            {rows.map((row) => <tr key={`${row.id}-${row.status}`}><td><strong className="mono">{row.user_login_id || row.user_id}</strong></td><td>{String(row.order_type || 'market').toUpperCase()}</td><td>{formatDate(row.time || row.created_at || row.open_time)}</td><td><span className={String(row.trade_type).toLowerCase() === 'sell' ? 'negative' : 'positive'}>{String(row.trade_type || row.type || '').toUpperCase()}</span></td><td>{getTradeAxisSymbolLabel(row.symbol)}</td><td>{row.quantity}</td><td>{Number(row.rate || row.price || row.open_price || 0).toFixed(2)}</td><td>{row.order_status || row.status}</td></tr>)}
             {!rows.length && <tr><td colSpan="8">No orders found</td></tr>}
           </tbody>
         </table>
@@ -6011,7 +6112,7 @@ function ManualClosePanel() {
         <div className="list">
           {positions.map((position) => (
             <button className={`row clickable ${selected === position.id ? 'active' : ''}`} key={position.id} onClick={() => setSelected(position.id)}>
-              <div><strong>{position.symbol}</strong><div className="meta">{position.trade_type} x {position.quantity} at {Number(position.open_price).toFixed(2)}</div></div>
+              <div><strong>{getTradeAxisSymbolLabel(position.symbol)}</strong><div className="meta">{position.trade_type} x {position.quantity} at {Number(position.open_price).toFixed(2)}</div></div>
               <span className={Number(position.profit) >= 0 ? 'positive' : 'negative'}>{formatMoney(position.profit)}</span>
             </button>
           ))}
@@ -6079,7 +6180,7 @@ function ScriptBanPanel() {
       <div className="list">
         {rows.map((symbol) => (
           <div className="row" key={symbol.symbol}>
-            <div><strong>{symbol.symbol}</strong><div className="meta">{symbol.display_name} {symbol.ban_reason ? `- ${symbol.ban_reason}` : ''}</div></div>
+            <div><strong>{getTradeAxisSymbolLabel(symbol)}</strong><div className="meta">{symbol.display_name} {symbol.ban_reason ? `- ${symbol.ban_reason}` : ''}</div></div>
             <button className={`btn ${symbol.is_banned ? 'success' : 'danger'}`} onClick={() => toggle(symbol)}>{symbol.is_banned ? 'Unban' : 'Ban'}</button>
           </div>
         ))}

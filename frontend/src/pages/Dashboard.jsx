@@ -843,6 +843,8 @@ const Dashboard = () => {
 
   // ── LIFTED from CloseConfirmModal ──
   const [closeQty, setCloseQty] = useState(1);
+  const [isLimitClose, setIsLimitClose] = useState(false);
+  const [limitClosePrice, setLimitClosePrice] = useState('');
   // ── Staleness ticker — re-renders every 5s to update grey/off-quotes status ──
   const [staleTick, setStaleTick] = useState(0);
   useEffect(() => {
@@ -2341,6 +2343,63 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     const partialPnL = isPartialClose ? (pnl / maxQty) * closeQty : pnl;
 
     const handleClose = async () => {
+      if (isLimitClose) {
+        const parsedQty = Number(isPartialClose ? closeQty : maxQty);
+        const parsedPrice = Number(limitClosePrice);
+        if (!Number.isFinite(parsedQty) || parsedQty <= 0 || parsedQty > maxQty) {
+          toast.error('Enter valid quantity');
+          return;
+        }
+        if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+          toast.error('Enter valid target price');
+          return;
+        }
+
+        const closeSide = trade.trade_type === 'buy' ? 'sell' : 'buy';
+        const closeOrderType = closeSide === 'sell' ? 'sell_limit' : 'buy_limit';
+        setOrderConfirmation({
+          phase: 'executing',
+          type: 'LIMIT CLOSE',
+          symbol: trade.symbol,
+          quantity: parsedQty,
+        });
+        const result = await placeOrder({
+          accountId: selectedAccount.id,
+          symbol: trade.symbol,
+          type: closeSide,
+          orderType: closeOrderType,
+          quantity: parsedQty,
+          price: parsedPrice,
+          stopLoss: 0,
+          takeProfit: 0,
+        });
+        if (result.success) {
+          await refreshAccountActivity(selectedAccount?.id);
+          setOrderConfirmation({
+            phase: 'success',
+            type: 'LIMIT CLOSE',
+            symbol: trade.symbol,
+            quantity: parsedQty,
+            price: parsedPrice.toFixed(2),
+            pending: true,
+            message: `Target close order placed at ${parsedPrice.toFixed(2)}`,
+          });
+          setCloseConfirmTrade(null);
+          setIsLimitClose(false);
+          setLimitClosePrice('');
+          setTimeout(() => setOrderConfirmation(null), 1200);
+        } else {
+          setOrderConfirmation({
+            phase: 'rejected',
+            type: 'LIMIT CLOSE',
+            symbol: trade.symbol,
+            message: result.message || 'Target close order failed',
+          });
+          setTimeout(() => setOrderConfirmation(null), 3000);
+        }
+        return;
+      }
+
       if (isPartialClose && closeQty > 0 && closeQty < maxQty) {
         // Partial close
         setOrderConfirmation({
@@ -2378,7 +2437,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     return (
       <div
         className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
-        onClick={() => setCloseConfirmTrade(null)}
+        onClick={() => {
+          setCloseConfirmTrade(null);
+          setIsLimitClose(false);
+          setLimitClosePrice('');
+        }}
       >
         <div
           className="w-full max-w-sm rounded-xl"
@@ -2392,7 +2455,11 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
             <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
               Close Position
             </h3>
-            <button onClick={() => setCloseConfirmTrade(null)}>
+            <button onClick={() => {
+              setCloseConfirmTrade(null);
+              setIsLimitClose(false);
+              setLimitClosePrice('');
+            }}>
               <X size={22} color="#787b86" />
             </button>
           </div>
@@ -2619,15 +2686,69 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
               </div>
             )}
 
+            <div className="mb-4">
+              <label
+                className="flex items-center gap-2 cursor-pointer p-3 rounded-lg"
+                style={{ background: '#2a2e39' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isLimitClose}
+                  onChange={(e) => {
+                    setIsLimitClose(e.target.checked);
+                    if (e.target.checked && !limitClosePrice) {
+                      setLimitClosePrice(String(Number(trade.current_price || trade.open_price || 0).toFixed(2)));
+                    }
+                  }}
+                  className="w-4 h-4 rounded"
+                  style={{ accentColor: '#2962ff' }}
+                />
+                <span
+                  className="text-sm font-medium"
+                  style={{ color: '#d1d4dc' }}
+                >
+                  Limit Order (close at target price)
+                </span>
+              </label>
+              {isLimitClose && (
+                <div className="mt-3">
+                  <label
+                    className="block text-sm mb-2"
+                    style={{ color: '#787b86' }}
+                  >
+                    Target Close Price
+                  </label>
+                  <input
+                    type="number"
+                    value={limitClosePrice}
+                    onChange={(e) => setLimitClosePrice(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg text-xl font-bold text-center"
+                    style={{
+                      background: '#2a2e39',
+                      border: '1px solid #363a45',
+                      color: '#d1d4dc',
+                    }}
+                    placeholder="0.00"
+                  />
+                </div>
+              )}
+            </div>
+
             <p className="text-sm mb-4" style={{ color: '#787b86' }}>
-              {isPartialClose && closeQty < maxQty
+              {isLimitClose
+                ? 'This will place a pending target close order. The position will close when price reaches the target.'
+                : isPartialClose && closeQty < maxQty
                 ? `This will close ${closeQty} of ${maxQty} positions. ${maxQty - closeQty} will remain open.`
                 : 'This will close the entire position. This action cannot be undone.'}
             </p>
 
             <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={() => setCloseConfirmTrade(null)}
+                onClick={() => {
+                  setCloseConfirmTrade(null);
+                  setIsLimitClose(false);
+                  setLimitClosePrice('');
+                }}
                 className="py-3 rounded-lg font-medium"
                 style={{
                   background: '#2a2e39',
@@ -2642,10 +2763,12 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                 className="py-3 rounded-lg font-semibold text-white"
                 style={{ background: '#ef5350' }}
               >
-                Close{' '}
-                {isPartialClose && closeQty < maxQty
+                {isLimitClose
+                  ? 'Place Target Close'
+                  : <>Close{' '}
+                    {isPartialClose && closeQty < maxQty
                   ? `${closeQty} Positions`
-                  : 'Position'}
+                  : 'Position'}</>}
               </button>
             </div>
           </div>
@@ -5206,6 +5329,8 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
                             onClick={(e) => {
                               e.stopPropagation();
                               setIsPartialClose(false);
+                              setIsLimitClose(false);
+                              setLimitClosePrice('');
                               setCloseQty(Number(trade.quantity));
                               setCloseConfirmTrade(trade);
                             }}

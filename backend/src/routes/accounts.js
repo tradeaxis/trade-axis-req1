@@ -3,6 +3,7 @@ const router = express.Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
 const { protect } = require('../middleware/auth');
+const { getAllowedLeverageOptions, isAllowedLeverage } = require('../config/leverageOptions');
 
 const {
   getAccounts,
@@ -33,8 +34,8 @@ router.post('/', [
     .withMessage('Invalid account type'),
   body('leverage')
     .optional()
-    .isIn([1, 2, 3, 5, 10])
-    .withMessage('Invalid leverage. Allowed: 1, 2, 3, 5, 10'),
+    .custom((value) => isAllowedLeverage(value))
+    .withMessage(() => `Invalid leverage. Allowed: ${getAllowedLeverageOptions().join(', ')}`),
   body('isDemo')
     .optional()
     .isBoolean()
@@ -45,8 +46,8 @@ router.post('/', [
 router.put('/:id', [
   body('leverage')
     .optional()
-    .isIn([1, 2, 3, 5, 10])
-    .withMessage('Invalid leverage')
+    .custom((value) => isAllowedLeverage(value))
+    .withMessage(() => `Invalid leverage. Allowed: ${getAllowedLeverageOptions().join(', ')}`)
 ], validate, updateAccount);
 
 // @route   POST /api/accounts/:id/reset

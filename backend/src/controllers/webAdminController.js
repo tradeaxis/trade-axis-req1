@@ -1498,6 +1498,47 @@ exports.saveAutoCloseSettings = async (req, res) => {
   }
 };
 
+exports.getTradeDisableSettings = async (req, res) => {
+  try {
+    const settings = await readJsonSetting('web_trade_disable_settings', { all: false, users: {} });
+    res.json({ success: true, data: { all: settings.all === true, users: settings.users || {} } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to load trade disable settings' });
+  }
+};
+
+exports.saveTradeDisableSettings = async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, message: 'Admin access required' });
+
+    const current = await readJsonSetting('web_trade_disable_settings', { all: false, users: {} });
+    const next = {
+      all: req.body?.all === undefined ? current.all === true : req.body.all === true,
+      users: { ...(current.users || {}) },
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user.id,
+    };
+
+    if (req.body?.userId) {
+      const userId = String(req.body.userId);
+      if (req.body.disabled === true) next.users[userId] = true;
+      else delete next.users[userId];
+    }
+
+    if (req.body?.users && typeof req.body.users === 'object') {
+      next.users = Object.entries(req.body.users).reduce((acc, [userId, disabled]) => {
+        if (disabled === true) acc[userId] = true;
+        return acc;
+      }, {});
+    }
+
+    await writeJsonSetting('web_trade_disable_settings', next);
+    res.json({ success: true, data: { all: next.all, users: next.users }, message: 'Trade access updated' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to save trade disable settings' });
+  }
+};
+
 exports.getSubBrokerFeaturePermissions = async (req, res) => {
   try {
     const brokerId = isAdmin(req) ? (req.query?.brokerId || req.user.id) : req.user.id;

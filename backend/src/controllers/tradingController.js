@@ -86,6 +86,101 @@ const getPendingReservedMargin = (order = {}, account = {}) => {
   return (Number(order.price || 0) * Number(order.quantity || 0)) / leverage;
 };
 
+const readJsonSetting = async (key, fallback = {}) => {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.value) return fallback;
+  if (typeof data.value === 'string') {
+    try {
+      return JSON.parse(data.value);
+    } catch {
+      return fallback;
+    }
+  }
+  return data.value;
+};
+
+const sameScriptSettingSymbol = (ruleSymbol, symbolData = {}) => {
+  if (!ruleSymbol || !symbolData?.symbol) return false;
+  const ruleRaw = String(ruleSymbol).toUpperCase();
+  const currentRaw = String(symbolData.symbol || '').toUpperCase();
+  if (ruleRaw === currentRaw) return true;
+
+  const ruleParsed = parseDisplaySymbol(ruleRaw);
+  const currentExpiry = symbolData.expiry_date ? new Date(symbolData.expiry_date) : null;
+  const currentMonth = currentExpiry && !Number.isNaN(currentExpiry.getTime()) ? MONTHS[currentExpiry.getMonth()] : '';
+  const currentBase = normalizeSymbolLookupKey(symbolData.underlying || symbolData.display_name || symbolData.symbol);
+
+  if (ruleParsed && currentMonth) {
+    return ruleParsed.base === currentBase && ruleParsed.month === currentMonth;
+  }
+
+  return normalizeSymbolLookupKey(ruleRaw) === currentBase
+    || normalizeSymbolLookupKey(ruleRaw) === normalizeSymbolLookupKey(currentRaw);
+};
+
+const assertUserTradeAllowed = async ({
+  userId,
+  symbolData,
+  equivalentSymbols = [],
+  price,
+  quantity,
+  accountId,
+}) => {
+  const disabledSettings = await readJsonSetting('web_trade_disable_settings', { all: false, users: {} });
+  if (disabledSettings?.all === true || disabledSettings?.users?.[userId] === true) {
+    const message = disabledSettings?.all === true
+      ? 'Trading is disabled for all users by admin.'
+      : 'Trading is disabled for your account by admin.';
+    const error = new Error(message);
+    error.status = 403;
+    throw error;
+  }
+
+  const scriptSettings = await readJsonSetting('web_user_script_settings', {});
+  const userRules = Array.isArray(scriptSettings?.[userId]) ? scriptSettings[userId] : [];
+  if (!userRules.length) return;
+
+  const matchingRules = userRules.filter((rule) => sameScriptSettingSymbol(rule.symbol, symbolData));
+  if (!matchingRules.length) return;
+
+  const orderValue = Math.abs(Number(price || 0) * Number(quantity || 0));
+  for (const rule of matchingRules) {
+    const perOrderValue = Number(rule.perOrderValue || 0);
+    if (perOrderValue > 0 && orderValue > perOrderValue) {
+      const error = new Error(`Order value exceeds script limit. Max allowed: ${perOrderValue.toFixed(2)}`);
+      error.status = 400;
+      throw error;
+    }
+  }
+
+  const maxHolding = Math.max(...matchingRules.map((rule) => Number(rule.maxValueHolding || 0)), 0);
+  if (maxHolding > 0 && accountId) {
+    const symbols = equivalentSymbols.length ? equivalentSymbols : [symbolData.symbol];
+    const { data: openTrades, error } = await supabase
+      .from('trades')
+      .select('quantity, open_price, current_price')
+      .eq('account_id', accountId)
+      .in('symbol', symbols)
+      .eq('status', 'open');
+    if (error) throw error;
+
+    const existingValue = (openTrades || []).reduce((sum, trade) => (
+      sum + Math.abs(Number(trade.quantity || 0) * Number(trade.current_price || trade.open_price || 0))
+    ), 0);
+
+    if (existingValue + orderValue > maxHolding) {
+      const error = new Error(`Holding value exceeds script limit. Max allowed: ${maxHolding.toFixed(2)}`);
+      error.status = 400;
+      throw error;
+    }
+  }
+};
+
 const buildPartialCloseComment = (closedQty, totalQty, remainingQty) => (
   fitTradeComment(`Partial close: ${closedQty} of ${totalQty}. Remaining: ${remainingQty}`)
 );
@@ -357,6 +452,14 @@ exports.placeOrder = async (req, res) => {
         const pendingLeverage = Number(account.leverage || 5) || 5;
         const pendingMarginRequired = (parseFloat(price) * parseFloat(quantity)) / pendingLeverage;
         const pendingFreeMargin = parseFloat(account.free_margin ?? account.balance);
+        await assertUserTradeAllowed({
+          userId,
+          symbolData,
+          equivalentSymbols,
+          price: parseFloat(price),
+          quantity: parseFloat(quantity),
+          accountId,
+        });
         if (pendingMarginRequired > pendingFreeMargin) {
           return res.status(400).json({
             success: false,
@@ -415,6 +518,15 @@ exports.placeOrder = async (req, res) => {
     const leverage = account.leverage || 5;
     const marginRequired = (openPrice * parseFloat(quantity) * lotSize) / leverage;
     const freeMargin = parseFloat(account.free_margin ?? account.balance);
+
+    await assertUserTradeAllowed({
+      userId,
+      symbolData,
+      equivalentSymbols,
+      price: openPrice,
+      quantity: parseFloat(quantity),
+      accountId,
+    });
 
     if (marginRequired > freeMargin)
       return res.status(400).json({
@@ -660,7 +772,7 @@ exports.placeOrder = async (req, res) => {
     res.json({ success: true, data: trade, message: `${type.toUpperCase()} order executed at ${openPrice}` });
   } catch (err) {
     console.error('Place order error:', err);
-    res.status(500).json({ success: false, message: err.message || 'Failed to place order' });
+    res.status(err.status || 500).json({ success: false, message: err.message || 'Failed to place order' });
   }
 };
 

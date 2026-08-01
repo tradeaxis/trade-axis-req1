@@ -25,6 +25,8 @@ router.post('/assign-broker', protect, adminOnly, webAdminController.assignBroke
 router.delete('/accounts/:accountId/demo', webAdminAuth, webAdminController.deleteDemoAccount);
 router.get('/auto-close-settings', webAdminAuth, webAdminController.getAutoCloseSettings);
 router.post('/auto-close-settings', webAdminAuth, webAdminController.saveAutoCloseSettings);
+router.get('/trade-disable-settings', webAdminAuth, webAdminController.getTradeDisableSettings);
+router.post('/trade-disable-settings', protect, adminOnly, webAdminController.saveTradeDisableSettings);
 router.get('/sub-broker-permissions', webAdminAuth, webAdminController.getSubBrokerFeaturePermissions);
 router.post('/sub-broker-permissions', protect, adminOnly, webAdminController.saveSubBrokerFeaturePermissions);
 router.post('/settlement-balance', protect, adminOnly, webAdminController.updateSettlementBalance);

@@ -18,7 +18,7 @@ const parseEnvLeverageOptions = () => {
 
 const getAllowedLeverageOptions = () => {
   const envOptions = parseEnvLeverageOptions();
-  return envOptions ? normalizeLeverageOptions([...envOptions, 15]) : DEFAULT_LEVERAGE_OPTIONS;
+  return envOptions ? normalizeLeverageOptions([...envOptions, 5, 15]) : DEFAULT_LEVERAGE_OPTIONS;
 };
 
 const isAllowedLeverage = (value) => {
