@@ -5,14 +5,72 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+// Prefer the current server-only key names. Keep SUPABASE_SERVICE_KEY as a
+// compatibility alias for existing deployments while they migrate Railway
+// variables. Never use an anon/publishable key for this backend client.
+const supabaseKey = process.env.SUPABASE_SECRET_KEY
+  || process.env.SUPABASE_SERVICE_ROLE_KEY
+  || process.env.SUPABASE_SERVICE_KEY;
+const supabaseKeySource = process.env.SUPABASE_SECRET_KEY
+  ? 'SUPABASE_SECRET_KEY'
+  : process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? 'SUPABASE_SERVICE_ROLE_KEY'
+    : 'SUPABASE_SERVICE_KEY';
+
+const getSafeJwtMetadata = (token) => {
+  if (!token || token.split('.').length !== 3) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return {
+      iat: payload.iat,
+      exp: payload.exp,
+      iss: payload.iss,
+      aud: payload.aud,
+      role: payload.role,
+      ref: payload.ref,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const logSupabaseKeyTiming = () => {
+  const metadata = getSafeJwtMetadata(supabaseKey);
+  if (!metadata) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const timing = {
+    serverUnixTime: now,
+    jwtIat: metadata.iat,
+    jwtExp: metadata.exp,
+    jwtIssuer: metadata.iss,
+    jwtAudience: metadata.aud,
+    jwtRole: metadata.role,
+    jwtRef: metadata.ref,
+  };
+
+  console.info('Supabase service-key metadata:', timing);
+
+  // PostgREST rejects a token issued more than its small clock-skew allowance
+  // into the future. Never log the key itself.
+  if (typeof metadata.iat === 'number' && metadata.iat > now + 30) {
+    console.error(
+      '❌ Supabase service key has a future iat claim. Replace the production ' +
+      `${supabaseKeySource} value with a current service_role key from the same Supabase project.`
+    );
+  }
+};
 
 if (!supabaseUrl || !supabaseKey) {
   console.error('❌ Missing Supabase credentials in .env file');
   console.error('   SUPABASE_URL:', supabaseUrl ? 'SET' : 'NOT SET');
-  console.error('   SUPABASE_SERVICE_KEY:', supabaseKey ? 'SET' : 'NOT SET');
+  console.error('   SUPABASE_SECRET_KEY / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SERVICE_KEY:', supabaseKey ? 'SET' : 'NOT SET');
   process.exit(1);
 }
+
+console.info(`Supabase backend key source: ${supabaseKeySource}`);
+logSupabaseKeyTiming();
 
 // ─── Single singleton client ─────────────────────────────────────────────────
 // Pro plan: 120 direct connections, 10k pooled via PgBouncer
@@ -114,11 +172,15 @@ const testConnection = async (forceRefresh = false) => {
     _healthCache     = { ok, checkedAt: now };
 
     if (ok) console.log('✅ Supabase connection verified');
-    else    console.error('❌ Supabase connection error:', error?.message);
+    else {
+      console.error('❌ Supabase connection error:', error?.message);
+      if (error?.code === 'PGRST303') logSupabaseKeyTiming();
+    }
 
     return ok;
   } catch (error) {
     console.error('❌ Supabase connection error:', error.message);
+    if (error?.code === 'PGRST303') logSupabaseKeyTiming();
     _healthCache = { ok: false, checkedAt: now };
     return false;
   }
