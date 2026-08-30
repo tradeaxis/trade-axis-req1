@@ -220,6 +220,10 @@ const isVisibleContract = (symbol, referenceDate = new Date()) => {
   const expiry = getExpiryDate(symbol);
   if (!expiry) return true;
 
+  const expiryKey = String(symbol?.expiry_date || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  const todayKey = `${referenceDate.getFullYear()}-${String(referenceDate.getMonth() + 1).padStart(2, '0')}-${String(referenceDate.getDate()).padStart(2, '0')}`;
+  if (expiryKey && expiryKey < todayKey) return false;
+
   const allowedMonths = new Set([getMonthKey(referenceDate)]);
   if (referenceDate.getDate() >= getNextContractVisibilityDay(symbol)) {
     allowedMonths.add(getMonthKey(addMonths(referenceDate, 1)));
@@ -4742,7 +4746,13 @@ function ScriptSettingsEditor({ user }) {
     fixOptSellHo: '0',
     fixOptSellInt: '0',
   });
-  const filtered = symbols.filter((row) => String(row.symbol || '').toLowerCase().includes(symbolSearch.toLowerCase())).slice(0, 8);
+  const filtered = symbols.filter((row) => {
+    const term = symbolSearch.trim().toLowerCase();
+    return !term
+      || String(row.symbol || '').toLowerCase().includes(term)
+      || String(row.display_name || '').toLowerCase().includes(term)
+      || String(row.underlying || '').toLowerCase().includes(term);
+  });
 
   useEffect(() => {
     loadTradableSymbols({ limit: 5000 }).then((rows) => {
@@ -4781,7 +4791,7 @@ function ScriptSettingsEditor({ user }) {
       <div className="section-head"><div><h2>Create New Setting</h2><p>Custom symbol-level rule for {user.login_id}.</p></div></div>
       <div className="update-grid">
         <div className="field"><label>Type Select</label><select className="select" value={form.segment} onChange={(event) => setForm((prev) => ({ ...prev, segment: event.target.value }))}><option>NSE</option><option>MCX</option><option>NSEOPT</option><option>MCXOPT</option><option>Crypto</option></select></div>
-        <div className="field"><label>Symbol ({symbols.length} available)</label><input className="input" placeholder="Search symbol" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} /></div>
+        <div className="field"><label>Symbol ({symbols.length} available)</label><input className="input" placeholder="Search by script or contract" value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} /></div>
         <div className="field"><label>Type Select</label><select className="select" value={form.settingType} onChange={(event) => setForm((prev) => ({ ...prev, settingType: event.target.value }))}><option>Value Settings</option><option>Quantity Settings</option><option>Block Settings</option></select></div>
         <div className="field"><label>Select Symbol</label><select className="select" value={form.symbol} onChange={(event) => setForm((prev) => ({ ...prev, symbol: event.target.value }))}>{filtered.map((row) => <option key={row.symbol} value={row.symbol}>{getTradeAxisSymbolLabel(row)}</option>)}</select></div>
         <div className="field"><label>Per Order Value</label><input className="input" placeholder="Per Order Value" value={form.perOrderValue} onChange={(event) => setForm((prev) => ({ ...prev, perOrderValue: event.target.value }))} /></div>
@@ -6156,7 +6166,9 @@ function ScriptBanPanel() {
     }
   };
 
-  const rows = symbols
+  // A concrete contract and its rolling alias are one tradeable instrument.
+  // Show one canonical row; the backend applies bans to equivalent aliases.
+  const rows = dedupeTradableSymbols(filterTradableSymbols(symbols))
     .filter((s) => (tab === 'banned' ? s.is_banned : !s.is_banned))
     .filter((s) => {
       const term = q.toLowerCase();

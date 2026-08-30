@@ -55,6 +55,17 @@ const getIstNow = () => new Date(new Date().toLocaleString('en-US', { timeZone: 
 const getMonthKey = (date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 
+const getDateKey = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+const getExpiryDateKey = (symbol = {}) => {
+  const raw = String(symbol.expiry_date || '').trim();
+  const dateOnly = raw.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  if (dateOnly) return dateOnly;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? '' : getDateKey(parsed);
+};
+
 const addMonths = (date, months) => new Date(date.getFullYear(), date.getMonth() + months, 1);
 
 const isCommoditySymbolRow = (symbol = {}) => {
@@ -92,6 +103,11 @@ const parseContractMonth = (value = '') => {
 };
 
 const isVisibleContractRow = (symbol, referenceDate = getIstNow()) => {
+  // A contract remains in the same calendar month after expiry. Check the
+  // actual IST expiry day so expired near-month aliases cannot reappear.
+  const expiryDateKey = getExpiryDateKey(symbol);
+  if (expiryDateKey && expiryDateKey < getDateKey(referenceDate)) return false;
+
   const allowedMonthKeys = new Set([getMonthKey(referenceDate)]);
   if (referenceDate.getDate() >= getNextContractVisibilityDay(symbol)) {
     allowedMonthKeys.add(getMonthKey(addMonths(referenceDate, 1)));

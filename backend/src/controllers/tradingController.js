@@ -206,6 +206,16 @@ const parseDisplaySymbol = (value) => {
   };
 };
 
+const isCurrentTradableSymbol = (symbol = {}) => {
+  if (symbol.is_active === false) return false;
+  const expiryDate = String(symbol.expiry_date || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  if (!expiryDate) return true;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return expiryDate >= `${parts.year}-${parts.month}-${parts.day}`;
+};
+
 const findSymbolData = async (rawSymbol) => {
   const requested = String(rawSymbol || '').trim().toUpperCase();
   const compact = requested.replace(/\s+/g, '');
@@ -219,7 +229,7 @@ const findSymbolData = async (rawSymbol) => {
       .order('expiry_date', { ascending: true })
       .limit(1);
     if (error) throw error;
-    if (data?.[0]) return data[0];
+    if (data?.[0] && isCurrentTradableSymbol(data[0])) return data[0];
   }
 
   const parsed = parseDisplaySymbol(requested);
@@ -231,6 +241,7 @@ const findSymbolData = async (rawSymbol) => {
       .limit(200);
     if (error) throw error;
     const row = (data || []).find((item) => {
+      if (!isCurrentTradableSymbol(item)) return false;
       const base = normalizeSymbolLookupKey(item.underlying || item.display_name || item.symbol);
       const expiry = item.expiry_date ? new Date(item.expiry_date) : null;
       const month = expiry && !Number.isNaN(expiry.getTime()) ? MONTHS[expiry.getMonth()] : '';

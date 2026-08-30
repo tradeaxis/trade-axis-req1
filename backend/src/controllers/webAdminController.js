@@ -256,7 +256,7 @@ const findSymbolData = async (rawSymbol) => {
       .order('expiry_date', { ascending: true })
       .limit(1);
     if (error) throw error;
-    if (data?.[0]) return data[0];
+    if (data?.[0] && isCurrentTradableSymbol(data[0])) return data[0];
   }
 
   const match = compact.match(/^(.+?)-?([A-Z]{3})$/);
@@ -270,6 +270,7 @@ const findSymbolData = async (rawSymbol) => {
       .limit(500);
     if (error) throw error;
     return (data || []).find((row) => {
+      if (!isCurrentTradableSymbol(row)) return false;
       const rowBase = normalizeSymbolLookupKey(row.underlying || row.display_name || row.symbol);
       const expiry = row.expiry_date ? new Date(row.expiry_date) : null;
       const rowMonth = expiry && !Number.isNaN(expiry.getTime()) ? months[expiry.getMonth()] : '';
@@ -864,6 +865,16 @@ const parseIstDateTimeInput = (value) => {
   const normalized = hasTimezone ? raw : `${localDateTime}+05:30`;
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isCurrentTradableSymbol = (symbol = {}) => {
+  if (symbol.is_active === false) return false;
+  const expiryDate = String(symbol.expiry_date || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  if (!expiryDate) return true;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return expiryDate >= `${parts.year}-${parts.month}-${parts.day}`;
 };
 
 exports.listSymbols = async (req, res) => {

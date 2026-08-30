@@ -10,10 +10,22 @@ const { supabase } = require('../config/supabase');
 const kiteService  = require('../services/kiteService');
 const {
   isAllowedKiteInstrument,
-  isAllowedSymbolRow,
 } = require('../config/allowedKiteUniverse');
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+
+const getIstDateKey = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+
+const getInstrumentExpiryDateKey = (expiry) => {
+  const raw = String(expiry || '').trim();
+  const dateOnly = raw.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  return dateOnly || (raw ? getIstDateKey(new Date(raw)) : '');
+};
 
 // ── Known index / sensex underlyings (used for category assignment) ──
 const INDEX_NAMES  = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']);
@@ -83,15 +95,12 @@ async function syncKiteInstruments() {
     }
 
     // ── 3. Filter: only FUT, not expired ────────────────────────────────────
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);                       // compare date-only
+    const todayIst = getIstDateKey();
 
     const futures = allInstruments.filter(inst => {
       if (String(inst.instrument_type).toUpperCase() !== 'FUT') return false;
       if (inst.expiry) {
-        const exp = new Date(inst.expiry);
-        exp.setHours(0, 0, 0, 0);
-        if (exp < now) return false;                 // expired
+        if (getInstrumentExpiryDateKey(inst.expiry) < todayIst) return false;
       }
       const name = String(inst.name || '').trim();
       if (!name) return false;                       // skip if no underlying name
@@ -191,30 +200,8 @@ async function syncKiteInstruments() {
       }
     }
 
-    const rowSymbols = new Set(rows.map((row) => row.symbol));
-    let preservedCount = 0;
-
-    const { data: existingRows } = await supabase
-      .from('symbols')
-      .select('*')
-      .eq('instrument_type', 'FUT');
-
-    for (const row of existingRows || []) {
-      if (!row || !isAllowedSymbolRow(row) || rowSymbols.has(row.symbol)) continue;
-
-      rows.push({
-        ...row,
-        lot_size: Number(row.lot_size || 1),
-        tick_size: Number(row.tick_size || 0.05),
-        original_lot_size: Number(row.original_lot_size || row.lot_size || 1),
-        is_active: true,
-      });
-      rowSymbols.add(row.symbol);
-      preservedCount++;
-    }
-
     console.log(
-      `📝 Total rows to upsert: ${rows.length} (${futures.length} contracts + ${rows.length - futures.length} aliases/preserved rows from ${byUnderlying.size} underlyings, preserved ${preservedCount})`,
+      `📝 Total rows to upsert: ${rows.length} (${futures.length} contracts + ${rows.length - futures.length} rolling aliases from ${byUnderlying.size} underlyings)`,
     );
 
     // ── 6. Deactivate only symbols we're about to replace ──────────────────

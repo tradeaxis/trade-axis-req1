@@ -7,6 +7,18 @@ import api from '../services/api';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
 const MARKET_CACHE_KEY = 'trade_axis_market_cache';
+
+const getIstDateKey = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+
+const isUnexpiredContract = (symbol = {}) => {
+  const expiryDate = String(symbol.expiry_date || symbol.expiryDate || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  return !expiryDate || expiryDate >= getIstDateKey();
+};
 const isMarketOpenNow = (symbol = null) => {
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
@@ -43,9 +55,11 @@ const writeMarketCache = (state) => {
 };
 
 const initialMarketCache = readMarketCache();
+const initialSymbols = (initialMarketCache?.symbols || []).filter(isUnexpiredContract);
 
 const useMarketStore = create((set, get) => ({
-  symbols:     initialMarketCache?.symbols || [],
+  // Do not briefly render an expired cached contract while fresh symbols load.
+  symbols:     initialSymbols,
   quotes:      initialMarketCache?.quotes || {},
   loading:     false,
   error:       null,
@@ -61,7 +75,7 @@ const useMarketStore = create((set, get) => ({
       const res = await api.get('/market/symbols', { params: { limit: 5000 } });
 
       if (res.data.success) {
-        const symbols = res.data.symbols || [];
+        const symbols = (res.data.symbols || []).filter(isUnexpiredContract);
         const now     = Date.now();
 
         const quotes = {};
