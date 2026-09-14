@@ -423,19 +423,6 @@ const buildPendingSettlementSnapshotDeal = ({ account, trades = [] }) => {
   };
 };
 
-const getCurrentWindowSettlementDeal = ({ settlementDeals = [] }) => {
-  const currentSettlementDate = formatDateInIst(getLastSettlementTarget());
-  const recordedDeal = (settlementDeals || []).find(
-    (deal) => firstNonEmptyString(deal.settlement_date) === currentSettlementDate,
-  );
-
-  if (recordedDeal) {
-    return recordedDeal;
-  }
-
-  return null;
-};
-
 const getTransactionStatusAliases = (status) => {
   const normalized = String(status || '').trim().toLowerCase();
   if (!normalized) {
@@ -705,6 +692,18 @@ const inferExitCommission = (trade) => {
   return 0;
 };
 
+const getRecordedSettlementNetPnl = (trade = {}) => {
+  const storedProfit = Number(trade.profit || 0);
+  const isSettlementClose = trade.is_settlement_close === true
+    || /weekly settlement close/i.test(String(trade.comment || ''));
+  if (!isSettlementClose) return storedProfit;
+
+  const match = String(trade.comment || '').match(/net\s*p&l\s*:\s*(-?[\d,.]+)/i);
+  if (!match) return storedProfit;
+  const recordedNet = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(recordedNet) ? recordedNet : storedProfit;
+};
+
 const inferOriginalQuantity = (trade) => {
   const explicit = Number(trade?.original_quantity);
   if (Number.isFinite(explicit) && explicit > 0) {
@@ -957,8 +956,10 @@ const getDeals = async (req, res) => {
             closed_quantity: closedQty,
             original_quantity: originalQty,
             price: Number(trade.close_price || 0),
-            amount: Number(trade.profit || 0),
-            profit: Number(trade.profit || 0),
+            // Use the recorded net amount for legacy settlement rows whose
+            // persisted `profit` predates the entry-brokerage correction.
+            amount: getRecordedSettlementNetPnl(trade),
+            profit: getRecordedSettlementNetPnl(trade),
             commission: inferExitCommission(trade),
             time: trade.close_time,
             status: 'completed',
@@ -1130,10 +1131,6 @@ const getDeals = async (req, res) => {
       }),
     );
 
-    const currentWindowSettlementDeal = getCurrentWindowSettlementDeal({
-      settlementDeals: allSettlementDeals,
-    });
-
     allDeals.push(...settlementDeals);
 
     // Sort latest first
@@ -1142,8 +1139,6 @@ const getDeals = async (req, res) => {
     const deals = allDeals.slice(0, parseInt(limit, 10));
 
     const exitDeals = allDeals.filter((d) => d.source === 'trade' && d.side === 'exit');
-    const settlementSummaryDeal = currentWindowSettlementDeal || allSettlementDeals[0] || null;
-
     const netExitAmounts = exitDeals.map((deal) => Number(deal.amount || 0));
     const totalProfit = netExitAmounts
       .filter((amount) => amount > 0)
@@ -1164,6 +1159,18 @@ const getDeals = async (req, res) => {
       0,
     );
     const calculatedBalanceSettled = totalProfit - totalLoss;
+    // Match History → Positions: rolling seven-day realised P&L from closed
+    // trades. This avoids using a single settlement row as the balance source.
+    const weeklyStart = new Date(now);
+    weeklyStart.setDate(weeklyStart.getDate() - 7);
+    const weeklyPositionNetPnl = Number((trades || []).reduce((sum, trade) => {
+      if (trade.status !== 'closed' || !trade.close_time) return sum;
+
+      const closedAt = new Date(trade.close_time);
+      if (Number.isNaN(closedAt.getTime()) || closedAt < weeklyStart) return sum;
+
+      return sum + getRecordedSettlementNetPnl(trade);
+    }, 0).toFixed(2));
 
     const summary = {
       totalProfit,
@@ -1173,9 +1180,8 @@ const getDeals = async (req, res) => {
       totalCommission: openPositionCommission,
       openPositionCommission,
       displayCommission: Number(displayCommission.toFixed(2)),
-      balanceSettled: settlementSummaryDeal
-        ? Number(settlementSummaryDeal.amount || 0)
-        : Number(calculatedBalanceSettled.toFixed(2)),
+      balanceSettled: weeklyPositionNetPnl,
+      weeklyNetPnl: weeklyPositionNetPnl,
       netPnL: Number(calculatedBalanceSettled.toFixed(2)),
       currentBalance: Number(account?.balance || 0),
     };

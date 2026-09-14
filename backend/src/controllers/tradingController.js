@@ -206,6 +206,20 @@ const parseDisplaySymbol = (value) => {
   };
 };
 
+const getRecordedSettlementNetPnl = (trade = {}) => {
+  const storedProfit = Number(trade.profit || 0);
+  const isSettlementClose = trade.is_settlement_close === true
+    || /weekly settlement close/i.test(String(trade.comment || ''));
+  if (!isSettlementClose) return storedProfit;
+
+  // Older settlement rows saved gross profit in `profit`, but their audit
+  // comment already contains the correct net amount.
+  const match = String(trade.comment || '').match(/net\s*p&l\s*:\s*(-?[\d,.]+)/i);
+  if (!match) return storedProfit;
+  const recordedNet = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(recordedNet) ? recordedNet : storedProfit;
+};
+
 const isCurrentTradableSymbol = (symbol = {}) => {
   if (symbol.is_active === false) return false;
   const expiryDate = String(symbol.expiry_date || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
@@ -396,7 +410,7 @@ exports.placeOrder = async (req, res) => {
       } else if (isCommodity) {
         reason = 'Commodity market is closed. Trading hours: 9:00 AM – 11:30 PM IST, Monday to Friday.';
       } else {
-        reason = 'Market is closed. Orders can only be placed between 9:15 AM and 3:30 PM IST, Monday to Friday.';
+        reason = 'Market is closed. Orders can only be placed between 9:15 AM and 3:40 PM IST, Monday to Friday.';
       }
 
       return res.status(400).json({ success: false, message: reason });
@@ -1371,7 +1385,11 @@ exports.getTradeHistory = async (req, res) => {
     const { data: trades, error } = await query;
     if (error) throw error;
 
-    res.json({ success: true, data: trades || [] });
+    const history = (trades || []).map((trade) => ({
+      ...trade,
+      profit: getRecordedSettlementNetPnl(trade),
+    }));
+    res.json({ success: true, data: history });
   } catch (err) {
     console.error('Get trade history error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch trade history' });

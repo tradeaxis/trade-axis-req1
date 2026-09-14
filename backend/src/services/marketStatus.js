@@ -247,7 +247,9 @@ const isMarketOpen = (symbol = null, exchange = null) => {
     return mins >= 9 * 60 && mins <= 23 * 60 + 30;
   }
 
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  // This application trades F&O outside MCX. Keep MCX unchanged above and
+  // allow the F&O segment through 3:40 PM IST.
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 40;
 };
 
 const isAnyMarketOpen = () => {

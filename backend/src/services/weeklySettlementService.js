@@ -71,6 +71,14 @@ const firstPositiveNumber = (...values) => {
   return 0;
 };
 
+// Older trades may have a default `buy_brokerage` of 0 while the actual entry
+// charge is stored in `brokerage`. Nullish coalescing is incorrect here because
+// zero is not the recorded charge when the legacy value is positive.
+const getEntryBrokerage = (trade = {}) => {
+  const buyBrokerage = toNumber(trade.buy_brokerage, 0);
+  return roundMoney(buyBrokerage > 0 ? buyBrokerage : toNumber(trade.brokerage, 0));
+};
+
 const parseContractMonth = (value = '') => {
   const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
   if (!raw) return '';
@@ -295,7 +303,7 @@ class WeeklySettlementService {
         const grossPnL = closePrice > 0 && openPrice > 0 && qty > 0
           ? roundMoney((closePrice - openPrice) * direction * qty)
           : roundMoney(Number(trade.profit || 0));
-        const entryBrokerage = roundMoney(Number(trade.buy_brokerage ?? trade.brokerage ?? 0));
+        const entryBrokerage = getEntryBrokerage(trade);
         return {
           closePrice,
           grossPnL,
@@ -349,7 +357,11 @@ class WeeklySettlementService {
               current_price: closePrice,
               profit: netPnL,          // net of original entry brokerage
               sell_brokerage: 0,       // no exit brokerage
-              brokerage: 0,            // no brokerage for settlement
+              // Keep the original entry commission for history/audit displays.
+              // `profit` is already net of this amount, so no caller should
+              // deduct it a second time.
+              brokerage: entryBrokerage,
+              buy_brokerage: entryBrokerage,
               status: 'closed',
               close_time: closeTime,
               updated_at: closeTime,
@@ -389,6 +401,7 @@ class WeeklySettlementService {
                 profit: netPnL,
                 sell_brokerage: Number(trade.sell_brokerage || 0),
                 brokerage: Number(trade.brokerage || 0),
+                buy_brokerage: Number(trade.buy_brokerage || trade.brokerage || 0),
                 is_settlement_close: false,
                 settlement_week: null,
                 updated_at: closeTime,
@@ -1329,7 +1342,7 @@ class WeeklySettlementService {
       const grossPnL = closePrice > 0 && openPrice > 0 && qty > 0
         ? (closePrice - openPrice) * direction * qty
         : Number(parent.profit || 0);
-      const entryBrokerage = roundMoney(Number(parent.buy_brokerage ?? parent.brokerage ?? 0));
+      const entryBrokerage = getEntryBrokerage(parent);
       const netPnL = roundMoney(grossPnL - entryBrokerage);
 
       const { error: parentErr } = await supabase
@@ -1339,7 +1352,8 @@ class WeeklySettlementService {
           current_price: closePrice || Number(parent.current_price || parent.open_price || 0),
           profit: netPnL,
           sell_brokerage: 0,
-          brokerage: 0,
+          brokerage: entryBrokerage,
+          buy_brokerage: entryBrokerage,
           status: 'closed',
           close_time: child.created_at || child.open_time || now,
           updated_at: now,

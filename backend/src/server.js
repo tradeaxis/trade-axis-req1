@@ -488,12 +488,12 @@ const startServer = async () => {
     };
 
     nodeCron.schedule(
-      '20 30 15 * * 1-5',
+      '20 40 15 * * 1-5',
       () => captureClosePrices('equity'),
       { timezone: tz },
     );
     nodeCron.schedule(
-      '31,34 15 * * 1-5',
+      '41,44 15 * * 1-5',
       () => captureClosePrices('equity'),
       { timezone: tz },
     );
@@ -507,7 +507,7 @@ const startServer = async () => {
       () => captureClosePrices('commodity'),
       { timezone: tz },
     );
-    console.log('Closing price snapshots scheduled: 15:30:20/15:31/15:34 and 23:30:20/23:31/23:34 IST');
+    console.log('Closing price snapshots scheduled: 15:40:20/15:41/15:44 and 23:30:20/23:31/23:34 IST');
 
     // ── AUTO-DELETE expired Kite token at 6:05 AM IST daily ──────────────────
     nodeCron.schedule(

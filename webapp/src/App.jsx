@@ -266,7 +266,7 @@ const isMarketOpenNow = (symbol = '') => {
   const minutes = ist.getHours() * 60 + ist.getMinutes();
   const text = String(symbol || '').toUpperCase();
   const isCommodity = /MCX|GOLD|SILVER|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON/.test(text);
-  return isCommodity ? minutes >= 9 * 60 && minutes <= 23 * 60 + 30 : minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+  return isCommodity ? minutes >= 9 * 60 && minutes <= 23 * 60 + 30 : minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 };
 
 const normalizeLiveUnderlyingKey = (value = '') =>
@@ -524,6 +524,13 @@ const getAccountMetrics = (account = {}) => {
 
 const sortPositionRowsBySymbol = (rows = [], direction = 'asc') => (
   [...rows].sort((a, b) => {
+    if (direction === 'entry-first' || direction === 'entry-last') {
+      const aEntryTime = new Date(a.open_time || a.created_at || 0).getTime() || 0;
+      const bEntryTime = new Date(b.open_time || b.created_at || 0).getTime() || 0;
+      const comparison = aEntryTime - bEntryTime;
+      return direction === 'entry-last' ? -comparison : comparison;
+    }
+
     const comparison = String(a.symbol || '').localeCompare(String(b.symbol || ''), undefined, {
       sensitivity: 'base',
       numeric: true,
@@ -4042,6 +4049,8 @@ function AdminPositionsPanel({ role = 'admin', permissions = defaultSubBrokerPer
           <select className="select compact-select" value={positionSort} onChange={(event) => setPositionSort(event.target.value)} aria-label="Sort positions">
             <option value="asc">A-Z</option>
             <option value="desc">Z-A</option>
+            <option value="entry-first">Entry Time: First</option>
+            <option value="entry-last">Entry Time: Last</option>
           </select>
           <span className={`pill ${totalPnl >= 0 ? 'teal' : 'red'}`}>Overall P&L {totalPnl.toFixed(2)}</span>
           <button type="button" className="btn subtle" onClick={load} disabled={loading}><RefreshCw size={16} />Refresh</button>
@@ -4151,6 +4160,8 @@ function UserPositionsModal({ user, onClose }) {
               <select className="select compact-select" value={positionSort} onChange={(event) => setPositionSort(event.target.value)} aria-label="Sort user positions">
                 <option value="asc">A-Z</option>
                 <option value="desc">Z-A</option>
+                <option value="entry-first">Entry Time: First</option>
+                <option value="entry-last">Entry Time: Last</option>
               </select>
               <button type="button" className="btn subtle" onClick={load}><RefreshCw size={16} />Refresh</button>
             </div>

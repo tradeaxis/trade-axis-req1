@@ -32,7 +32,7 @@ const isMarketOpenNow = (symbol = null) => {
     /GOLD|SILVER|SILVERM|SILVERMIC|GOLDM|GOLDGUINEA|GOLDPETAL|CRUDE|CRUDEOIL|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MCX/i.test(sym);
 
   if (isCommodity) return mins >= 9 * 60 && mins <= 23 * 60 + 30;
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 40;
 };
 
 const readMarketCache = () => {

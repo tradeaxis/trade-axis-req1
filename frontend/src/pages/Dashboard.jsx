@@ -651,8 +651,8 @@ const isMarketOpenNow = (symbol = null) => {
     }
   }
 
-  // Default: Equity/Index market 9:15 AM to 3:30 PM IST
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  // F&O market: 9:15 AM to 3:40 PM IST. MCX remains unchanged above.
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 40;
 };
 
 // ============ DASHBOARD COMPONENT ============
@@ -1844,7 +1844,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         symbol: selectedSymbol,
         message: isCommodity
           ? 'Commodity market is closed. Trading hours: 9:00 AM – 11:30 PM IST, Mon–Fri.'
-          : 'Market is closed. Trading hours: 9:15 AM – 3:30 PM IST, Mon–Fri.',
+          : 'Market is closed. Trading hours: 9:15 AM – 3:40 PM IST, Mon–Fri.',
       });
       setTimeout(() => setOrderConfirmation(null), 4000);
       return;

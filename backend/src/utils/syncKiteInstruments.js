@@ -41,8 +41,8 @@ function getCategory(underlying, exchange) {
 
 function getTradingHours(exchange) {
   if (exchange === 'MCX') return '09:00-23:30';
-  if (exchange === 'BFO') return '09:15-15:30';
-  return '09:15-15:30';
+  if (exchange === 'BFO') return '09:15-15:40';
+  return '09:15-15:40';
 }
 
 function makeDisplayName(underlying, expiry) {
