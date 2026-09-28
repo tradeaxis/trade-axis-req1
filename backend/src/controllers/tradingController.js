@@ -230,6 +230,29 @@ const isCurrentTradableSymbol = (symbol = {}) => {
   return expiryDate >= `${parts.year}-${parts.month}-${parts.day}`;
 };
 
+const isRollingContractAlias = (value = '') => /-(?:I|II|III)$/i.test(String(value || ''));
+
+// A raw Kite contract and its rolling aliases share a token.  Always choose
+// the raw contract when the request does not explicitly name an alias, because
+// aliases are intentionally repointed at expiry and must never be persisted on
+// a newly opened trade.
+const preferExactContractRow = (rows = [], requested = '') => {
+  const requestedKey = String(requested || '').toUpperCase();
+  return [...rows]
+    .filter(isCurrentTradableSymbol)
+    .sort((left, right) => {
+      const score = (row) => {
+        const symbol = String(row?.symbol || '').toUpperCase();
+        const kiteSymbol = String(row?.kite_tradingsymbol || '').toUpperCase();
+        if (symbol === requestedKey) return 0;
+        if (symbol && symbol === kiteSymbol) return 1;
+        if (!isRollingContractAlias(symbol)) return 2;
+        return 3;
+      };
+      return score(left) - score(right);
+    })[0] || null;
+};
+
 const findSymbolData = async (rawSymbol) => {
   const requested = String(rawSymbol || '').trim().toUpperCase();
   const compact = requested.replace(/\s+/g, '');
@@ -241,9 +264,10 @@ const findSymbolData = async (rawSymbol) => {
       .select('*')
       .or(`symbol.eq.${candidate},kite_tradingsymbol.eq.${candidate},display_name.eq.${candidate}`)
       .order('expiry_date', { ascending: true })
-      .limit(1);
+      .limit(50);
     if (error) throw error;
-    if (data?.[0] && isCurrentTradableSymbol(data[0])) return data[0];
+    const row = preferExactContractRow(data || [], candidate);
+    if (row) return row;
   }
 
   const parsed = parseDisplaySymbol(requested);
@@ -254,13 +278,14 @@ const findSymbolData = async (rawSymbol) => {
       .order('expiry_date', { ascending: true })
       .limit(200);
     if (error) throw error;
-    const row = (data || []).find((item) => {
+    const rows = (data || []).filter((item) => {
       if (!isCurrentTradableSymbol(item)) return false;
       const base = normalizeSymbolLookupKey(item.underlying || item.display_name || item.symbol);
       const expiry = item.expiry_date ? new Date(item.expiry_date) : null;
       const month = expiry && !Number.isNaN(expiry.getTime()) ? MONTHS[expiry.getMonth()] : '';
       return base === parsed.base && month === parsed.month;
     });
+    const row = preferExactContractRow(rows, requested);
     if (row) return row;
   }
 

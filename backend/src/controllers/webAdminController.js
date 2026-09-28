@@ -243,6 +243,25 @@ const normalizeSymbolLookupKey = (value) =>
     .replace(/FUT$/i, '')
     .replace(/[^A-Z0-9]/g, '');
 
+const isRollingContractAlias = (value = '') => /-(?:I|II|III)$/i.test(String(value || ''));
+
+const preferExactContractRow = (rows = [], requested = '') => {
+  const requestedKey = String(requested || '').toUpperCase();
+  return [...rows]
+    .filter(isCurrentTradableSymbol)
+    .sort((left, right) => {
+      const score = (row) => {
+        const symbol = String(row?.symbol || '').toUpperCase();
+        const kiteSymbol = String(row?.kite_tradingsymbol || '').toUpperCase();
+        if (symbol === requestedKey) return 0;
+        if (symbol && symbol === kiteSymbol) return 1;
+        if (!isRollingContractAlias(symbol)) return 2;
+        return 3;
+      };
+      return score(left) - score(right);
+    })[0] || null;
+};
+
 const findSymbolData = async (rawSymbol) => {
   const requested = String(rawSymbol || '').trim().toUpperCase();
   const compact = requested.replace(/\s+/g, '');
@@ -254,9 +273,10 @@ const findSymbolData = async (rawSymbol) => {
       .select('*')
       .or(`symbol.eq.${candidate},kite_tradingsymbol.eq.${candidate},display_name.eq.${candidate}`)
       .order('expiry_date', { ascending: true })
-      .limit(1);
+      .limit(50);
     if (error) throw error;
-    if (data?.[0] && isCurrentTradableSymbol(data[0])) return data[0];
+    const row = preferExactContractRow(data || [], candidate);
+    if (row) return row;
   }
 
   const match = compact.match(/^(.+?)-?([A-Z]{3})$/);
@@ -269,13 +289,14 @@ const findSymbolData = async (rawSymbol) => {
       .order('expiry_date', { ascending: true })
       .limit(500);
     if (error) throw error;
-    return (data || []).find((row) => {
+    const rows = (data || []).filter((row) => {
       if (!isCurrentTradableSymbol(row)) return false;
       const rowBase = normalizeSymbolLookupKey(row.underlying || row.display_name || row.symbol);
       const expiry = row.expiry_date ? new Date(row.expiry_date) : null;
       const rowMonth = expiry && !Number.isNaN(expiry.getTime()) ? months[expiry.getMonth()] : '';
       return rowBase === baseKey && rowMonth === match[2];
-    }) || null;
+    });
+    return preferExactContractRow(rows, requested);
   }
 
   return null;

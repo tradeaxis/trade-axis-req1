@@ -241,6 +241,9 @@ const filterTradableSymbols = (symbols = []) => {
       const looksLikeFutureAlias = new RegExp(`[-_](${monthAbbrs.join('|')})\\b|\\d{2}(${monthAbbrs.join('|')})\\d{0,2}FUT`).test(source);
       return !(looksLikeFutureAlias && !symbol?.kite_instrument_token && !symbol?.expiry_date);
     })
+    // Exact dated contracts are immutable. Do not expose rolling aliases such
+    // as RELIANCE-I to users, because their month and quote change on rollover.
+    .filter((symbol) => !/-(?:I|II|III)$/i.test(String(symbol?.symbol || '')))
     .filter((symbol) => {
       const key = String(symbol?.symbol || '').toUpperCase();
       if (!key || seen.has(key)) return false;
