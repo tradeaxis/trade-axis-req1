@@ -1982,22 +1982,40 @@ function Trade({ selectedAccount, refreshAuth }) {
   const [tradeView, setTradeView] = useState('positions');
   const [modifyOrder, setModifyOrder] = useState(null);
   const [positionSort, setPositionSort] = useState('asc');
+  const symbolRequestVersionRef = useRef(0);
+  const symbolRefreshInFlightRef = useRef(false);
 
   const accountId = selectedAccount?.id;
 
+  const refreshSymbols = useCallback(async () => {
+    // The trade view refreshes quotes frequently. Do not let an older HTTP
+    // response arrive late and replace a newer contract list after rollover.
+    if (symbolRefreshInFlightRef.current) return null;
+
+    symbolRefreshInFlightRef.current = true;
+    const requestVersion = ++symbolRequestVersionRef.current;
+    try {
+      const rows = await loadTradableSymbols();
+      if (requestVersion !== symbolRequestVersionRef.current) return null;
+
+      setSymbols(rows);
+      setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
+      return rows;
+    } finally {
+      symbolRefreshInFlightRef.current = false;
+    }
+  }, []);
+
   const load = useCallback(async () => {
     if (!accountId) return;
-    const [symbolsRes, posRes, orderRes] = await Promise.all([
-      loadTradableSymbols(),
+    const [, posRes, orderRes] = await Promise.all([
+      refreshSymbols(),
       api.get(`/trading/positions/${accountId}`),
       api.get(`/trading/pending-orders/${accountId}`),
     ]);
-    const symbolRows = Array.isArray(symbolsRes) ? symbolsRes : [];
-    setSymbols(symbolRows);
     setPositions(posRes.data?.data || []);
     setOrders(orderRes.data?.data || []);
-    setSelectedSymbol((prev) => prev || symbolRows[0]?.symbol || '');
-  }, [accountId]);
+  }, [accountId, refreshSymbols]);
 
   useEffect(() => {
     load().catch(() => {});
@@ -2005,15 +2023,11 @@ function Trade({ selectedAccount, refreshAuth }) {
 
   useEffect(() => {
     if (!accountId) return undefined;
-    const interval = setInterval(async () => {
-      try {
-        const rows = await loadTradableSymbols();
-        setSymbols(rows);
-        setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
-      } catch {}
-    }, 750);
+    const interval = setInterval(() => {
+      refreshSymbols().catch(() => {});
+    }, 1500);
     return () => clearInterval(interval);
-  }, [accountId]);
+  }, [accountId, refreshSymbols]);
 
   const closeTrade = async (trade, values = {}) => {
     const closeQty = Number(values.quantity || trade.quantity || 0);
