@@ -1,6 +1,7 @@
 // frontend/src/store/tradingStore.js
 import { create } from 'zustand';
 import api from '../services/api';
+import { getOpenPositionSnapshot, saveOpenPositionSnapshot } from '../utils/openPositionSnapshot';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
 const TRADING_CACHE_KEY = 'trade_axis_trading_cache';
@@ -22,6 +23,7 @@ const writeTradingCache = (state) => {
       tradeHistory: state.tradeHistory || [],
       deals: state.deals || [],
       dealsSummary: state.dealsSummary || null,
+      lastOpenTradesAccountId: state.lastOpenTradesAccountId || null,
       lastSyncedAt: state.lastSyncedAt || new Date().toISOString(),
     }),
   );
@@ -36,30 +38,62 @@ const useTradingStore = create((set, get) => ({
   tradeHistory: initialTradingCache?.tradeHistory || [],
   deals: initialTradingCache?.deals || [],
   dealsSummary: initialTradingCache?.dealsSummary || null,
+  lastOpenTradesAccountId: initialTradingCache?.lastOpenTradesAccountId || null,
+  isUsingPositionsSnapshot: false,
+  positionsError: null,
   lastSyncedAt: initialTradingCache?.lastSyncedAt || null,
   loading: false,
   error: null,
 
   fetchOpenTrades: async (accountId) => {
     if (!accountId) return;
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, positionsError: null });
     try {
       const response = await api.get(`/trading/positions/${accountId}`);
       if (response.data.success) {
+        const capturedAt = new Date().toISOString();
         const nextState = {
           openTrades: response.data.data || [],
           loading: false,
-          lastSyncedAt: new Date().toISOString(),
+          lastOpenTradesAccountId: accountId,
+          isUsingPositionsSnapshot: false,
+          positionsError: null,
+          lastSyncedAt: capturedAt,
         };
+        saveOpenPositionSnapshot({ accountId, positions: nextState.openTrades, capturedAt });
         writeTradingCache({ ...get(), ...nextState });
         set(nextState);
       } else {
-        set({ error: response.data.message, loading: false });
+        set({ error: response.data.message, positionsError: response.data.message, loading: false });
       }
     } catch (error) {
       console.error('Fetch open trades error:', error);
-      set({ error: error.response?.data?.message || 'Failed to fetch positions', loading: false });
+      const message = error.response?.data?.message || 'Failed to fetch positions';
+      set({ error: message, positionsError: message, loading: false });
     }
+  },
+
+  hydrateOpenTradesSnapshot: (accountId) => {
+    const snapshot = getOpenPositionSnapshot(accountId);
+    if (!snapshot) {
+      if (get().lastOpenTradesAccountId !== accountId) {
+        // Never display the generic cache for a different account. There is
+        // simply no offline position data to show until this account syncs.
+        set({ openTrades: [], lastOpenTradesAccountId: null, isUsingPositionsSnapshot: false });
+      }
+      return null;
+    }
+
+    const nextState = {
+      openTrades: snapshot.positions || [],
+      lastOpenTradesAccountId: accountId,
+      isUsingPositionsSnapshot: true,
+      lastSyncedAt: snapshot.capturedAt || get().lastSyncedAt,
+      error: null,
+      positionsError: null,
+    };
+    set(nextState);
+    return snapshot;
   },
 
   fetchPendingOrders: async (accountId) => {
@@ -153,6 +187,13 @@ const useTradingStore = create((set, get) => ({
         ),
         lastSyncedAt: new Date().toISOString(),
       };
+      if (state.lastOpenTradesAccountId) {
+        saveOpenPositionSnapshot({
+          accountId: state.lastOpenTradesAccountId,
+          positions: nextState.openTrades,
+          capturedAt: nextState.lastSyncedAt,
+        });
+      }
       writeTradingCache({ ...state, ...nextState });
       return nextState;
     });
@@ -171,6 +212,13 @@ const useTradingStore = create((set, get) => ({
         }),
         lastSyncedAt: new Date().toISOString(),
       };
+      if (state.lastOpenTradesAccountId) {
+        saveOpenPositionSnapshot({
+          accountId: state.lastOpenTradesAccountId,
+          positions: nextState.openTrades,
+          capturedAt: nextState.lastSyncedAt,
+        });
+      }
       writeTradingCache({ ...state, ...nextState });
       return nextState;
     });
@@ -508,6 +556,9 @@ const useTradingStore = create((set, get) => ({
       tradeHistory: [],
       deals: [],
       dealsSummary: null,
+      lastOpenTradesAccountId: null,
+      isUsingPositionsSnapshot: false,
+      positionsError: null,
       lastSyncedAt: null,
       loading: false,
       error: null,

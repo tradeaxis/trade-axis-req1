@@ -34,7 +34,9 @@ const clearAuthCache = () => {
 
 const isTransientAuthError = (error) => {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
-  if (error?.response?.status === 503) return true;
+  // A hosting/database outage can return any 5xx response. Preserve the
+  // verified local session so the user can still open the app in safe mode.
+  if (Number(error?.response?.status || 0) >= 500) return true;
   if (!error?.response && ['ERR_NETWORK', 'ECONNABORTED'].includes(error?.code)) return true;
 
   const message = String(error?.message || '').toLowerCase();

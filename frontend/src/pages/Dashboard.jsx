@@ -59,6 +59,7 @@ import WalletPage from '../components/account/Wallet';
 import AdminUsers from '../components/admin/AdminUsers';
 import AdminPanel from '../components/admin/AdminPanel';
 import { exportDealsPdf } from '../utils/dealsPdfExport';
+import { exportOpenPositionsCsv, getOpenPositionSnapshot } from '../utils/openPositionSnapshot';
 
 // Desktop components
 import DesktopTerminal from '../components/mt5/DesktopTerminal';
@@ -690,6 +691,10 @@ const Dashboard = () => {
     updateTradePnL,
     updateTradesPnLBatch,
     lastSyncedAt: tradingLastSyncedAt,
+    lastOpenTradesAccountId,
+    isUsingPositionsSnapshot,
+    hydrateOpenTradesSnapshot,
+    positionsError,
   } = useTradingStore();
 
   const {
@@ -1115,10 +1120,11 @@ const Dashboard = () => {
   // ── Fetch trades when account changes ──
   useEffect(() => {
     if (!selectedAccount?.id) return;
+    hydrateOpenTradesSnapshot(selectedAccount.id);
     fetchOpenTrades(selectedAccount.id);
     fetchPendingOrders?.(selectedAccount.id);
     fetchTradeHistory(selectedAccount.id);
-  }, [selectedAccount, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory]);
+  }, [selectedAccount, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, hydrateOpenTradesSnapshot]);
 
   // ── Fetch deals for history tab ──
   useEffect(() => {
@@ -1425,6 +1431,39 @@ const accountStats = useMemo(() => {
         hour12: true,
       })
     : null;
+
+  const isShowingPositionSnapshot = Boolean(
+    selectedAccount?.id &&
+    lastOpenTradesAccountId === selectedAccount.id &&
+    (isUsingPositionsSnapshot || isOffline || Boolean(positionsError)),
+  );
+
+  const handleDownloadOpenPositions = async () => {
+    if (!selectedAccount?.id) return;
+
+    const savedSnapshot = getOpenPositionSnapshot(selectedAccount.id);
+    const positions = savedSnapshot?.positions || (
+      lastOpenTradesAccountId === selectedAccount.id ? openTrades : []
+    );
+    if (!positions.length) {
+      toast.error('No saved open-position snapshot is available for this account.');
+      return;
+    }
+
+    try {
+      const result = await exportOpenPositionsCsv({
+        accountId: selectedAccount.id,
+        positions,
+        capturedAt: savedSnapshot?.capturedAt || tradingLastSyncedAt,
+      });
+      toast.success(result?.method === 'saved'
+        ? 'Open positions file saved to Documents/TradeAxis'
+        : 'Open positions file downloaded');
+    } catch (error) {
+      console.error('Open positions export failed:', error);
+      toast.error('Could not save the open positions file');
+    }
+  };
 
   const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
 
@@ -5154,22 +5193,35 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
         ))}
       </div>
 
-      {tradeTabSection === 'positions' && sortedLiveOpenTrades.length > 1 && (
-        <div className="flex justify-end px-3 py-2 border-b" style={{ borderColor: '#363a45' }}>
-          <select
-            value={tradePositionSort}
-            onChange={(event) => setTradePositionSort(event.target.value)}
-            className="px-2 py-1.5 rounded-lg text-xs font-medium"
+      {tradeTabSection === 'positions' && sortedLiveOpenTrades.length > 0 && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-b" style={{ borderColor: '#363a45' }}>
+          <button
+            type="button"
+            onClick={handleDownloadOpenPositions}
+            className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold"
             style={{
-              background: theme === 'light' ? '#f1f5f9' : '#252832',
-              border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
-              color: theme === 'light' ? '#1e293b' : '#d1d4dc',
+              background: theme === 'light' ? '#e0f2fe' : '#123047',
+              color: theme === 'light' ? '#0369a1' : '#7dd3fc',
             }}
-            aria-label="Sort positions"
           >
-            <option value="asc">A-Z</option>
-            <option value="desc">Z-A</option>
-          </select>
+            <Download size={14} /> Download positions
+          </button>
+          {sortedLiveOpenTrades.length > 1 && (
+            <select
+              value={tradePositionSort}
+              onChange={(event) => setTradePositionSort(event.target.value)}
+              className="px-2 py-1.5 rounded-lg text-xs font-medium"
+              style={{
+                background: theme === 'light' ? '#f1f5f9' : '#252832',
+                border: `1px solid ${theme === 'light' ? '#cbd5e1' : '#363a45'}`,
+                color: theme === 'light' ? '#1e293b' : '#d1d4dc',
+              }}
+              aria-label="Sort positions"
+            >
+              <option value="asc">A-Z</option>
+              <option value="desc">Z-A</option>
+            </select>
+          )}
         </div>
       )}
 
@@ -7029,19 +7081,33 @@ const renderOrderConfirmation = () => {
         </div>
       </header>
 
-      {(isOffline || isUsingCachedSession) && (
+      {(isOffline || isUsingCachedSession || isShowingPositionSnapshot) && (
         <div
-          className="px-4 py-2 text-xs border-b"
+          className="px-4 py-2 text-xs border-b flex items-center justify-between gap-3"
           style={{
             borderColor: border,
             background: theme === 'light' ? '#fff7ed' : '#2a2418',
             color: theme === 'light' ? '#9a3412' : '#f5c542',
           }}
         >
-          {isOffline ? 'Offline mode.' : 'Connection issue detected.'}{' '}
-          {lastKnownUpdateLabel
-            ? `Showing last synced data from ${lastKnownUpdateLabel}.`
-            : 'Showing the last available data snapshot.'}
+          <span>
+            {isOffline ? 'Offline mode.' : 'Connection issue detected.'}{' '}
+            {isShowingPositionSnapshot
+              ? 'Showing the saved open-position snapshot; live prices and trading are unavailable.'
+              : (lastKnownUpdateLabel
+                ? `Showing last synced data from ${lastKnownUpdateLabel}.`
+                : 'Showing the last available data snapshot.')}
+          </span>
+          {isShowingPositionSnapshot && (
+            <button
+              type="button"
+              onClick={handleDownloadOpenPositions}
+              className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded font-semibold"
+              style={{ background: theme === 'light' ? '#fed7aa' : '#4a3414', color: theme === 'light' ? '#9a3412' : '#f5c542' }}
+            >
+              <Download size={14} /> Download positions
+            </button>
+          )}
         </div>
       )}
 
