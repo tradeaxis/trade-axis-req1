@@ -7,6 +7,41 @@ import api from '../services/api';
 
 const QUOTE_STALE_THRESHOLD_MS = 15000;
 const MARKET_CACHE_KEY = 'trade_axis_market_cache';
+const CONTRACT_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+const normalizeToken = (value) => {
+  const token = Number(value || 0);
+  return Number.isSafeInteger(token) && token > 0 ? token : 0;
+};
+
+const dateKey = (value) => String(value || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0] || '';
+
+const contractMonth = (value) => {
+  const date = dateKey(value);
+  if (date) return CONTRACT_MONTHS[Number(date.slice(5, 7)) - 1] || '';
+  const raw = String(value || '').toUpperCase();
+  if (CONTRACT_MONTHS.includes(raw)) return raw;
+  const match = raw.match(/(?:-|_)(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(?:$|[^A-Z])/);
+  return match?.[1] || '';
+};
+
+// A price may be displayed only for the exact Kite instrument selected by the
+// user. Contract names share an underlying, so a symbol-name match alone is
+// not sufficient during the monthly rollover.
+const hasMatchingQuoteIdentity = (symbol, incoming = {}, existing = {}, symbols = []) => {
+  const selected = symbols.find((item) => String(item?.symbol || '').toUpperCase() === symbol) || {};
+  const expectedToken = normalizeToken(selected.kite_instrument_token || selected.instrumentToken || existing.instrumentToken);
+  const incomingToken = normalizeToken(incoming.instrumentToken || incoming.instrument_token);
+  if (expectedToken && incomingToken && expectedToken !== incomingToken) return false;
+
+  const expectedExpiry = dateKey(selected.expiry_date || selected.expiryDate || existing.expiry_date || existing.expiryDate);
+  const incomingExpiry = dateKey(incoming.expiryDate || incoming.expiry_date);
+  if (expectedExpiry && incomingExpiry && expectedExpiry !== incomingExpiry) return false;
+
+  const expectedMonth = contractMonth(expectedExpiry || existing.contractMonth || selected.symbol || symbol);
+  const incomingMonth = contractMonth(incomingExpiry || incoming.contractMonth || incoming.contract_month);
+  return !(expectedMonth && incomingMonth && expectedMonth !== incomingMonth);
+};
 
 const getIstDateKey = (date = new Date()) => {
   const parts = new Intl.DateTimeFormat('en-GB', {
@@ -104,9 +139,8 @@ const useMarketStore = create((set, get) => ({
             tick_size:      s.tick_size,
             underlying:     s.underlying,
             expiry_date:    s.expiry_date,
-            contractMonth:  s.expiry_date
-              ? ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'][new Date(s.expiry_date).getMonth()]
-              : undefined,
+            instrumentToken: normalizeToken(s.kite_instrument_token || s.instrumentToken) || undefined,
+            contractMonth:  contractMonth(s.expiry_date || s.symbol) || undefined,
             // ── Use last_update from DB if available, else "now" ──
             // DB prices may be minutes old so we use last_update if present.
             timestamp: s.last_update ? new Date(s.last_update).getTime() : now,
@@ -157,6 +191,7 @@ const useMarketStore = create((set, get) => ({
           if (!item || !item.symbol) continue;
           const sym      = String(item.symbol).toUpperCase();
           const existing = newQuotes[sym] || {};
+          if (!hasMatchingQuoteIdentity(sym, item, existing, state.symbols)) continue;
 
           // Always update if source is 'kite' (live tick); skip if same values < 60s
           const isLive = item.source === 'kite' || item.source === 'socket';
@@ -190,6 +225,8 @@ const useMarketStore = create((set, get) => ({
             change:         Number(item.change ?? item.change_value    ?? existing.change         ?? 0),
             change_percent: Number(item.changePercent ?? item.change_percent ?? existing.change_percent ?? 0),
             volume:         Number(item.volume ?? existing.volume  ?? 0),
+            instrumentToken: normalizeToken(item.instrumentToken || item.instrument_token) || existing.instrumentToken,
+            expiryDate:     dateKey(item.expiryDate || item.expiry_date) || existing.expiryDate,
             contractMonth:  item.contractMonth ?? item.contract_month ?? existing.contractMonth,
             // ── Always stamp now so staleness detection works ──
             timestamp: now,
@@ -215,6 +252,7 @@ const useMarketStore = create((set, get) => ({
 
       set(state => {
         const existing = state.quotes[sym] || {};
+        if (!hasMatchingQuoteIdentity(sym, data, existing, state.symbols)) return {};
         const marketOpen = isMarketOpenNow(sym);
         const newLast  = Number(
           marketOpen
@@ -247,6 +285,8 @@ const useMarketStore = create((set, get) => ({
               change:         Number(data.change ?? data.change_value    ?? existing.change         ?? 0),
               change_percent: Number(data.changePercent ?? data.change_percent ?? existing.change_percent ?? 0),
               volume:         Number(data.volume ?? existing.volume  ?? 0),
+              instrumentToken: normalizeToken(data.instrumentToken || data.instrument_token) || existing.instrumentToken,
+              expiryDate:     dateKey(data.expiryDate || data.expiry_date) || existing.expiryDate,
               contractMonth:  data.contractMonth ?? data.contract_month ?? existing.contractMonth,
               timestamp: now,
               source:    data.source || 'socket',
@@ -290,11 +330,15 @@ const useMarketStore = create((set, get) => ({
           change_percent: Number(q.changePercent || q.change_percent || 0),
           volume:         Number(q.volume     || 0),
           display_name:   q.displayName || q.display_name,
+          instrumentToken: normalizeToken(q.instrumentToken || q.instrument_token) || existing?.instrumentToken,
+          expiryDate:     dateKey(q.expiryDate || q.expiry_date) || existing?.expiryDate,
           contractMonth:  q.contractMonth || q.contract_month || existing?.contractMonth,
           timestamp:      quoteTimestamp,
           source:         q.source || 'api',
           off_quotes:     Boolean(q.off_quotes),
         };
+
+        if (!hasMatchingQuoteIdentity(sym, quote, existing, get().symbols)) return existing || null;
 
         const nextState = {
           quotes: { ...get().quotes, [sym]: quote },

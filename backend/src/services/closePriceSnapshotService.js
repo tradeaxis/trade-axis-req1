@@ -162,6 +162,8 @@ class ClosePriceSnapshotService {
         close_price: row.close_price,
         bid: row.close_price,
         ask: row.close_price,
+        instrumentToken: Number(row.kite_instrument_token || 0) || undefined,
+        expiryDate: row.expiry_date || undefined,
         timestamp: Date.now(),
         source: 'database',
       })),

@@ -164,6 +164,9 @@ class SocketHandler {
           change:        cached.change,
           changePercent: cached.changePct,
           volume:        cached.volume,
+          instrumentToken: cached.instrumentToken,
+          expiryDate:    cached.expiryDate,
+          contractMonth: cached.contractMonth,
           timestamp:     cached.timestamp,
           source:        'kite',
         });
@@ -290,7 +293,7 @@ class SocketHandler {
       const { data: rows } = await queueDB(() =>
         supabase
           .from('symbols')
-          .select('symbol, bid, ask, last_price, close_price, previous_close, last_update')
+          .select('symbol, kite_instrument_token, kite_tradingsymbol, display_name, expiry_date, bid, ask, last_price, close_price, previous_close, last_update')
           .in('symbol', missing)
       );
 

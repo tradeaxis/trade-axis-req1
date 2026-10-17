@@ -93,6 +93,21 @@ const getRowContractMonthKey = (row = {}) => (
   (row.expiry_date ? MONTHS[new Date(row.expiry_date).getMonth()] || '' : '')
 );
 
+const getRowExpiryDateKey = (row = {}) => {
+  const date = String(row.expiry_date || '').match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  return date || '';
+};
+
+const quoteMatchesRowIdentity = (quote, row = {}) => {
+  if (!quote) return false;
+
+  const expectedMonth = getRowContractMonthKey(row);
+  const expectedExpiry = getRowExpiryDateKey(row);
+  if (expectedMonth && quote.contractMonth && quote.contractMonth !== expectedMonth) return false;
+  if (expectedExpiry && quote.expiryDate && quote.expiryDate !== expectedExpiry) return false;
+  return true;
+};
+
 const normalizePriceLookupKey = (value = '') =>
   String(value || '')
     .toUpperCase()
@@ -172,9 +187,10 @@ class KiteStreamService {
       matches.push(price);
     }
 
-    if (requestedMonth) return matches[0] || null;
-
     const uniqueTokens = new Set(matches.map((price) => price.instrumentToken || '').filter(Boolean));
+    // A lookup by an underlying is only safe when it resolves to one token.
+    // This also protects the month-qualified fallback from choosing the first
+    // of two similarly-named rows during expiry rollover.
     return uniqueTokens.size === 1 ? matches[0] : null;
   }
 
@@ -182,7 +198,9 @@ class KiteStreamService {
     const token = Number(row.kite_instrument_token || 0);
     if (token > 0) {
       const tokenPrice = this.tokenPriceCache.get(token);
-      if (tokenPrice) return tokenPrice;
+      // The database token is the contract identity. Never fall through to a
+      // name-based lookup if it is known but does not match a live quote.
+      return quoteMatchesRowIdentity(tokenPrice, row) ? tokenPrice : null;
     }
 
     const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
@@ -192,7 +210,7 @@ class KiteStreamService {
 
     for (const key of exactKeys) {
       const exact = this.priceCache.get(key);
-      if (exact && requestedMonth && exact.contractMonth !== requestedMonth) continue;
+      if (exact && !quoteMatchesRowIdentity(exact, row)) continue;
       if (exact) return exact;
     }
 
@@ -204,7 +222,10 @@ class KiteStreamService {
       return null;
     }
 
-    return this.getPrice(row.underlying || row.symbol);
+    // Never use an underlying-only fallback here. At month-end that can return
+    // a valid tick for a different expiry, which is worse than showing an
+    // off-quotes state until an exact quote arrives.
+    return null;
   }
 
   getPrices(symbols) {
@@ -311,10 +332,16 @@ class KiteStreamService {
       const exchange = String(row.kite_exchange || 'NFO').toUpperCase();
       const contractMonth = getRowContractMonthKey(row);
 
+      const expiryDate = getRowExpiryDateKey(row);
       if (!map.has(token)) {
-        map.set(token, { symbols: [], tickSize, exchange, contractMonth });
-      } else if (!map.get(token).contractMonth && contractMonth) {
-        map.get(token).contractMonth = contractMonth;
+        map.set(token, { symbols: [], tickSize, exchange, contractMonth, expiryDate });
+      } else {
+        if (!map.get(token).contractMonth && contractMonth) {
+          map.get(token).contractMonth = contractMonth;
+        }
+        if (!map.get(token).expiryDate && expiryDate) {
+          map.get(token).expiryDate = expiryDate;
+        }
       }
       for (const symbol of getRowPriceAliases(row)) {
         if ((aliasTokens.get(symbol)?.size || 0) > 1) continue;
@@ -585,6 +612,7 @@ class KiteStreamService {
         timestamp: Date.now(),
         instrumentToken: token,
         contractMonth: entry.contractMonth || '',
+        expiryDate: entry.expiryDate || '',
       };
 
       this.tokenPriceCache.set(token, priceData);
@@ -625,7 +653,9 @@ class KiteStreamService {
             change:        priceData.change,
             changePercent: priceData.changePct,
             volume:        priceData.volume,
+            instrumentToken: token,
             contractMonth,
+            expiryDate:    entry.expiryDate || '',
             timestamp:     emitTs,
             source:        this.activeSource || 'kite',
           });

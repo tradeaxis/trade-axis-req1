@@ -33,12 +33,8 @@ class MarketDataService {
     const sym = String(symbol || '').toUpperCase();
     if (!sym) return null;
 
-    // 1. Live price from kiteStreamService memory (instant).
-    // Use it only while the market is open and the tick is fresh; after close
-    // the persisted DB row is the trusted closing/last price until next open.
-    let live = kiteStreamService.getPrice(sym);
-
-    // 2. Static metadata (lot_size, tick_size, display_name, etc.)
+    // Static metadata carries the instrument token, which is required to
+    // verify that a live quote belongs to this exact expiry.
     let meta = this.metaCache.get(sym);
     if (!meta || Date.now() - meta.ts > this.META_TTL) {
       const { data, error } = await supabase
@@ -53,7 +49,9 @@ class MarketDataService {
     }
 
     const d = meta.d;
-    live = live || kiteStreamService.getPriceForSymbolRow(d);
+    // Never start with a name-only lookup: futures for different expiries have
+    // the same underlying and must be resolved by their Kite instrument token.
+    const live = kiteStreamService.getPriceForSymbolRow(d);
     const marketOpen = isMarketOpen(d.symbol, d.exchange);
     const liveFresh = !!live && Number(live.last || 0) > 0 && getAgeMs(live.timestamp) <= QUOTE_FRESHNESS_MS;
     const usableLive = marketOpen && liveFresh ? live : null;
@@ -102,6 +100,8 @@ class MarketDataService {
       underlying:  d.underlying,
       expiryDate:  d.expiry_date,
       expiry_date: d.expiry_date,
+      instrumentToken: Number(d.kite_instrument_token || 0) || undefined,
+      instrument_token: Number(d.kite_instrument_token || 0) || undefined,
 
       // ── Prices ── (both camelCase and snake_case for compatibility)
       lastPrice,

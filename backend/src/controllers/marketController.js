@@ -20,6 +20,8 @@ const SYMBOL_SELECT_FIELDS = [
   'display_name',
   'underlying',
   'kite_tradingsymbol',
+  'kite_instrument_token',
+  'kite_exchange',
   'category',
   'segment',
   'instrument_type',
@@ -313,7 +315,7 @@ exports.getQuote = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Symbol not found' });
     }
 
-    const live = kiteStreamService.getPriceForSymbolRow(dbSym) || kiteStreamService.getPrice(sym);
+    const live = kiteStreamService.getPriceForSymbolRow(dbSym);
     const liveAgeMs = live?.timestamp ? Date.now() - live.timestamp : Number.POSITIVE_INFINITY;
     const hasLive = isMarketOpen(dbSym.symbol, dbSym.exchange) && !!live && live.last > 0 && liveAgeMs <= QUOTE_FRESHNESS_MS;
     const dbFreshness = getDbFreshness(dbSym);
