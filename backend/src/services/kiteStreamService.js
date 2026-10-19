@@ -232,7 +232,22 @@ class KiteStreamService {
       // Do not fall back to a name lookup when the token is known: that could
       // cross an expiry at month-end. A missing or mismatched token remains
       // off-quotes until a quote for this exact contract arrives.
-      return Number(tokenPrice?.instrumentToken || 0) === token ? tokenPrice : null;
+      if (Number(tokenPrice?.instrumentToken || 0) === token) return tokenPrice;
+
+      // A token quote can occasionally be evicted while its exact alias quote
+      // is still present (for example during a subscription-map refresh). It
+      // is safe to use that alias only when it proves the same instrument
+      // token. This preserves expiry isolation and prevents a healthy stream
+      // from being shown as off-quotes because of cache housekeeping.
+      const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
+        .map((value) => String(value || '').toUpperCase())
+        .filter(Boolean);
+      for (const key of exactKeys) {
+        const aliasPrice = this.priceCache.get(key);
+        if (Number(aliasPrice?.instrumentToken || 0) === token) return aliasPrice;
+      }
+
+      return null;
     }
 
     const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
@@ -763,7 +778,15 @@ class KiteStreamService {
     for (const [token, entry] of this.tokenToSymbols.entries()) {
       const lastTickAt = this.lastTickAtByToken.get(token) || 0;
       const lastRepairAt = this.lastRepairAtByToken.get(token) || 0;
-      if (now - lastTickAt < this.STALE_TOKEN_MS) continue;
+      const cachedQuote = this.tokenPriceCache.get(token);
+      const hasExactCachedQuote =
+        Number(cachedQuote?.instrumentToken || 0) === Number(token) &&
+        Number(cachedQuote?.last || 0) > 0;
+      // A fresh tick timestamp alone is not sufficient. The dashboard and
+      // order engine require an exact-token quote. Repair a missing cache
+      // entry even when another stream event has recently updated the token's
+      // heartbeat.
+      if (hasExactCachedQuote && now - lastTickAt < this.STALE_TOKEN_MS) continue;
       if (now - lastRepairAt < this.TOKEN_REPAIR_COOLDOWN_MS) continue;
       if (!entry?.tradingSymbol || !entry?.exchange || !entry?.symbols?.length) continue;
       staleEntries.push({ token, entry });
