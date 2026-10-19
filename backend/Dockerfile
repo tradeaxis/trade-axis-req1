@@ -9,7 +9,6 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
-COPY sql ./sql
 
 EXPOSE 5000
 
