@@ -10,6 +10,7 @@ const { KiteTicker } = require('kiteconnect');
 const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
 const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
+const { isAnyMarketOpen } = require('./marketStatus');
 
 // Default spread per segment when depth is unavailable (mode != 'full')
 // These are conservative estimates; actual spread depends on liquidity
@@ -156,14 +157,25 @@ class KiteStreamService {
     this.priceCache = new Map();
     this.tokenPriceCache = new Map();
     this.lastEmitAt = new Map();
+    this.lastTickAtByToken = new Map();
+    this.lastRepairAtByToken = new Map();
     this.underlyingCount = 0;
     this.mappedSymbolCount = 0;
+    this.subscriptionMaintenanceInterval = null;
+    this.subscriptionRefreshInterval = null;
+    this.subscriptionRefreshInFlight = false;
+    this.quoteRepairInFlight = false;
+    this.lastSubscriptionRepairAt = null;
 
     // Dirty symbols for DB flush
     this.dirtySymbols   = new Set();
     this.dbFlushInterval= null;
     this.DB_FLUSH_MS      = Number(process.env.KITE_DB_FLUSH_MS || 30000);
     this.EMIT_INTERVAL_MS = Number(process.env.KITE_EMIT_INTERVAL_MS || 1000);
+    this.STALE_TOKEN_MS = Number(process.env.KITE_STALE_TOKEN_MS || 20000);
+    this.TOKEN_REPAIR_COOLDOWN_MS = Number(process.env.KITE_TOKEN_REPAIR_COOLDOWN_MS || 45000);
+    this.TOKEN_REPAIR_CHECK_MS = Number(process.env.KITE_TOKEN_REPAIR_CHECK_MS || 15000);
+    this.SUBSCRIPTION_REFRESH_MS = Number(process.env.KITE_SUBSCRIPTION_REFRESH_MS || 300000);
   }
 
   isRunning() { return this.running; }
@@ -334,13 +346,23 @@ class KiteStreamService {
 
       const expiryDate = getRowExpiryDateKey(row);
       if (!map.has(token)) {
-        map.set(token, { symbols: [], tickSize, exchange, contractMonth, expiryDate });
+        map.set(token, {
+          symbols: [],
+          tickSize,
+          exchange,
+          contractMonth,
+          expiryDate,
+          tradingSymbol: String(row.kite_tradingsymbol || row.symbol || '').toUpperCase(),
+        });
       } else {
         if (!map.get(token).contractMonth && contractMonth) {
           map.get(token).contractMonth = contractMonth;
         }
         if (!map.get(token).expiryDate && expiryDate) {
           map.get(token).expiryDate = expiryDate;
+        }
+        if (!map.get(token).tradingSymbol && row.kite_tradingsymbol) {
+          map.get(token).tradingSymbol = String(row.kite_tradingsymbol).toUpperCase();
         }
       }
       for (const symbol of getRowPriceAliases(row)) {
@@ -363,6 +385,12 @@ class KiteStreamService {
       if (!map.has(cachedToken)) {
         this.tokenPriceCache.delete(cachedToken);
       }
+    }
+    for (const token of this.lastTickAtByToken.keys()) {
+      if (!map.has(token)) this.lastTickAtByToken.delete(token);
+    }
+    for (const token of this.lastRepairAtByToken.keys()) {
+      if (!map.has(token)) this.lastRepairAtByToken.delete(token);
     }
 
     this.tokenToSymbols = map;
@@ -493,6 +521,7 @@ class KiteStreamService {
 
     this.ticker.connect();
     this.startDBFlush();
+    this.startSubscriptionMaintenance();
 
     return {
       started: true,
@@ -526,6 +555,9 @@ class KiteStreamService {
       this.dirtySymbols.clear();
       this.tokenToSymbols.clear();
       this.lastEmitAt.clear();
+      this.lastTickAtByToken.clear();
+      this.lastRepairAtByToken.clear();
+      this.stopSubscriptionMaintenance();
       this.underlyingCount = 0;
       this.mappedSymbolCount = 0;
       this.activeSource = 'kite';
@@ -616,6 +648,7 @@ class KiteStreamService {
       };
 
       this.tokenPriceCache.set(token, priceData);
+      this.lastTickAtByToken.set(token, priceData.timestamp);
 
       // ── Emit to ALL alias symbols for this token ─────────────────────────
       for (const sym of entry.symbols) {
@@ -661,6 +694,111 @@ class KiteStreamService {
           });
         }
       }
+    }
+  }
+
+  stopSubscriptionMaintenance() {
+    if (this.subscriptionMaintenanceInterval) {
+      clearInterval(this.subscriptionMaintenanceInterval);
+      this.subscriptionMaintenanceInterval = null;
+    }
+    if (this.subscriptionRefreshInterval) {
+      clearInterval(this.subscriptionRefreshInterval);
+      this.subscriptionRefreshInterval = null;
+    }
+  }
+
+  startSubscriptionMaintenance() {
+    this.stopSubscriptionMaintenance();
+
+    // A stream connection can remain healthy while a small number of valid
+    // tokens silently stop ticking. Re-subscribe those exact tokens and use a
+    // token-verified REST quote as a repair instead of showing stale prices.
+    this.subscriptionMaintenanceInterval = setInterval(() => {
+      this.repairStaleTokenQuotes().catch((error) =>
+        console.warn('Stale token quote repair failed:', error.message),
+      );
+    }, this.TOKEN_REPAIR_CHECK_MS);
+
+    // Contract visibility changes at rollover. Refreshing the subscription map
+    // periodically removes any need for a manual sync or a server restart.
+    this.subscriptionRefreshInterval = setInterval(() => {
+      this.refreshSubscriptions().catch((error) =>
+        console.warn('Scheduled subscription refresh failed:', error.message),
+      );
+    }, this.SUBSCRIPTION_REFRESH_MS);
+  }
+
+  async repairStaleTokenQuotes() {
+    if (
+      this.quoteRepairInFlight ||
+      this.activeSource !== 'kite' ||
+      !this.running ||
+      !this.ticker ||
+      !isAnyMarketOpen()
+    ) return { repaired: 0, stale: 0, skipped: true };
+
+    const now = Date.now();
+    const staleEntries = [];
+    for (const [token, entry] of this.tokenToSymbols.entries()) {
+      const lastTickAt = this.lastTickAtByToken.get(token) || 0;
+      const lastRepairAt = this.lastRepairAtByToken.get(token) || 0;
+      if (now - lastTickAt < this.STALE_TOKEN_MS) continue;
+      if (now - lastRepairAt < this.TOKEN_REPAIR_COOLDOWN_MS) continue;
+      if (!entry?.tradingSymbol || !entry?.exchange || !entry?.symbols?.length) continue;
+      staleEntries.push({ token, entry });
+    }
+
+    if (staleEntries.length === 0) return { repaired: 0, stale: 0 };
+
+    this.quoteRepairInFlight = true;
+    this.lastSubscriptionRepairAt = new Date(now).toISOString();
+    try {
+      const staleTokens = staleEntries.map(({ token }) => token);
+      const mode = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
+      try {
+        this.ticker.subscribe(staleTokens);
+        this.ticker.setMode(mode, staleTokens);
+      } catch (error) {
+        console.warn(`Could not re-subscribe ${staleTokens.length} stale Kite tokens:`, error.message);
+      }
+
+      const kite = kiteService.getKiteInstance?.();
+      if (!kite || typeof kite.getQuote !== 'function') {
+        return { repaired: 0, stale: staleEntries.length, reason: 'quote client unavailable' };
+      }
+
+      const repairedTicks = [];
+      const QUOTE_BATCH_SIZE = 100;
+      for (let index = 0; index < staleEntries.length; index += QUOTE_BATCH_SIZE) {
+        const batch = staleEntries.slice(index, index + QUOTE_BATCH_SIZE);
+        const quoteKeys = batch.map(({ entry }) => `${entry.exchange}:${entry.tradingSymbol}`);
+        let quotes = {};
+        try {
+          quotes = await kite.getQuote(quoteKeys);
+        } catch (error) {
+          console.warn(`Kite stale-quote repair batch failed: ${error.message}`);
+        }
+
+        for (const { token, entry } of batch) {
+          this.lastRepairAtByToken.set(token, now);
+          const quoteKey = `${entry.exchange}:${entry.tradingSymbol}`;
+          const quote = quotes?.[quoteKey];
+          // The quote must prove it belongs to the expected instrument token.
+          // This prevents a direct-quote repair from crossing expiries.
+          if (Number(quote?.instrument_token || 0) !== Number(token)) continue;
+          if (Number(quote?.last_price || 0) <= 0) continue;
+          repairedTicks.push(quote);
+        }
+      }
+
+      if (repairedTicks.length > 0) {
+        this.handleTicks(repairedTicks, 'full');
+        console.log(`🩹 Repaired ${repairedTicks.length}/${staleEntries.length} stale Kite token quote(s)`);
+      }
+      return { repaired: repairedTicks.length, stale: staleEntries.length };
+    } finally {
+      this.quoteRepairInFlight = false;
     }
   }
 
@@ -765,6 +903,10 @@ class KiteStreamService {
       underlyingCount:   this.underlyingCount || 0,
       mappedSymbolCount: this.mappedSymbolCount || 0,
       cachedPrices:      this.priceCache.size,
+      staleTokenCount:   [...this.tokenToSymbols.keys()].filter((token) => (
+        now - (this.lastTickAtByToken.get(token) || 0) >= this.STALE_TOKEN_MS
+      )).length,
+      lastSubscriptionRepairAt: this.lastSubscriptionRepairAt,
       pendingDBWrites:   this.dirtySymbols.size,
       emitIntervalSeconds: Math.round(this.EMIT_INTERVAL_MS / 1000),
       dbFlushSeconds:    Math.round(this.DB_FLUSH_MS / 1000),
@@ -783,27 +925,37 @@ class KiteStreamService {
       return { refreshed: false };
     }
 
-    const previousTokens = Array.from(this.tokenToSymbols.keys());
-    const oldCount = previousTokens.length;
-    await this.buildTokenMap();
-    const newCount = this.tokenToSymbols.size;
-
-    const tokens = Array.from(this.tokenToSymbols.keys());
-    const mode   = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
-
-    const removedTokens = previousTokens.filter((token) => !this.tokenToSymbols.has(token));
-    if (removedTokens.length > 0 && typeof this.ticker.unsubscribe === 'function') {
-      this.ticker.unsubscribe(removedTokens);
+    if (this.subscriptionRefreshInFlight) {
+      return { refreshed: false, reason: 'refresh already in progress' };
     }
 
-    this.ticker.subscribe(tokens);
-    this.ticker.setMode(mode, tokens);
+    this.subscriptionRefreshInFlight = true;
+    try {
+      const previousTokens = Array.from(this.tokenToSymbols.keys());
+      const oldCount = previousTokens.length;
+      await this.buildTokenMap();
+      const newCount = this.tokenToSymbols.size;
 
-    console.log(`🔄 Refreshed subscriptions: ${oldCount} → ${newCount} tokens`);
-    return { refreshed: true, oldCount, newCount, removedCount: removedTokens.length };
+      const tokens = Array.from(this.tokenToSymbols.keys());
+      const mode   = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
+
+      const removedTokens = previousTokens.filter((token) => !this.tokenToSymbols.has(token));
+      if (removedTokens.length > 0 && typeof this.ticker.unsubscribe === 'function') {
+        this.ticker.unsubscribe(removedTokens);
+      }
+
+      this.ticker.subscribe(tokens);
+      this.ticker.setMode(mode, tokens);
+
+      console.log(`🔄 Refreshed subscriptions: ${oldCount} → ${newCount} tokens`);
+      return { refreshed: true, oldCount, newCount, removedCount: removedTokens.length };
+    } finally {
+      this.subscriptionRefreshInFlight = false;
+    }
   }
 
   activateExternalSource(source, io, tokenMap) {
+    this.stopSubscriptionMaintenance();
     this.io = io || this.io;
     this.activeSource = String(source || 'external').toLowerCase();
     this.running = true;
@@ -812,6 +964,8 @@ class KiteStreamService {
     this.tokenPriceCache.clear();
     this.dirtySymbols.clear();
     this.lastEmitAt.clear();
+    this.lastTickAtByToken.clear();
+    this.lastRepairAtByToken.clear();
     this.tokenToSymbols = tokenMap instanceof Map ? tokenMap : new Map();
     this.underlyingCount = new Set(
       [...this.tokenToSymbols.values()].map((entry) => entry.underlying).filter(Boolean),
