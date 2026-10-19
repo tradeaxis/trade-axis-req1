@@ -172,9 +172,21 @@ class KiteStreamService {
     this.dbFlushInterval= null;
     this.DB_FLUSH_MS      = Number(process.env.KITE_DB_FLUSH_MS || 30000);
     this.EMIT_INTERVAL_MS = Number(process.env.KITE_EMIT_INTERVAL_MS || 1000);
-    this.STALE_TOKEN_MS = Number(process.env.KITE_STALE_TOKEN_MS || 20000);
-    this.TOKEN_REPAIR_COOLDOWN_MS = Number(process.env.KITE_TOKEN_REPAIR_COOLDOWN_MS || 45000);
-    this.TOKEN_REPAIR_CHECK_MS = Number(process.env.KITE_TOKEN_REPAIR_CHECK_MS || 15000);
+    // The dashboard marks a subscribed quote off-quotes after 15 seconds.
+    // Keep the stream recovery window safely below that limit, even when a
+    // stale value remains in the environment from an older deployment.
+    const configuredStaleMs = Number(process.env.KITE_STALE_TOKEN_MS);
+    const configuredCooldownMs = Number(process.env.KITE_TOKEN_REPAIR_COOLDOWN_MS);
+    const configuredCheckMs = Number(process.env.KITE_TOKEN_REPAIR_CHECK_MS);
+    this.STALE_TOKEN_MS = Number.isFinite(configuredStaleMs)
+      ? Math.min(Math.max(configuredStaleMs, 2_000), 8_000)
+      : 8_000;
+    this.TOKEN_REPAIR_COOLDOWN_MS = Number.isFinite(configuredCooldownMs)
+      ? Math.min(Math.max(configuredCooldownMs, 3_000), 8_000)
+      : 5_000;
+    this.TOKEN_REPAIR_CHECK_MS = Number.isFinite(configuredCheckMs)
+      ? Math.min(Math.max(configuredCheckMs, 1_000), 3_000)
+      : 3_000;
     this.SUBSCRIPTION_REFRESH_MS = Number(process.env.KITE_SUBSCRIPTION_REFRESH_MS || 300000);
   }
 
