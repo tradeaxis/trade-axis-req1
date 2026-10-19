@@ -210,9 +210,17 @@ class KiteStreamService {
     const token = Number(row.kite_instrument_token || 0);
     if (token > 0) {
       const tokenPrice = this.tokenPriceCache.get(token);
-      // The database token is the contract identity. Never fall through to a
-      // name-based lookup if it is known but does not match a live quote.
-      return quoteMatchesRowIdentity(tokenPrice, row) ? tokenPrice : null;
+      // The Kite instrument token is the immutable contract identity. A quote
+      // stored under this exact token has already been validated by
+      // handleTicks()/the stale-quote repair, so optional display metadata
+      // (month label or expiry formatting) must not discard it. That used to
+      // incorrectly mark live contracts as off-quotes when those DB fields
+      // differed in representation even though the token was identical.
+      //
+      // Do not fall back to a name lookup when the token is known: that could
+      // cross an expiry at month-end. A missing or mismatched token remains
+      // off-quotes until a quote for this exact contract arrives.
+      return Number(tokenPrice?.instrumentToken || 0) === token ? tokenPrice : null;
     }
 
     const exactKeys = [row.symbol, row.kite_tradingsymbol, row.display_name]
