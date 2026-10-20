@@ -17,6 +17,23 @@ const firstPositiveNumber = (...values) => {
   return 0;
 };
 
+// Kite's response key is useful, but it is not the identity of a contract.
+// Always verify with the instrument token before saving a final close.
+const getQuoteForInstrumentToken = (quotes = {}, quoteKey = '', expectedToken = 0) => {
+  const token = Number(expectedToken || 0);
+  if (!token || !quotes || typeof quotes !== 'object') return null;
+
+  const matchesToken = (quote) => Number(quote?.instrument_token || 0) === token;
+  if (matchesToken(quotes[quoteKey])) return quotes[quoteKey];
+
+  const normalizedKey = String(quoteKey || '').toUpperCase();
+  for (const [key, quote] of Object.entries(quotes)) {
+    if (String(key).toUpperCase() === normalizedKey && matchesToken(quote)) return quote;
+  }
+
+  return Object.values(quotes).find(matchesToken) || null;
+};
+
 const inferKiteExchange = (row = {}) => {
   const direct = String(row.kite_exchange || row.exchange || '').toUpperCase();
   if (['NFO', 'BFO', 'MCX'].includes(direct)) return direct;
@@ -96,21 +113,20 @@ class ClosePriceSnapshotService {
       }
 
       batch.forEach((quoteKey) => {
-        // Kite keys quote responses by EXCHANGE:TRADINGSYMBOL. Do not fall
-        // back to a bare symbol because that can attach another contract's
-        // quote to this row when multiple expiries share an underlying.
-        const quote = quotes?.[quoteKey];
-        const quoteToken = Number(quote?.instrument_token || 0);
-        const closePrice = firstPositiveNumber(
-          quote?.last_price,
-          quote?.lastPrice,
-          quote?.last_traded_price,
-          quote?.ltp,
-        );
-        if (closePrice <= 0) return;
-
-        (rowByQuoteKey.get(quoteKey) || []).forEach((row) => {
+        // Prefer Kite's response key, then safely resolve by instrument token.
+        // A bare-symbol fallback is never used because it can cross expiries.
+        const rowsForQuoteKey = rowByQuoteKey.get(quoteKey) || [];
+        rowsForQuoteKey.forEach((row) => {
           const rowToken = Number(row.kite_instrument_token || 0);
+          const quote = getQuoteForInstrumentToken(quotes, quoteKey, rowToken);
+          const quoteToken = Number(quote?.instrument_token || 0);
+          const closePrice = firstPositiveNumber(
+            quote?.last_price,
+            quote?.lastPrice,
+            quote?.last_traded_price,
+            quote?.ltp,
+          );
+          if (closePrice <= 0) return;
           if (!quoteToken || quoteToken !== rowToken) {
             rejectedMismatches++;
             console.warn(
@@ -181,7 +197,9 @@ class ClosePriceSnapshotService {
     // On weekends every segment is closed, so a backend restart can repair
     // stale stored prices from Kite's exact last quote without waiting for
     // Monday. This is especially useful after a deployment or failed snapshot.
-    if (day === 0 || day === 6 || minutes > 15 * 60 + 30) {
+    // F&O is intentionally available through 3:40 PM IST.  Capturing the
+    // final price at 3:30 PM freezes an early value and corrupts closed P&L.
+    if (day === 0 || day === 6 || minutes > 15 * 60 + 40) {
       results.push(await this.capture('equity'));
     }
     if (day === 0 || day === 6 || minutes > 23 * 60 + 30) {

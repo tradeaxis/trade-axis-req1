@@ -142,6 +142,26 @@ const getRowPriceAliases = (row = {}) => {
   return [...aliases];
 };
 
+// Kite normally returns a quote under the requested `EXCHANGE:TRADINGSYMBOL`
+// key.  Treat that key as a lookup hint only: provider responses can differ in
+// key casing/formatting.  The instrument token is the authoritative identity
+// and prevents an alias or expiry from ever receiving another contract's price.
+const getQuoteForInstrumentToken = (quotes = {}, quoteKey = '', expectedToken = 0) => {
+  const token = Number(expectedToken || 0);
+  if (!token || !quotes || typeof quotes !== 'object') return null;
+
+  const isExpectedQuote = (quote) => Number(quote?.instrument_token || 0) === token;
+  const direct = quotes[quoteKey];
+  if (isExpectedQuote(direct)) return direct;
+
+  const normalizedKey = String(quoteKey || '').toUpperCase();
+  for (const [key, quote] of Object.entries(quotes)) {
+    if (String(key).toUpperCase() === normalizedKey && isExpectedQuote(quote)) return quote;
+  }
+
+  return Object.values(quotes).find(isExpectedQuote) || null;
+};
+
 class KiteStreamService {
   constructor() {
     this.ticker      = null;
@@ -162,8 +182,6 @@ class KiteStreamService {
     this.underlyingCount = 0;
     this.mappedSymbolCount = 0;
     this.subscriptionMaintenanceInterval = null;
-    this.subscriptionRefreshInterval = null;
-    this.subscriptionRefreshInFlight = false;
     this.quoteRepairInFlight = false;
     this.lastSubscriptionRepairAt = null;
 
@@ -187,7 +205,6 @@ class KiteStreamService {
     this.TOKEN_REPAIR_CHECK_MS = Number.isFinite(configuredCheckMs)
       ? Math.min(Math.max(configuredCheckMs, 1_000), 3_000)
       : 3_000;
-    this.SUBSCRIPTION_REFRESH_MS = Number(process.env.KITE_SUBSCRIPTION_REFRESH_MS || 300000);
   }
 
   isRunning() { return this.running; }
@@ -737,10 +754,6 @@ class KiteStreamService {
       clearInterval(this.subscriptionMaintenanceInterval);
       this.subscriptionMaintenanceInterval = null;
     }
-    if (this.subscriptionRefreshInterval) {
-      clearInterval(this.subscriptionRefreshInterval);
-      this.subscriptionRefreshInterval = null;
-    }
   }
 
   startSubscriptionMaintenance() {
@@ -755,13 +768,6 @@ class KiteStreamService {
       );
     }, this.TOKEN_REPAIR_CHECK_MS);
 
-    // Contract visibility changes at rollover. Refreshing the subscription map
-    // periodically removes any need for a manual sync or a server restart.
-    this.subscriptionRefreshInterval = setInterval(() => {
-      this.refreshSubscriptions().catch((error) =>
-        console.warn('Scheduled subscription refresh failed:', error.message),
-      );
-    }, this.SUBSCRIPTION_REFRESH_MS);
   }
 
   async repairStaleTokenQuotes() {
@@ -826,7 +832,7 @@ class KiteStreamService {
         for (const { token, entry } of batch) {
           this.lastRepairAtByToken.set(token, now);
           const quoteKey = `${entry.exchange}:${entry.tradingSymbol}`;
-          const quote = quotes?.[quoteKey];
+          const quote = getQuoteForInstrumentToken(quotes, quoteKey, token);
           // The quote must prove it belongs to the expected instrument token.
           // This prevents a direct-quote repair from crossing expiries.
           if (Number(quote?.instrument_token || 0) !== Number(token)) continue;
