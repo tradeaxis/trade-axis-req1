@@ -10,7 +10,9 @@ const { KiteTicker } = require('kiteconnect');
 const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
 const { isAllowedSymbolRow } = require('../config/allowedKiteUniverse');
-const { isAnyMarketOpen } = require('./marketStatus');
+const { isAnyMarketOpen, isMarketOpen } = require('./marketStatus');
+const { readAllRows } = require('../utils/readAllRows');
+const { kiteQuoteTime } = require('../utils/kiteQuoteTime');
 
 // Default spread per segment when depth is unavailable (mode != 'full')
 // These are conservative estimates; actual spread depends on liquidity
@@ -182,6 +184,8 @@ class KiteStreamService {
     this.underlyingCount = 0;
     this.mappedSymbolCount = 0;
     this.subscriptionMaintenanceInterval = null;
+    this.subscriptionRefreshInFlight = false;
+    this.subscriptionRowCount = 0;
     this.quoteRepairInFlight = false;
     this.lastSubscriptionRepairAt = null;
 
@@ -324,24 +328,22 @@ class KiteStreamService {
   //   • Any series aliases pointing to the same token (e.g. "NIFTY-I")
   // We need to emit price updates to ALL of them.
   async buildTokenMap() {
-    const { data, error } = await supabase
+    const data = await readAllRows(() => supabase
       .from('symbols')
       .select('symbol, kite_instrument_token, kite_exchange, tick_size, underlying, kite_tradingsymbol, display_name, instrument_type, expiry_date, series')
       .eq('is_active', true)
       .eq('instrument_type', 'FUT')
-      .not('kite_instrument_token', 'is', null);
-
-    if (error) throw error;
+      .not('kite_instrument_token', 'is', null));
 
     const allowedRows = (data || []).filter(isAllowedSymbolRow);
 
-    const [openTradesRes, pendingOrdersRes] = await Promise.all([
-      supabase.from('trades').select('symbol').eq('status', 'open'),
-      supabase.from('pending_orders').select('symbol').eq('status', 'pending'),
+    const [openTrades, pendingOrders] = await Promise.all([
+      readAllRows(() => supabase.from('trades').select('id,symbol').eq('status', 'open'), 'id'),
+      readAllRows(() => supabase.from('pending_orders').select('id,symbol').eq('status', 'pending'), 'id'),
     ]);
 
     const forcedSymbols = new Set(
-      [...(openTradesRes.data || []), ...(pendingOrdersRes.data || [])]
+      [...openTrades, ...pendingOrders]
         .map((row) => String(row.symbol || '').toUpperCase())
         .filter(Boolean),
     );
@@ -446,9 +448,10 @@ class KiteStreamService {
     }
 
     this.tokenToSymbols = map;
+    this.subscriptionRowCount = data.length;
     this.underlyingCount = selectedUnderlyingKeys.size;
     this.mappedSymbolCount = [...map.values()].reduce((n, v) => n + v.symbols.length, 0);
-    console.log(`🗺️  Token map built: ${map.size} unique tokens → covering ${this.mappedSymbolCount} symbols across ${this.underlyingCount} underlyings`);
+    console.log(`🗺️  Token map built from ${data.length} database rows: ${map.size} unique tokens → covering ${this.mappedSymbolCount} symbols across ${this.underlyingCount} underlyings`);
     return map;
   }
 
@@ -497,9 +500,10 @@ class KiteStreamService {
     const mode = String(process.env.KITE_TICK_MODE || 'full').toLowerCase();
 
     this.ticker.on('connect', () => {
-      console.log(`✅ KiteTicker connected. Subscribing ${tokens.length} tokens [mode: ${mode}]`);
-      this.ticker.subscribe(tokens);
-      this.ticker.setMode(mode, tokens);
+      const currentTokens = Array.from(this.tokenToSymbols.keys());
+      console.log(`✅ KiteTicker connected. Subscribing ${currentTokens.length} tokens [mode: ${mode}]`);
+      this.ticker.subscribe(currentTokens);
+      this.ticker.setMode(mode, currentTokens);
     });
 
     this.ticker.on('ticks', (ticks) => {
@@ -619,7 +623,7 @@ class KiteStreamService {
   }
 
   // ── Main tick handler ─────────────────────────────────────────────────────
-  handleTicks(ticks, mode = 'full') {
+  handleTicks(ticks, mode = 'full', source = 'websocket') {
     if (!ticks || ticks.length === 0) return;
 
     // DEBUG: Log tick batches (sample every 50 to avoid spam)
@@ -641,7 +645,16 @@ class KiteStreamService {
       if (!entry || entry.symbols.length === 0) continue;
 
       const last = Number(t.last_price || 0);
-      if (last <= 0) continue;
+      if (!Number.isFinite(last) || last <= 0) continue;
+      const receivedAt = Date.now();
+      const exchangeTime = kiteQuoteTime(t.exchange_timestamp || t.timestamp);
+      // REST requires an exchange timestamp; socket quote/ltp modes can omit
+      // it, in which case receipt time is the best available observation.
+      if (source === 'rest' && !exchangeTime) continue;
+      const timestamp = exchangeTime || receivedAt;
+      if (timestamp > receivedAt + 5000) continue;
+      const previous = this.tokenPriceCache.get(token);
+      if (previous && timestamp < previous.timestamp) continue;
 
       // ── OHLC ─────────────────────────────────────────────────────────────
       // Kite tick OHLC structure (confirmed from Kite docs):
@@ -693,7 +706,9 @@ class KiteStreamService {
         change:    parseFloat(chgVal.toFixed(2)),
         changePct: parseFloat(chgPct.toFixed(2)),
         volume:    Number(t.volume_traded || t.volume || 0),
-        timestamp: Date.now(),
+        timestamp,
+        receivedAt,
+        quoteSource: source,
         instrumentToken: token,
         contractMonth: entry.contractMonth || '',
         expiryDate: entry.expiryDate || '',
@@ -741,7 +756,7 @@ class KiteStreamService {
             instrumentToken: token,
             contractMonth,
             expiryDate:    entry.expiryDate || '',
-            timestamp:     emitTs,
+            timestamp:     priceData.timestamp,
             source:        this.activeSource || 'kite',
           });
         }
@@ -782,6 +797,7 @@ class KiteStreamService {
     const now = Date.now();
     const staleEntries = [];
     for (const [token, entry] of this.tokenToSymbols.entries()) {
+      if (!isMarketOpen(entry.tradingSymbol || entry.symbols?.[0], entry.exchange)) continue;
       const lastTickAt = this.lastTickAtByToken.get(token) || 0;
       const lastRepairAt = this.lastRepairAtByToken.get(token) || 0;
       const cachedQuote = this.tokenPriceCache.get(token);
@@ -818,7 +834,7 @@ class KiteStreamService {
       }
 
       const repairedTicks = [];
-      const QUOTE_BATCH_SIZE = 100;
+      const QUOTE_BATCH_SIZE = 500;
       for (let index = 0; index < staleEntries.length; index += QUOTE_BATCH_SIZE) {
         const batch = staleEntries.slice(index, index + QUOTE_BATCH_SIZE);
         const quoteKeys = batch.map(({ entry }) => `${entry.exchange}:${entry.tradingSymbol}`);
@@ -837,12 +853,18 @@ class KiteStreamService {
           // This prevents a direct-quote repair from crossing expiries.
           if (Number(quote?.instrument_token || 0) !== Number(token)) continue;
           if (Number(quote?.last_price || 0) <= 0) continue;
+          const quoteTime = kiteQuoteTime(quote?.timestamp);
+          const age = Date.now() - quoteTime;
+          if (!quoteTime || age < -5000 || age > this.STALE_TOKEN_MS) continue;
           repairedTicks.push(quote);
+        }
+        if (index + QUOTE_BATCH_SIZE < staleEntries.length) {
+          await new Promise(resolve => setTimeout(resolve, 1100));
         }
       }
 
       if (repairedTicks.length > 0) {
-        this.handleTicks(repairedTicks, 'full');
+        this.handleTicks(repairedTicks, 'full', 'rest');
         console.log(`🩹 Repaired ${repairedTicks.length}/${staleEntries.length} stale Kite token quote(s)`);
       }
       return { repaired: repairedTicks.length, stale: staleEntries.length };
@@ -864,7 +886,6 @@ class KiteStreamService {
 
       const toFlush = [...this.dirtySymbols];
       this.dirtySymbols.clear();
-      const now = new Date().toISOString();
 
       // Collect all symbols into one flat update list
       const updates = [];
@@ -899,7 +920,12 @@ class KiteStreamService {
           );
 
           const rows = chunk
-            .filter(({ sym }) => existingBySymbol.has(String(sym || '').toUpperCase()))
+            .filter(({ sym, price }) => {
+              const existing = existingBySymbol.get(String(sym || '').toUpperCase());
+              return existing
+                && Number(existing.kite_instrument_token) === Number(price.instrumentToken)
+                && Number(price.timestamp) >= (Date.parse(existing.last_update) || 0);
+            })
             .map(({ sym, price }) => {
               const existing = existingBySymbol.get(String(sym || '').toUpperCase());
               return {
@@ -919,7 +945,7 @@ class KiteStreamService {
                 change_value:   price.change,
                 change_percent: price.changePct,
                 volume:         price.volume,
-                last_update:    now,
+                last_update:    new Date(price.timestamp).toISOString(),
               };
             });
 
@@ -949,11 +975,14 @@ class KiteStreamService {
       tickAgeSeconds:    tickAge,
       sessionExpired:    this.lastTickAt === null && !this.running,
       tokenCount:        this.tokenToSymbols?.size || 0,
+      subscriptionRowCount: this.subscriptionRowCount,
+      cachedTokenCount: this.tokenPriceCache.size,
       underlyingCount:   this.underlyingCount || 0,
       mappedSymbolCount: this.mappedSymbolCount || 0,
       cachedPrices:      this.priceCache.size,
-      staleTokenCount:   [...this.tokenToSymbols.keys()].filter((token) => (
-        now - (this.lastTickAtByToken.get(token) || 0) >= this.STALE_TOKEN_MS
+      staleTokenCount:   [...this.tokenToSymbols.entries()].filter(([token, entry]) => (
+        isMarketOpen(entry.tradingSymbol || entry.symbols?.[0], entry.exchange)
+        && now - (this.lastTickAtByToken.get(token) || 0) >= this.STALE_TOKEN_MS
       )).length,
       lastSubscriptionRepairAt: this.lastSubscriptionRepairAt,
       pendingDBWrites:   this.dirtySymbols.size,

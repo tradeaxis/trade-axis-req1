@@ -1,6 +1,6 @@
 // backend/src/services/marketStatus.js
 const { supabase } = require('../config/supabase');
-const https = require('https');
+const { equityHolidays, commoditySessions } = require('../config/exchangeCalendar');
 
 let isMarketHoliday = false;
 let holidayMessage = '';
@@ -15,9 +15,7 @@ let lastHolidayFetch = null;
 
 // ✅ Get today's date in IST as YYYY-MM-DD
 const getISTDateString = () => {
-  const now = new Date();
-  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-  const ist = new Date(utcMs + 5.5 * 3600000);
+  const ist = new Date(Date.now() + 5.5 * 3600000);
   return ist.toISOString().slice(0, 10);
 };
 
@@ -57,71 +55,23 @@ const collectHolidayDates = (node, out = new Set()) => {
   return out;
 };
 
-const fetchKiteHolidayPayload = async (apiKey, accessToken) =>
-  new Promise((resolve, reject) => {
-    const req = https.request(
-      'https://api.kite.trade/market.holidays',
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `token ${apiKey}:${accessToken}`,
-          'X-Kite-Version': '3',
-          'User-Agent': 'Trade Axis',
-        },
-      },
-      (res) => {
-        let body = '';
-
-        res.on('data', (chunk) => {
-          body += chunk;
-        });
-
-        res.on('end', () => {
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            return reject(
-              new Error(
-                `Kite holiday request failed (${res.statusCode}): ${body.slice(0, 200)}`,
-              ),
-            );
-          }
-
-          try {
-            resolve(JSON.parse(body));
-          } catch (error) {
-            reject(new Error(`Invalid Kite holiday response: ${error.message}`));
-          }
-        });
-      },
-    );
-
-    req.on('error', reject);
-    req.end();
-  });
-
-// ✅ Fetch holidays from Kite API
+// Keep the exported function for existing admin callers. The installed Kite
+// SDK has no holiday API; never call the nonexistent /market.holidays route.
 const fetchHolidaysFromKite = async () => {
   try {
     const kiteService = require('./kiteService');
     await kiteService.init();
     
     if (!kiteService.isSessionReady()) {
-      console.warn('⚠️ Cannot fetch holidays — Kite session not ready');
-      return [];
+      return [...new Set([...Object.keys(equityHolidays), ...holidaysCache])].sort();
     }
 
     const kc = kiteService.getKiteInstance();
-    if (!kc) return [];
-
-    let holidayPayload = [];
-
-    if (typeof kc.getHolidays === 'function') {
-      holidayPayload = await kc.getHolidays();
-    } else {
-      holidayPayload = await fetchKiteHolidayPayload(
-        kiteService.apiKey,
-        kiteService.accessToken,
-      );
+    if (!kc || typeof kc.getHolidays !== 'function') {
+      return [...new Set([...Object.keys(equityHolidays), ...holidaysCache])].sort();
     }
+
+    const holidayPayload = await kc.getHolidays();
 
     const dates = [...collectHolidayDates(holidayPayload)].sort();
 
@@ -142,7 +92,7 @@ const fetchHolidaysFromKite = async () => {
     return dates;
   } catch (err) {
     console.error('❌ Failed to fetch holidays from Kite:', err.message);
-    return [];
+    return [...new Set([...Object.keys(equityHolidays), ...holidaysCache])].sort();
   }
 };
 
@@ -171,7 +121,7 @@ const loadHolidaysFromDB = async () => {
 // ✅ Check if today is a holiday (from cache)
 const isHolidayActiveToday = () => {
   const today = getISTDateString();
-  return holidaysCache.includes(today);
+  return !!equityHolidays[today] || holidaysCache.includes(today);
 };
 
 // ✅ Manual holiday override (for testing or unexpected holidays)
@@ -194,14 +144,25 @@ const setHoliday = (isHoliday, message = '', date = null, segments = {}) => {
   );
 };
 
-const getHolidayStatus = () => ({
-  isHoliday: isMarketHoliday || isHolidayActiveToday(),
-  message: holidayMessage || (isHolidayActiveToday() ? 'Market Holiday (Kite)' : ''),
-  date: holidayDate,
-  segments: holidaySegments,
-  holidays: holidaysCache,
-  fetchedAt: lastHolidayFetch ? new Date(lastHolidayFetch).toISOString() : null,
-});
+const getHolidayStatus = () => {
+  const today = getISTDateString();
+  const manualActive = isMarketHoliday && (!holidayDate || holidayDate === today);
+  return {
+    isHoliday: manualActive || isHolidayActiveToday(),
+    message: manualActive ? holidayMessage : (equityHolidays[today] || (isHolidayActiveToday() ? 'Market Holiday' : '')),
+    date: manualActive ? holidayDate : today,
+    segments: manualActive ? holidaySegments : {
+      nseBseClosed: isHolidayActiveToday(),
+      mcxClosed: !isMarketOpen('GOLD', 'MCX'),
+      mcxMorningOnly: false,
+      mcxEveningOnly: !!commoditySessions[today],
+    },
+    holidays: [...new Set([...Object.keys(equityHolidays), ...holidaysCache])].sort(),
+    calendarSource: 'Published NSE calendar and cached holidays',
+    calendarYears: [2026],
+    fetchedAt: lastHolidayFetch ? new Date(lastHolidayFetch).toISOString() : null,
+  };
+};
 
 // Commodity keywords
 const COMMODITY_KEYWORDS =
@@ -220,10 +181,8 @@ const isMarketOpen = (symbol = null, exchange = null) => {
     if (commodity) {
       if (holidaySegments.mcxClosed) return false;
       if (holidaySegments.mcxMorningOnly) {
-        const now = new Date();
-        const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-        const ist = new Date(utcMs + 5.5 * 3600000);
-        const minutes = ist.getHours() * 60 + ist.getMinutes();
+        const ist = new Date(Date.now() + 5.5 * 3600000);
+        const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
         return minutes >= 9 * 60 && minutes < 17 * 60;
       }
       return true;
@@ -232,18 +191,18 @@ const isMarketOpen = (symbol = null, exchange = null) => {
   }
   
   // Check Kite holidays
-  if (isHolidayActiveToday()) return false;
+  if (!isCommoditySymbol(symbol, exchange) && isHolidayActiveToday()) return false;
 
-  const now = new Date();
-  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-  const ist = new Date(utcMs + 5.5 * 3600000);
+  const ist = new Date(Date.now() + 5.5 * 3600000);
 
-  const day = ist.getDay();
+  const day = ist.getUTCDay();
   if (day === 0 || day === 6) return false;
 
-  const mins = ist.getHours() * 60 + ist.getMinutes();
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
 
   if (isCommoditySymbol(symbol, exchange)) {
+    const session = commoditySessions[getISTDateString()];
+    if (session) return mins >= session.openMinute && mins <= session.closeMinute;
     return mins >= 9 * 60 && mins <= 23 * 60 + 30;
   }
 
@@ -253,17 +212,7 @@ const isMarketOpen = (symbol = null, exchange = null) => {
 };
 
 const isAnyMarketOpen = () => {
-  if (isMarketHoliday || isHolidayActiveToday()) return false;
-
-  const now = new Date();
-  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-  const ist = new Date(utcMs + 5.5 * 3600000);
-
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= 9 * 60 && mins <= 23 * 60 + 30;
+  return isMarketOpen('NIFTY', 'NFO') || isMarketOpen('GOLD', 'MCX');
 };
 
 // ✅ Auto-refresh holidays every 24 hours

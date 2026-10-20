@@ -1,6 +1,7 @@
 const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
 const { isCommoditySymbol } = require('./marketStatus');
+const { readAllRows } = require('../utils/readAllRows');
 
 const QUOTE_BATCH_SIZE = Number(process.env.KITE_CLOSE_SNAPSHOT_BATCH_SIZE || 250);
 const QUOTE_BATCH_DELAY_MS = Number(process.env.KITE_CLOSE_SNAPSHOT_BATCH_DELAY_MS || 1100);
@@ -71,15 +72,12 @@ class ClosePriceSnapshotService {
       };
     }
 
-    const { data: symbolRows, error } = await supabase
+    const symbolRows = await readAllRows(() => supabase
       .from('symbols')
       .select('*')
       .eq('is_active', true)
       .eq('instrument_type', 'FUT')
-      .not('kite_instrument_token', 'is', null)
-      .limit(10000);
-
-    if (error) throw error;
+      .not('kite_instrument_token', 'is', null));
 
     const rows = (symbolRows || []).filter(
       (row) => (
