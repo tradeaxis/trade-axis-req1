@@ -395,7 +395,39 @@ const getSymbolAsk = (symbol) => (
 );
 
 const findPositionSymbol = (position, symbols = []) => {
-  return findSymbolByInput(position?.symbol, symbols);
+  const raw = String(position?.symbol || '').trim().toUpperCase();
+  if (!raw) return null;
+
+  // Positions need the saved contract, not a search result for its underlying.
+  // In particular, -II must never fall back to the first (near-month) row.
+  const exact = symbols.find((row) => String(row?.symbol || '').toUpperCase() === raw);
+  if (exact) return exact;
+  const dated = symbols.find((row) => [row?.kite_tradingsymbol, row?.display_name]
+    .some((value) => String(value || '').toUpperCase() === raw));
+  if (dated) return dated;
+  if (!getContractMonthInfo(raw)) return null;
+
+  const monthOnly = new RegExp(`[-_](${monthAbbrs.join('|')})$`, 'i').test(raw);
+  const matches = symbols.filter((row) => monthOnly
+    ? getSymbolContractLabel(row) === getSymbolContractLabel(raw)
+    : symbolMatchesContractInput(row, raw));
+  // A yearless label is usable only when the catalogue identifies one contract.
+  const identities = new Set(matches.map((row) => [
+    getContractFamilyKey(row), getContractMonthInfo(row)?.key,
+    row.expiry_date || '', row.kite_exchange || row.exchange || '',
+  ].join('|')));
+  return identities.size === 1 ? matches[0] : null;
+};
+
+const getPositionSymbolLabel = (position, symbols = []) => {
+  const row = findPositionSymbol(position, symbols);
+  return row ? getTradeAxisSymbolLabel(row) : getSymbolContractLabel(position?.symbol) || position?.symbol || '-';
+};
+
+const getPositionOrderSymbol = (position, catalogue = [], tradable = []) => {
+  const row = findPositionSymbol(position, catalogue);
+  if (!row) return null;
+  return tradable.find((candidate) => candidate.symbol === (row.kite_tradingsymbol || row.symbol))?.symbol || null;
 };
 
 const findSymbolByInput = (input, symbols = []) => {
@@ -691,10 +723,16 @@ const buildPositionsReportHtml = ({ users = [], rowsByUser = {}, sort = 'asc', s
 </html>`;
 };
 
-const loadTradableSymbols = async (params = {}) => {
+const loadTradeSymbolCatalog = async (params = {}) => {
   const res = await api.get('/market/symbols', { params: { limit: 5000, ...params } });
-  return dedupeTradableSymbols(filterTradableSymbols(res.data?.symbols || []));
+  const positionSymbols = res.data?.symbols || [];
+  return {
+    positionSymbols,
+    symbols: dedupeTradableSymbols(filterTradableSymbols(positionSymbols)),
+  };
 };
+
+const loadTradableSymbols = async (params = {}) => (await loadTradeSymbolCatalog(params)).symbols;
 
 const getQuoteAgeMs = (symbol = {}) => {
   const raw = symbol.last_update || symbol.updated_at || symbol.timestamp;
@@ -1972,6 +2010,7 @@ function TradeTicket({ accountId, symbols, initialSymbol, onDone, lockedSymbol =
 
 function Trade({ selectedAccount, refreshAuth }) {
   const [symbols, setSymbols] = useState([]);
+  const [positionSymbols, setPositionSymbols] = useState([]);
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
@@ -1995,10 +2034,11 @@ function Trade({ selectedAccount, refreshAuth }) {
     symbolRefreshInFlightRef.current = true;
     const requestVersion = ++symbolRequestVersionRef.current;
     try {
-      const rows = await loadTradableSymbols();
+      const { symbols: rows, positionSymbols: catalogue } = await loadTradeSymbolCatalog();
       if (requestVersion !== symbolRequestVersionRef.current) return null;
 
       setSymbols(rows);
+      setPositionSymbols(catalogue);
       setSelectedSymbol((prev) => prev || rows[0]?.symbol || '');
       return rows;
     } finally {
@@ -2130,8 +2170,8 @@ function Trade({ selectedAccount, refreshAuth }) {
   });
   const enrichedPositions = openPositionRows.map((position) => ({
     ...position,
-    livePrice: getLivePositionPrice(position, symbols),
-    livePnl: getPositionPnl(position, symbols),
+    livePrice: getLivePositionPrice(position, positionSymbols),
+    livePnl: getPositionPnl(position, positionSymbols),
   }));
   const groupedPositions = Array.from(enrichedPositions.reduce((map, position) => {
     const key = `${String(position.symbol || '').toUpperCase()}-${String(position.trade_type || '').toLowerCase()}`;
@@ -2229,7 +2269,7 @@ function Trade({ selectedAccount, refreshAuth }) {
             >
               <div>
                 <div className="position-title">
-                  <strong>{getTradeAxisSymbolLabel(position.symbol, symbols)}</strong>
+                  <strong>{getPositionSymbolLabel(position, positionSymbols)}</strong>
                   <span className={`pill ${position.trade_type === 'buy' ? 'teal' : 'red'}`}>{position.trade_type} {position.quantity}</span>
                 </div>
                 <div className="position-prices">
@@ -2251,8 +2291,9 @@ function Trade({ selectedAccount, refreshAuth }) {
                   <button
                     className="btn primary"
                     onClick={() => {
-                      const row = findSymbolByInput(position.symbol, symbols);
-                      setOrderSymbol(row?.symbol || position.symbol);
+                      const contract = getPositionOrderSymbol(position, positionSymbols, symbols);
+                      if (!contract) return toast.error('This exact contract is currently unavailable for a new order.');
+                      setOrderSymbol(contract);
                       setShowOrder(true);
                     }}
                   >
@@ -2276,7 +2317,7 @@ function Trade({ selectedAccount, refreshAuth }) {
               <div className="position-card-main">
                 <div>
                   <div className="position-title">
-                    <strong>{getTradeAxisSymbolLabel(order.symbol, symbols)}</strong>
+                    <strong>{getPositionSymbolLabel(order, positionSymbols)}</strong>
                     <span className="pill gold">{order.status || 'pending'}</span>
                   </div>
                   <div className="position-prices">
@@ -2368,7 +2409,7 @@ function Trade({ selectedAccount, refreshAuth }) {
             <tbody>
               {positions.map((position) => (
                 <tr key={position.id}>
-                  <td><strong>{getTradeAxisSymbolLabel(position.symbol, symbols)}</strong><div className="meta">{position.id}</div></td>
+                  <td><strong>{getPositionSymbolLabel(position, positionSymbols)}</strong><div className="meta">{position.id}</div></td>
                   <td><span className={`pill ${position.trade_type === 'buy' ? 'teal' : 'red'}`}>{position.trade_type}</span></td>
                   <td>{position.quantity}</td>
                   <td>{Number(position.open_price || 0).toFixed(2)}</td>
@@ -2395,7 +2436,7 @@ function Trade({ selectedAccount, refreshAuth }) {
         <div className="list">
           {orders.map((order) => (
             <div className="row" key={order.id}>
-              <div><strong>{getTradeAxisSymbolLabel(order.symbol, symbols)}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
+              <div><strong>{getPositionSymbolLabel(order, positionSymbols)}</strong><div className="meta">{order.order_type} at {Number(order.price || 0).toFixed(2)}</div></div>
               <div className="action-row">
                 <span className="pill gold">{order.status}</span>
                 <button className="btn subtle" onClick={() => cancelOrder(order.id)}>Cancel</button>
