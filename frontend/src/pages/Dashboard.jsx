@@ -7085,7 +7085,7 @@ const renderOrderConfirmation = () => {
         <div
           className="px-4 py-2 text-xs border-b flex items-center justify-between gap-3"
           style={{
-            borderColor: border,
+            borderColor: theme === 'light' ? '#e2e8f0' : '#363a45',
             background: theme === 'light' ? '#fff7ed' : '#2a2418',
             color: theme === 'light' ? '#9a3412' : '#f5c542',
           }}
