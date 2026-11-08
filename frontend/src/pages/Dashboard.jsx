@@ -1131,7 +1131,9 @@ const Dashboard = () => {
     fetchOpenTrades(selectedAccount.id);
     fetchPendingOrders?.(selectedAccount.id);
     fetchTradeHistory(selectedAccount.id);
-  }, [selectedAccount, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, hydrateOpenTradesSnapshot]);
+  // Balance/equity change on every tick. Only an account identity change may
+  // hydrate saved positions; otherwise live P&L is replaced by the snapshot.
+  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, hydrateOpenTradesSnapshot]);
 
   // ── Fetch deals for history tab ──
   useEffect(() => {
@@ -1143,7 +1145,7 @@ const Dashboard = () => {
           : {}),
       });
     }
-  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchDeals]);
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount?.id, fetchDeals]);
 
   useEffect(() => {
     if (activeTab === 'history' && historyViewMode !== 'deals' && selectedAccount?.id) {
@@ -1154,7 +1156,7 @@ const Dashboard = () => {
           : {}),
       });
     }
-  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchTradeHistory]);
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount?.id, fetchTradeHistory]);
 
   // ── Watchlists init ──
   const watchlistsInitRef = useRef(false);
@@ -1284,17 +1286,6 @@ const Dashboard = () => {
     socketService.subscribe('account:update', onAccountUpdate);
     socketService.subscribe('trade:closed', onTradeClosed);
 
-    // ✅ Subscribe watchlist symbols + selected symbol + all open trade symbols
-    const tradeSymbols = (openTrades || []).map(t => t.symbol).filter(Boolean);
-    const subs = Array.from(
-      new Set([...(activeSymbols || []), selectedSymbol, ...tradeSymbols].filter(Boolean))
-    );
-    if (subs.length) {
-      console.log('📡 Subscribing to', subs.length, 'symbols:', subs.slice(0, 10).join(', '), subs.length > 10 ? '...' : '');
-      socketService.subscribeSymbols(subs);
-    }
-    if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
-
     return () => {
       socketService.unsubscribe('price:update');
       socketService.unsubscribe('prices:snapshot');
@@ -1304,7 +1295,21 @@ const Dashboard = () => {
       socketService.unsubscribe('account:update');
       socketService.unsubscribe('trade:closed');
     };
-  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory, openTrades, selectedSymbol]);
+  }, [updatePrice, selectedAccount?.id, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory]);
+
+  // Position prices and account totals change frequently; subscriptions only
+  // change when the account or the set of instruments changes.
+  const subscribedSymbolsKey = JSON.stringify(Array.from(new Set([
+    ...(activeSymbols || []), selectedSymbol, ...(openTrades || []).map(t => t.symbol),
+  ].filter(Boolean))).sort());
+  useEffect(() => {
+    const subs = JSON.parse(subscribedSymbolsKey);
+    if (subs.length) socketService.subscribeSymbols(subs);
+  }, [subscribedSymbolsKey]);
+
+  useEffect(() => {
+    if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
+  }, [selectedAccount?.id]);
 
   useEffect(() => {
     return () => {
@@ -3586,7 +3591,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     if (activeTab === 'history' && historyViewMode === 'orders' && selectedAccount?.id) {
       fetchPendingOrderHistory(selectedAccount.id);
     }
-  }, [activeTab, historyViewMode, selectedAccount, fetchPendingOrderHistory]);
+  }, [activeTab, historyViewMode, selectedAccount?.id, fetchPendingOrderHistory]);
 
   // History memos (lifted from HistoryTab)
   const historyUniqueSymbols = useMemo(() => {

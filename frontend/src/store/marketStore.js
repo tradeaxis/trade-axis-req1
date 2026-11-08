@@ -153,6 +153,15 @@ const useMarketStore = create((set, get) => ({
             timestamp: s.last_update ? new Date(s.last_update).getTime() : now,
             source:    'db',
           };
+          // Read the current state after the request: ticks may have arrived
+          // while the catalogue was loading. Keep the newer exact-contract
+          // stream quote, including its original freshness timestamp.
+          const live = get().quotes[s.symbol];
+          if (marketOpen && (live?.source === 'kite' || live?.source === 'socket')
+            && hasMatchingQuoteIdentity(s.symbol, live, quotes[s.symbol], symbols)
+            && (!s.last_update || live.timestamp >= quotes[s.symbol].timestamp)) {
+            quotes[s.symbol] = { ...quotes[s.symbol], ...live };
+          }
         });
 
         const nextState = {
@@ -345,7 +354,10 @@ const useMarketStore = create((set, get) => ({
           off_quotes:     Boolean(q.off_quotes),
         };
 
-        if (!hasMatchingQuoteIdentity(sym, quote, existing, get().symbols)) return existing || null;
+        const latest = get().quotes[sym];
+        if (!hasMatchingQuoteIdentity(sym, quote, latest, get().symbols)) return latest || null;
+        if (isMarketOpenNow(sym) && (latest?.source === 'kite' || latest?.source === 'socket')
+          && latest.timestamp >= quote.timestamp) return latest;
 
         const nextState = {
           quotes: { ...get().quotes, [sym]: quote },
