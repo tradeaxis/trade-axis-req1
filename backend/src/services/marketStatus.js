@@ -1,6 +1,6 @@
 // backend/src/services/marketStatus.js
 const { supabase } = require('../config/supabase');
-const { equityHolidays, commoditySessions, specialTradingSessions } = require('../config/exchangeCalendar');
+const { equityHolidays, commoditySessions } = require('../config/exchangeCalendar');
 
 let isMarketHoliday = false;
 let holidayMessage = '';
@@ -121,7 +121,6 @@ const loadHolidaysFromDB = async () => {
 // ✅ Check if today is a holiday (from cache)
 const isHolidayActiveToday = () => {
   const today = getISTDateString();
-  if (specialTradingSessions[today]) return false;
   return !!equityHolidays[today] || holidaysCache.includes(today);
 };
 
@@ -153,7 +152,7 @@ const getHolidayStatus = () => {
     message: manualActive ? holidayMessage : (equityHolidays[today] || (isHolidayActiveToday() ? 'Market Holiday' : '')),
     date: manualActive ? holidayDate : today,
     segments: manualActive ? holidaySegments : {
-      nseBseClosed: specialTradingSessions[today] ? !isMarketOpen('NIFTY', 'NFO') : isHolidayActiveToday(),
+      nseBseClosed: isHolidayActiveToday(),
       mcxClosed: !isMarketOpen('GOLD', 'MCX'),
       mcxMorningOnly: false,
       mcxEveningOnly: !!commoditySessions[today],
@@ -176,28 +175,19 @@ const isCommoditySymbol = (symbol, exchange = null) => {
 };
 
 const isMarketOpen = (symbol = null, exchange = null) => {
-  const special = specialTradingSessions[getISTDateString()];
   // Check manual override first
   if (isMarketHoliday && (!holidayDate || getISTDateString() === holidayDate)) {
     const commodity = isCommoditySymbol(symbol, exchange);
     if (commodity) {
       if (holidaySegments.mcxClosed) return false;
-      if (holidaySegments.mcxMorningOnly && !special) {
+      if (holidaySegments.mcxMorningOnly) {
         const ist = new Date(Date.now() + 5.5 * 3600000);
         const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
         return minutes >= 9 * 60 && minutes < 17 * 60;
       }
-      if (!special) return true;
+      return true;
     }
-    if (!commodity && holidaySegments.nseBseClosed) return false;
-  }
-  // Respect explicit admin closures, then override the holiday/weekend checks
-  // only during this date's published continuous trading session.
-  if (special) {
-    const session = special[isCommoditySymbol(symbol, exchange) ? 'commodity' : 'equity'];
-    const ist = new Date(Date.now() + 5.5 * 3600000);
-    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-    return minute >= session.openMinute && minute < session.closeMinute;
+    if (holidaySegments.nseBseClosed) return false;
   }
   
   // Check Kite holidays

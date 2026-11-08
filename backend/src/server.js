@@ -509,17 +509,6 @@ const startServer = async () => {
     );
     console.log('Closing price snapshots scheduled: 15:40:20/15:41/15:44 and 23:30:20/23:31/23:34 IST');
 
-    // The dated Sunday session also needs final quotes after each segment closes.
-    for (const [schedule, segment] of [
-      ['20 40 15 8 11 *', 'equity'], ['41,44 15 8 11 *', 'equity'],
-      ['20 30 15 8 11 *', 'commodity'], ['31,34 15 8 11 *', 'commodity'],
-    ]) {
-      nodeCron.schedule(schedule, () => {
-        const date = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
-        if (date === '2026-11-08') return captureClosePrices(segment);
-      }, { timezone: 'Asia/Kolkata' });
-    }
-
     // ── AUTO-DELETE expired Kite token at 6:05 AM IST daily ──────────────────
     nodeCron.schedule(
       '5 6 * * *',

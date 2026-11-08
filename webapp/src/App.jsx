@@ -261,13 +261,6 @@ const firstPositiveNumber = (...values) => {
 };
 
 const isMarketOpenNow = (symbol = '') => {
-  // Muhurat continuous trading only; this exception expires with the IST date.
-  const specialIst = new Date(Date.now() + 5.5 * 3600000);
-  if (specialIst.toISOString().slice(0, 10) === '2026-11-08') {
-    const commodity = /MCX|GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MENTHAOIL/i.test(String(symbol || ''));
-    const minute = specialIst.getUTCHours() * 60 + specialIst.getUTCMinutes();
-    return minute >= 14 * 60 + 20 && minute < 15 * 60 + (commodity ? 30 : 40);
-  }
   const now = new Date();
   const ist = new Date(now.getTime() + (330 + now.getTimezoneOffset()) * 60000);
   const day = ist.getDay();

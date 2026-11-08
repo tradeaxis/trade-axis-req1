@@ -55,13 +55,6 @@ const isUnexpiredContract = (symbol = {}) => {
   return !expiryDate || expiryDate >= getIstDateKey();
 };
 const isMarketOpenNow = (symbol = null) => {
-  // Muhurat continuous trading only; this exception expires with the IST date.
-  const specialIst = new Date(Date.now() + 5.5 * 3600000);
-  if (specialIst.toISOString().slice(0, 10) === '2026-11-08') {
-    const commodity = /MCX|GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MENTHAOIL/i.test(String(symbol || ''));
-    const minute = specialIst.getUTCHours() * 60 + specialIst.getUTCMinutes();
-    return minute >= 14 * 60 + 20 && minute < 15 * 60 + (commodity ? 30 : 40);
-  }
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
   const ist = new Date(utcMs + 5.5 * 3600000);
@@ -153,15 +146,6 @@ const useMarketStore = create((set, get) => ({
             timestamp: s.last_update ? new Date(s.last_update).getTime() : now,
             source:    'db',
           };
-          // Read the current state after the request: ticks may have arrived
-          // while the catalogue was loading. Keep the newer exact-contract
-          // stream quote, including its original freshness timestamp.
-          const live = get().quotes[s.symbol];
-          if (marketOpen && (live?.source === 'kite' || live?.source === 'socket')
-            && hasMatchingQuoteIdentity(s.symbol, live, quotes[s.symbol], symbols)
-            && (!s.last_update || live.timestamp >= quotes[s.symbol].timestamp)) {
-            quotes[s.symbol] = { ...quotes[s.symbol], ...live };
-          }
         });
 
         const nextState = {
@@ -354,10 +338,7 @@ const useMarketStore = create((set, get) => ({
           off_quotes:     Boolean(q.off_quotes),
         };
 
-        const latest = get().quotes[sym];
-        if (!hasMatchingQuoteIdentity(sym, quote, latest, get().symbols)) return latest || null;
-        if (isMarketOpenNow(sym) && (latest?.source === 'kite' || latest?.source === 'socket')
-          && latest.timestamp >= quote.timestamp) return latest;
+        if (!hasMatchingQuoteIdentity(sym, quote, existing, get().symbols)) return existing || null;
 
         const nextState = {
           quotes: { ...get().quotes, [sym]: quote },

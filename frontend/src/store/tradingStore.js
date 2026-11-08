@@ -47,9 +47,7 @@ const useTradingStore = create((set, get) => ({
 
   fetchOpenTrades: async (accountId) => {
     if (!accountId) return;
-    // Keep an outage visible while retrying; only a successful response proves
-    // recovery. Clearing this here makes the banner flicker on failed retries.
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, positionsError: null });
     try {
       const response = await api.get(`/trading/positions/${accountId}`);
       if (response.data.success) {

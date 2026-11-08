@@ -632,13 +632,6 @@ const buildHistoryPositionGroups = (closedTrades = []) => {
 };
 // ============ MARKET HOURS CHECK (frontend) ============
 const isMarketOpenNow = (symbol = null) => {
-  // Muhurat continuous trading only; this exception expires with the IST date.
-  const specialIst = new Date(Date.now() + 5.5 * 3600000);
-  if (specialIst.toISOString().slice(0, 10) === '2026-11-08') {
-    const commodity = /MCX|GOLD|SILVER|CRUDE|NATURALGAS|COPPER|ZINC|ALUMINIUM|LEAD|NICKEL|COTTON|MENTHAOIL/i.test(String(symbol || ''));
-    const minute = specialIst.getUTCHours() * 60 + specialIst.getUTCMinutes();
-    return minute >= 14 * 60 + 20 && minute < 15 * 60 + (commodity ? 30 : 40);
-  }
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
   const ist = new Date(utcMs + 5.5 * 3600000);
@@ -1131,9 +1124,7 @@ const Dashboard = () => {
     fetchOpenTrades(selectedAccount.id);
     fetchPendingOrders?.(selectedAccount.id);
     fetchTradeHistory(selectedAccount.id);
-  // Balance/equity change on every tick. Only an account identity change may
-  // hydrate saved positions; otherwise live P&L is replaced by the snapshot.
-  }, [selectedAccount?.id, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, hydrateOpenTradesSnapshot]);
+  }, [selectedAccount, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory, hydrateOpenTradesSnapshot]);
 
   // ── Fetch deals for history tab ──
   useEffect(() => {
@@ -1145,7 +1136,7 @@ const Dashboard = () => {
           : {}),
       });
     }
-  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount?.id, fetchDeals]);
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchDeals]);
 
   useEffect(() => {
     if (activeTab === 'history' && historyViewMode !== 'deals' && selectedAccount?.id) {
@@ -1156,7 +1147,7 @@ const Dashboard = () => {
           : {}),
       });
     }
-  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount?.id, fetchTradeHistory]);
+  }, [activeTab, historyViewMode, historyPeriod, historyCustomRange.from, historyCustomRange.to, selectedAccount, fetchTradeHistory]);
 
   // ── Watchlists init ──
   const watchlistsInitRef = useRef(false);
@@ -1286,6 +1277,17 @@ const Dashboard = () => {
     socketService.subscribe('account:update', onAccountUpdate);
     socketService.subscribe('trade:closed', onTradeClosed);
 
+    // ✅ Subscribe watchlist symbols + selected symbol + all open trade symbols
+    const tradeSymbols = (openTrades || []).map(t => t.symbol).filter(Boolean);
+    const subs = Array.from(
+      new Set([...(activeSymbols || []), selectedSymbol, ...tradeSymbols].filter(Boolean))
+    );
+    if (subs.length) {
+      console.log('📡 Subscribing to', subs.length, 'symbols:', subs.slice(0, 10).join(', '), subs.length > 10 ? '...' : '');
+      socketService.subscribeSymbols(subs);
+    }
+    if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
+
     return () => {
       socketService.unsubscribe('price:update');
       socketService.unsubscribe('prices:snapshot');
@@ -1295,21 +1297,7 @@ const Dashboard = () => {
       socketService.unsubscribe('account:update');
       socketService.unsubscribe('trade:closed');
     };
-  }, [updatePrice, selectedAccount?.id, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory]);
-
-  // Position prices and account totals change frequently; subscriptions only
-  // change when the account or the set of instruments changes.
-  const subscribedSymbolsKey = JSON.stringify(Array.from(new Set([
-    ...(activeSymbols || []), selectedSymbol, ...(openTrades || []).map(t => t.symbol),
-  ].filter(Boolean))).sort());
-  useEffect(() => {
-    const subs = JSON.parse(subscribedSymbolsKey);
-    if (subs.length) socketService.subscribeSymbols(subs);
-  }, [subscribedSymbolsKey]);
-
-  useEffect(() => {
-    if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
-  }, [selectedAccount?.id]);
+  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch, fetchOpenTrades, fetchTradeHistory, openTrades, selectedSymbol]);
 
   useEffect(() => {
     return () => {
@@ -3591,7 +3579,7 @@ const placeOrderWithQty = async (type, qty, execType = 'instant', execPrice = 0)
     if (activeTab === 'history' && historyViewMode === 'orders' && selectedAccount?.id) {
       fetchPendingOrderHistory(selectedAccount.id);
     }
-  }, [activeTab, historyViewMode, selectedAccount?.id, fetchPendingOrderHistory]);
+  }, [activeTab, historyViewMode, selectedAccount, fetchPendingOrderHistory]);
 
   // History memos (lifted from HistoryTab)
   const historyUniqueSymbols = useMemo(() => {
@@ -7097,7 +7085,7 @@ const renderOrderConfirmation = () => {
         <div
           className="px-4 py-2 text-xs border-b flex items-center justify-between gap-3"
           style={{
-            borderColor: theme === 'light' ? '#e2e8f0' : '#363a45',
+            borderColor: border,
             background: theme === 'light' ? '#fff7ed' : '#2a2418',
             color: theme === 'light' ? '#9a3412' : '#f5c542',
           }}
