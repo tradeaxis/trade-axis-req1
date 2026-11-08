@@ -25,4 +25,14 @@ const commoditySessions = {
   '2026-10-20': { openMinute: 17 * 60, closeMinute: 23 * 60 + 30 },
 };
 
-module.exports = { equityHolidays, commoditySessions };
+// One dated exception, in IST. Normal trading only (exclude pre-open).
+// NSE: https://nsearchives.nseindia.com/content/circulars/FAOP76940.pdf
+// MCX: circular MCX/TRD/590/2026, October 19, 2026.
+const specialTradingSessions = {
+  '2026-11-08': {
+    equity: { openMinute: 14 * 60 + 20, closeMinute: 15 * 60 + 40 },
+    commodity: { openMinute: 14 * 60 + 20, closeMinute: 15 * 60 + 30 },
+  },
+};
+
+module.exports = { equityHolidays, commoditySessions, specialTradingSessions };

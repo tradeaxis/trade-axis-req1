@@ -2,6 +2,7 @@ const { supabase } = require('../config/supabase');
 const kiteService = require('./kiteService');
 const { isCommoditySymbol } = require('./marketStatus');
 const { readAllRows } = require('../utils/readAllRows');
+const { specialTradingSessions } = require('../config/exchangeCalendar');
 
 const QUOTE_BATCH_SIZE = Number(process.env.KITE_CLOSE_SNAPSHOT_BATCH_SIZE || 250);
 const QUOTE_BATCH_DELAY_MS = Number(process.env.KITE_CLOSE_SNAPSHOT_BATCH_DELAY_MS || 1100);
@@ -185,6 +186,16 @@ class ClosePriceSnapshotService {
   }
 
   async captureClosedSegmentsNow() {
+    const specialIst = new Date(Date.now() + 5.5 * 3600000);
+    const special = specialTradingSessions[specialIst.toISOString().slice(0, 10)];
+    if (special) {
+      const minute = specialIst.getUTCHours() * 60 + specialIst.getUTCMinutes();
+      const results = [];
+      for (const segment of ['equity', 'commodity']) {
+        if (minute >= special[segment].closeMinute) results.push(await this.capture(segment));
+      }
+      return results;
+    }
     const now = new Date();
     const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
     const ist = new Date(utcMs + 5.5 * 3600000);
